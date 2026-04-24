@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react'
 import { HydrologyStats } from './HydrologyStats/HydrologyStats'
+import { GlobeViewer } from './GlobeViewer/GlobeViewer'
 import { MediaGallery } from './MediaGallery/MediaGallery'
 import { MapViewer } from './MapViewer/MapViewer'
 import './Dashboard.css'
@@ -7,6 +8,7 @@ import './Dashboard.css'
 const NAV_ITEMS = [
   { id: 'overview', label: 'Dashboard Overview', icon: 'fa-solid fa-chart-line' },
   { id: 'map', label: 'Map Viewer', icon: 'fa-solid fa-map-location-dot' },
+  { id: 'globe', label: 'Globe View', icon: 'fa-solid fa-earth-asia' },
   { id: 'analysis', label: 'Hydrology Analysis', icon: 'fa-solid fa-droplet' },
   { id: 'media', label: 'Media Gallery', icon: 'fa-solid fa-images' },
   { id: 'issues', label: 'Issue Tracker', icon: 'fa-solid fa-clipboard-list' },
@@ -212,6 +214,8 @@ export function Dashboard() {
                 <h2 className="ds-map-toolbar__title">
                   {activeId === 'analysis'
                     ? 'Hydrology analysis workspace'
+                    : activeId === 'globe'
+                      ? '3D globe workspace'
                     : activeId === 'media'
                       ? 'Project media gallery'
                       : 'Live map canvas'}
@@ -219,6 +223,8 @@ export function Dashboard() {
                 <span className="ds-map-toolbar__badge">
                   {activeId === 'analysis'
                     ? 'Stats · Map'
+                    : activeId === 'globe'
+                      ? 'CesiumJS · 3D'
                     : activeId === 'media'
                       ? 'Images · Videos'
                       : 'React Leaflet'}
@@ -242,6 +248,14 @@ export function Dashboard() {
                 </div>
               ) : activeId === 'media' ? (
                 <MediaGallery />
+              ) : activeId === 'globe' ? (
+                <div
+                  className="ds-map-body"
+                  role="region"
+                  aria-label="3D globe viewer"
+                >
+                  <GlobeViewer />
+                </div>
               ) : (
                 <div
                   className="ds-map-body"

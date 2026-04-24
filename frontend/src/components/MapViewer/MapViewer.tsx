@@ -261,7 +261,7 @@ function MapPane({
       {showFloodLayer ? (
         <TileLayer
           key={`flood-${floodPeriod}-${floodUrl}`}
-          url={floodUrl}
+          url={floodUrl!}
           opacity={floodOpacity}
           maxZoom={22}
           maxNativeZoom={20}

@@ -9,8 +9,12 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel
 
-# Map tiles, ortho, DEM, videos, etc. (served under /tiles for the React app).
-LOCAL_DATA_PATH = r"D:/Codings/Hydrology Data Portal React Version/Project_Data"
+# Map tiles, ortho, DEM, terrain quantized-mesh, videos, etc. (served under /tiles).
+# Keep overridable so frontend viewers (Leaflet/Cesium) can fetch local datasets.
+LOCAL_DATA_PATH = os.getenv(
+    "LOCAL_DATA_PATH",
+    r"D:/Codings/Hydrology Data Portal React Version/Project_Data",
+)
 ISSUES_DB_PATH = Path(LOCAL_DATA_PATH) / "issues.db"
 
 Path(LOCAL_DATA_PATH).mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,109 @@
+.gv-root {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: radial-gradient(circle at 20% 20%, #0b2032 0%, #030711 70%);
+  font-family: 'Montserrat', sans-serif;
+}
+
+.gv-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.gv-panel {
+  position: absolute;
+  top: 1rem;
+  left: 1rem;
+  width: min(320px, calc(100% - 2rem));
+  padding: 1rem;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: linear-gradient(
+    145deg,
+    rgba(14, 62, 73, 0.42),
+    rgba(14, 20, 30, 0.58)
+  );
+  box-shadow:
+    0 8px 28px rgba(2, 6, 23, 0.46),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(10px);
+  z-index: 20;
+  color: #f8fafc;
+}
+
+.gv-panel__title {
+  margin: 0 0 0.85rem;
+  font-size: 0.9rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.gv-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 0.8rem;
+  font-size: 0.78rem;
+}
+
+.gv-field input[type='range'] {
+  accent-color: #0e3e49;
+}
+
+.gv-field strong {
+  font-size: 0.74rem;
+  color: #bfdbfe;
+}
+
+.gv-field select {
+  height: 2.1rem;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(14, 62, 73, 0.55);
+  color: #f8fafc;
+  padding: 0 0.65rem;
+  font-family: 'Montserrat', sans-serif;
+}
+
+.gv-file-input {
+  display: none;
+}
+
+.gv-upload {
+  width: 100%;
+  border: 1px solid rgba(14, 62, 73, 0.9);
+  background: #0e3e49;
+  color: #fff;
+  border-radius: 10px;
+  height: 2.25rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-family: 'Montserrat', sans-serif;
+  cursor: pointer;
+}
+
+.gv-upload:hover {
+  background: #135160;
+}
+
+.gv-nav-readout {
+  position: absolute;
+  right: 1rem;
+  bottom: 1rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(5, 14, 25, 0.68);
+  color: #f8fafc;
+  font-size: 0.76rem;
+  letter-spacing: 0.02em;
+  z-index: 20;
+}
