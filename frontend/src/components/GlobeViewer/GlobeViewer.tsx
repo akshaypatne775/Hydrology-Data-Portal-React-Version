@@ -3,6 +3,8 @@ import * as Cesium from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 import './GlobeViewer.css'
 
+Cesium.Ion.defaultAccessToken = ''
+
 type ColorMode = 'RGB' | 'Elevation'
 
 type GlobePosition = {
@@ -39,7 +41,6 @@ export function GlobeViewer() {
     if (!host) return
     const terrainUrl = `${TILE_ROOT}/terrain`
     const hasTerrain = Boolean(terrainUrl)
-    Cesium.Ion.defaultAccessToken = ''
 
     const viewer = new Cesium.Viewer(host, {
       animation: false,
@@ -52,13 +53,15 @@ export function GlobeViewer() {
       infoBox: false,
       selectionIndicator: false,
       shouldAnimate: true,
-      baseLayer: new Cesium.ImageryLayer(
-        new Cesium.OpenStreetMapImageryProvider({
-          url: 'https://a.tile.openstreetmap.org/',
-        }),
-      ),
-    })
+      imageryProvider: false,
+    } as Cesium.Viewer.ConstructorOptions)
     viewerRef.current = viewer
+    viewer.imageryLayers.removeAll()
+    viewer.imageryLayers.addImageryProvider(
+      new Cesium.OpenStreetMapImageryProvider({
+        url: 'https://a.tile.openstreetmap.org/',
+      }),
+    )
 
     if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = true
     if (viewer.scene.sun) viewer.scene.sun.show = true
