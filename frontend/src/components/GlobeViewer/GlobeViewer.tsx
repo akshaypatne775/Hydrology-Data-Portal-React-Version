@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import * as Cesium from 'cesium'
+import 'cesium/Build/Cesium/Widgets/widgets.css'
 import './GlobeViewer.css'
 
 type ColorMode = 'RGB' | 'Elevation'
@@ -13,6 +15,7 @@ const TILE_ROOT = 'http://localhost:8000/tiles'
 
 export function GlobeViewer() {
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const viewerRef = useRef<Cesium.Viewer | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [pointSize, setPointSize] = useState(3)
   const [colorMode, setColorMode] = useState<ColorMode>('RGB')
@@ -33,10 +36,7 @@ export function GlobeViewer() {
 
   useEffect(() => {
     const host = containerRef.current
-    const cesiumWindow = window as Window & { Cesium?: any }
-    if (!host || !cesiumWindow.Cesium) return
-
-    const Cesium = cesiumWindow.Cesium
+    if (!host) return
     const terrainUrl = `${TILE_ROOT}/terrain`
     const hasTerrain = Boolean(terrainUrl)
 
@@ -51,21 +51,19 @@ export function GlobeViewer() {
       infoBox: false,
       selectionIndicator: false,
       shouldAnimate: true,
-      imageryProvider: new Cesium.OpenStreetMapImageryProvider({
-        url: 'https://tile.openstreetmap.org/',
-      }),
     })
+    viewerRef.current = viewer
 
-    viewer.scene.skyAtmosphere.show = true
-    viewer.scene.sun.show = true
-    viewer.scene.moon.show = true
-    viewer.scene.skyBox.show = true
+    if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = true
+    if (viewer.scene.sun) viewer.scene.sun.show = true
+    if (viewer.scene.moon) viewer.scene.moon.show = true
+    viewer.scene.skyBox = Cesium.SkyBox.createEarthSkyBox()
     viewer.scene.globe.enableLighting = true
     viewer.scene.backgroundColor = Cesium.Color.BLACK
 
     if (hasTerrain && Cesium.CesiumTerrainProvider?.fromUrl) {
       void Cesium.CesiumTerrainProvider.fromUrl(terrainUrl)
-        .then((terrainProvider: unknown) => {
+        .then((terrainProvider: Cesium.TerrainProvider) => {
           viewer.terrainProvider = terrainProvider
         })
         .catch(() => {
@@ -74,7 +72,7 @@ export function GlobeViewer() {
     }
 
     const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas)
-    handler.setInputAction((movement: { endPosition: unknown }) => {
+    handler.setInputAction((movement: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
       const cartesian = viewer.camera.pickEllipsoid(
         movement.endPosition,
         viewer.scene.globe.ellipsoid,
@@ -94,7 +92,8 @@ export function GlobeViewer() {
 
     return () => {
       handler.destroy()
-      viewer.destroy()
+      viewerRef.current?.destroy()
+      viewerRef.current = null
     }
   }, [])
 
