@@ -250,7 +250,7 @@ export function Dashboard() {
                 <MediaGallery />
               ) : activeId === 'globe' ? (
                 <div
-                  className="ds-map-body"
+                  className="ds-map-body ds-map-body--globe"
                   role="region"
                   aria-label="3D globe viewer"
                 >

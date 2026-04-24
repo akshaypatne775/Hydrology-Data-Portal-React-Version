@@ -3,8 +3,6 @@ import * as Cesium from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 import './GlobeViewer.css'
 
-Cesium.Ion.defaultAccessToken = ''
-
 type ColorMode = 'RGB' | 'Elevation'
 
 type GlobePosition = {
@@ -39,6 +37,9 @@ export function GlobeViewer() {
   useEffect(() => {
     const host = containerRef.current
     if (!host) return
+    if (viewerRef.current) return
+    Cesium.Ion.defaultAccessToken =
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJmZjJlY2ZiYS00YjMzLTQ4ZmItYTg2OS0xNzIxMTdlNmFjOGIiLCJpZCI6MjI4NzAwLCJpYXQiOjE3NzcwMzUwNDh9.WszYYlpf15mOodKpn82U6EMlW1EU4txZIT-FsDdVNuA'
     const terrainUrl = `${TILE_ROOT}/terrain`
     const hasTerrain = Boolean(terrainUrl)
 
@@ -46,22 +47,14 @@ export function GlobeViewer() {
       animation: false,
       timeline: false,
       sceneModePicker: true,
-      baseLayerPicker: false,
       geocoder: false,
       homeButton: true,
       navigationHelpButton: true,
       infoBox: false,
       selectionIndicator: false,
       shouldAnimate: true,
-      imageryProvider: false,
     } as Cesium.Viewer.ConstructorOptions)
     viewerRef.current = viewer
-    viewer.imageryLayers.removeAll()
-    viewer.imageryLayers.addImageryProvider(
-      new Cesium.OpenStreetMapImageryProvider({
-        url: 'https://a.tile.openstreetmap.org/',
-      }),
-    )
 
     if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = true
     if (viewer.scene.sun) viewer.scene.sun.show = false
@@ -102,7 +95,7 @@ export function GlobeViewer() {
 
     return () => {
       handler.destroy()
-      viewerRef.current?.destroy()
+      viewer.destroy()
       viewerRef.current = null
     }
   }, [])

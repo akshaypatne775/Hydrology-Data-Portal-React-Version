@@ -470,6 +470,15 @@
   position: relative;
 }
 
+.ds-map-body--globe {
+  min-height: min(64dvh, 620px);
+}
+
+.ds-map-body--globe > .d3d-viewer-wrapper {
+  flex: 1;
+  min-height: 0;
+}
+
 .ds-map-shell--analysis {
   min-height: min(82dvh, 780px);
 }
