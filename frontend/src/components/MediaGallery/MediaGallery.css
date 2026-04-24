@@ -1,0 +1,81 @@
+.mg-root {
+  width: 100%;
+}
+
+.mg-header {
+  margin-bottom: 1rem;
+}
+
+.mg-title,
+.mg-state {
+  font-family: 'Montserrat', sans-serif;
+}
+
+.mg-title {
+  margin: 0;
+  color: #0e3e49;
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.mg-state {
+  margin: 0.5rem 0 0;
+  color: #24484f;
+}
+
+.mg-state--error {
+  color: #9f1239;
+}
+
+.mg-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-auto-flow: dense;
+  gap: 0.9rem;
+  align-items: start;
+}
+
+.mg-card {
+  background: #ffffff;
+  border: 1px solid rgba(14, 62, 73, 0.25);
+  border-radius: 12px;
+  overflow: hidden;
+  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.mg-card:hover {
+  border-color: #0e3e49;
+  box-shadow: 0 6px 18px rgba(14, 62, 73, 0.2);
+  transform: translateY(-2px);
+}
+
+.mg-card--image {
+  grid-row: span 1;
+}
+
+.mg-card--video {
+  grid-row: span 2;
+}
+
+.mg-media {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #e6eff1;
+}
+
+.mg-name {
+  margin: 0;
+  padding: 0.65rem 0.75rem 0.75rem;
+  font-size: 0.85rem;
+  color: #204149;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 640px) {
+  .mg-grid {
+    grid-template-columns: 1fr;
+  }
+}
