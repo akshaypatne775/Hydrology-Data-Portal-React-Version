@@ -39,6 +39,7 @@ export function GlobeViewer() {
     if (!host) return
     const terrainUrl = `${TILE_ROOT}/terrain`
     const hasTerrain = Boolean(terrainUrl)
+    Cesium.Ion.defaultAccessToken = ''
 
     const viewer = new Cesium.Viewer(host, {
       animation: false,
@@ -51,6 +52,11 @@ export function GlobeViewer() {
       infoBox: false,
       selectionIndicator: false,
       shouldAnimate: true,
+      baseLayer: new Cesium.ImageryLayer(
+        new Cesium.OpenStreetMapImageryProvider({
+          url: 'https://a.tile.openstreetmap.org/',
+        }),
+      ),
     })
     viewerRef.current = viewer
 
@@ -98,7 +104,7 @@ export function GlobeViewer() {
   }, [])
 
   return (
-    <div className="gv-root">
+    <div className="gv-root d3d-viewer-wrapper">
       <div className="gv-canvas" ref={containerRef} />
 
       <section className="gv-panel" aria-label="Point cloud controls">
