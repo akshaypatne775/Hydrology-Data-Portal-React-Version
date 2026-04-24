@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react'
 import { HydrologyStats } from './HydrologyStats/HydrologyStats'
-import { GlobeViewer } from './GlobeViewer/GlobeViewer'
+import GlobeViewer from './GlobeViewer/GlobeViewer'
 import { MediaGallery } from './MediaGallery/MediaGallery'
 import { MapViewer } from './MapViewer/MapViewer'
 import './Dashboard.css'

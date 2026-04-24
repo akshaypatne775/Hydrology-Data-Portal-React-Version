@@ -64,10 +64,11 @@ export function GlobeViewer() {
     )
 
     if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = true
-    if (viewer.scene.sun) viewer.scene.sun.show = true
+    if (viewer.scene.sun) viewer.scene.sun.show = false
     if (viewer.scene.moon) viewer.scene.moon.show = true
     viewer.scene.skyBox = Cesium.SkyBox.createEarthSkyBox()
-    viewer.scene.globe.enableLighting = true
+    viewer.scene.globe.enableLighting = false
+    viewer.scene.highDynamicRange = false
     viewer.scene.backgroundColor = Cesium.Color.BLACK
 
     if (hasTerrain && Cesium.CesiumTerrainProvider?.fromUrl) {
