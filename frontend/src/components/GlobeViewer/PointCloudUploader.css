@@ -1,0 +1,82 @@
+.pcu-root {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  width: 100%;
+  font-family: 'Montserrat', sans-serif;
+}
+
+.pcu-dropzone {
+  border: 2px dashed #0e3e49;
+  border-radius: 14px;
+  padding: 1.25rem 1rem;
+  background: rgba(14, 62, 73, 0.05);
+  color: #0e3e49;
+  text-align: center;
+  transition:
+    background 0.2s ease,
+    border-color 0.2s ease,
+    transform 0.2s ease;
+}
+
+.pcu-dropzone--dragging {
+  background: rgba(14, 62, 73, 0.12);
+  border-color: #135160;
+  transform: translateY(-1px);
+}
+
+.pcu-dropzone__title {
+  margin: 0;
+  font-size: 0.88rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.pcu-dropzone__meta {
+  margin: 0.35rem 0 0;
+  font-size: 0.74rem;
+  color: rgba(14, 62, 73, 0.8);
+}
+
+.pcu-progress-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.pcu-progress-track {
+  width: 100%;
+  height: 0.6rem;
+  border-radius: 999px;
+  background: rgba(14, 62, 73, 0.15);
+  overflow: hidden;
+}
+
+.pcu-progress-fill {
+  height: 100%;
+  width: 0;
+  background: #0e3e49;
+  transition: width 0.2s ease;
+}
+
+.pcu-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  font-size: 0.73rem;
+  color: #0e3e49;
+}
+
+.pcu-state {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #0e3e49;
+}
+
+.pcu-state--ok {
+  color: #14532d;
+}
+
+.pcu-state--error {
+  color: #991b1b;
+}

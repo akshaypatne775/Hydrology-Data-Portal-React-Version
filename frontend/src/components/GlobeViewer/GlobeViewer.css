@@ -26,6 +26,7 @@
   left: 0;
   width: 100%;
   height: 100%;
+  min-height: 500px !important;
 }
 
 .gv-panel {
@@ -123,4 +124,71 @@
   font-size: 0.76rem;
   letter-spacing: 0.02em;
   z-index: 20;
+}
+
+.gv-error {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  z-index: 30;
+  max-width: min(440px, calc(100% - 2rem));
+  padding: 0.6rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid rgba(248, 113, 113, 0.8);
+  background: rgba(127, 29, 29, 0.88);
+  color: #fee2e2;
+  font-size: 0.78rem;
+}
+
+.d3d-layer-panel {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  z-index: 24;
+  width: min(260px, calc(100% - 2rem));
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.8rem;
+  border-radius: 12px;
+  border: 1px solid rgba(14, 62, 73, 0.35);
+  background: rgba(240, 248, 250, 0.92);
+  box-shadow: 0 10px 22px rgba(2, 6, 23, 0.24);
+  font-family: 'Montserrat', sans-serif;
+}
+
+.d3d-layer-panel__title {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #0e3e49;
+}
+
+.d3d-layer-panel__btn {
+  border: 1px solid #0e3e49;
+  background: #0e3e49;
+  color: #fff;
+  border-radius: 10px;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.77rem;
+  font-weight: 600;
+  font-family: 'Montserrat', sans-serif;
+  cursor: pointer;
+}
+
+.d3d-layer-panel__btn:hover {
+  background: #135160;
+  border-color: #135160;
+}
+
+.d3d-layer-panel__btn--ghost {
+  background: #e7f2f4;
+  color: #0e3e49;
+}
+
+.d3d-layer-panel__btn--ghost:hover {
+  background: #d1e7eb;
+  border-color: #0e3e49;
 }
