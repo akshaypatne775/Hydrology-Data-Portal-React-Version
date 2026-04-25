@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState, type DragEvent } from 'react'
-import { formatApiNetworkError, getApiBaseUrl } from '../../lib/apiBase'
+import { API_BASE, apiFetch, formatApiNetworkError } from '../../lib/apiBase'
 import './PointCloudUploader.css'
 
 const CHUNK_SIZE_BYTES = 10 * 1024 * 1024
@@ -10,13 +10,15 @@ type CompleteUploadResponse = {
   status?: string
   message?: string
   tileset_url?: string
+  project_id?: string
 }
 
 type PointCloudUploaderProps = {
+  projectId: string
   onUploadComplete?: (tilesetUrl: string, fileName: string) => void
 }
 
-export function PointCloudUploader({ onUploadComplete }: PointCloudUploaderProps) {
+export function PointCloudUploader({ projectId, onUploadComplete }: PointCloudUploaderProps) {
   const [isDragging, setIsDragging] = useState(false)
   const [uploadState, setUploadState] = useState<UploadState>('idle')
   const [progressPercent, setProgressPercent] = useState(0)
@@ -26,8 +28,6 @@ export function PointCloudUploader({ onUploadComplete }: PointCloudUploaderProps
     () => `${Math.max(0, Math.min(100, Math.round(progressPercent)))}%`,
     [progressPercent],
   )
-
-  const apiBase = useMemo(() => getApiBaseUrl(), [])
 
   const uploadFileInChunks = useCallback(
     async (file: File) => {
@@ -45,11 +45,12 @@ export function PointCloudUploader({ onUploadComplete }: PointCloudUploaderProps
 
           const chunkForm = new FormData()
           chunkForm.append('filename', file.name)
+          chunkForm.append('project_id', projectId)
           chunkForm.append('chunkIndex', String(chunkIndex))
           chunkForm.append('totalChunks', String(totalChunks))
           chunkForm.append('chunk', chunk, `${file.name}.part.${chunkIndex}`)
 
-          const chunkResponse = await fetch(`${apiBase}/api/upload-chunk`, {
+          const chunkResponse = await apiFetch('/api/upload-chunk', {
             method: 'POST',
             body: chunkForm,
           })
@@ -62,13 +63,12 @@ export function PointCloudUploader({ onUploadComplete }: PointCloudUploaderProps
           setProgressPercent(nextPercent)
         }
 
-        const projectId = `${file.name.replace(/[^a-zA-Z0-9_-]/g, '-')}-${Date.now()}`
         const completePayload = {
           filename: file.name,
           totalChunks,
           project_id: projectId,
         }
-        const completeResponse = await fetch(`${apiBase}/api/complete-upload`, {
+        const completeResponse = await apiFetch('/api/complete-upload', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(completePayload),
@@ -79,21 +79,21 @@ export function PointCloudUploader({ onUploadComplete }: PointCloudUploaderProps
         }
 
         const completeData = (await completeResponse.json()) as CompleteUploadResponse
+        const resolvedProjectId = completeData.project_id || projectId
+        const resolvedTilesetUrl =
+          completeData.tileset_url && completeData.tileset_url !== 'PENDING'
+            ? completeData.tileset_url
+            : `${API_BASE}/tiles/pointclouds/${encodeURIComponent(resolvedProjectId)}/tileset.json`
+
         setUploadState('success')
-        setStatusText(
-          completeData.tileset_url
-            ? `Upload complete. Tileset: ${completeData.tileset_url}`
-            : 'Upload complete. Merge request sent successfully.',
-        )
-        if (completeData.tileset_url) {
-          onUploadComplete?.(completeData.tileset_url, file.name)
-        }
+        setStatusText(`Upload complete. Tileset: ${resolvedTilesetUrl}`)
+        onUploadComplete?.(resolvedTilesetUrl, file.name)
       } catch (error) {
         setUploadState('error')
-        setStatusText(formatApiNetworkError(apiBase, error))
+        setStatusText(formatApiNetworkError(API_BASE, error))
       }
     },
-    [apiBase, onUploadComplete],
+    [onUploadComplete, projectId],
   )
 
   const onDropFile = useCallback(

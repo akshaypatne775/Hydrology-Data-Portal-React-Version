@@ -31,6 +31,32 @@ export function getApiBaseUrl(): string {
   }
 }
 
+/** Deployment-ready API origin resolved from environment. */
+export const API_BASE = getApiBaseUrl()
+
+export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`
+  return fetch(`${API_BASE}${normalizedPath}`, {
+    credentials: 'include',
+    ...init,
+  })
+}
+
+export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const res = await apiFetch(path, init)
+  if (!res.ok) {
+    let detail = `Request failed (${res.status})`
+    try {
+      const data = (await res.json()) as { detail?: string }
+      if (data?.detail) detail = data.detail
+    } catch {
+      // no-op: keep default detail
+    }
+    throw new Error(detail)
+  }
+  return (await res.json()) as T
+}
+
 /** Human-readable hint when fetch fails (backend down, wrong host, CORS, etc.). */
 export function formatApiNetworkError(apiBase: string, cause: unknown): string {
   const isTypeError = cause instanceof TypeError

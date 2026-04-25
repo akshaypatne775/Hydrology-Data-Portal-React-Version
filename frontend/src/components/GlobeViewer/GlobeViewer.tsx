@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as Cesium from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
-import { getApiBaseUrl } from '../../lib/apiBase'
+import { API_BASE, apiFetch } from '../../lib/apiBase'
 import {
   buildXyzTemplate,
   getTileBaseUrl,
@@ -45,13 +45,12 @@ function projectIdFromTilesetUrl(tilesetUrl: string): string | null {
 
 async function waitForPointCloudTileset(tilesetUrl: string): Promise<void> {
   const start = Date.now()
-  const apiOrigin = new URL(tilesetUrl).origin
   const projectId = projectIdFromTilesetUrl(tilesetUrl)
 
   while (Date.now() - start < TILESET_MAX_WAIT_MS) {
     if (projectId) {
-      const res = await fetch(
-        `${apiOrigin}/api/pointcloud-status/${encodeURIComponent(projectId)}`,
+      const res = await apiFetch(
+        `/api/pointcloud-status/${encodeURIComponent(projectId)}`,
         { cache: 'no-store' },
       )
       if (res.ok) {
@@ -70,7 +69,11 @@ async function waitForPointCloudTileset(tilesetUrl: string): Promise<void> {
         }
       }
     } else {
-      const res = await fetch(tilesetUrl, { method: 'HEAD', cache: 'no-store' })
+      const res = await fetch(tilesetUrl, {
+        method: 'HEAD',
+        cache: 'no-store',
+        credentials: 'include',
+      })
       if (res.ok) {
         return
       }
@@ -102,11 +105,12 @@ function buildPointCloudStyle(pointSize: number, colorMode: ColorMode): Cesium.C
   })
 }
 
-export function GlobeViewer() {
-  const tileRoot = useMemo(
-    () => (getTileBaseUrl() ?? `${getApiBaseUrl()}/tiles`).replace(/\/+$/, ''),
-    [],
-  )
+type GlobeViewerProps = {
+  projectId: string
+}
+
+export function GlobeViewer({ projectId }: GlobeViewerProps) {
+  const tileRoot = useMemo(() => (getTileBaseUrl() ?? `${API_BASE}/tiles`).replace(/\/+$/, ''), [])
   const containerRef = useRef<HTMLDivElement | null>(null)
   const viewerRef = useRef<Cesium.Viewer | null>(null)
   const pointCloudRef = useRef<Cesium.Cesium3DTileset | null>(null)
@@ -224,6 +228,13 @@ export function GlobeViewer() {
       console.error('Orthomosaic load failed:', error)
     }
   }, [])
+
+  useEffect(() => {
+    setUploadedTilesets([])
+    setSelectedTilesetUrl('')
+    setViewerError(null)
+    setPipelineNotice(null)
+  }, [projectId])
 
   useEffect(() => {
     const tileset = pointCloudRef.current
@@ -390,7 +401,7 @@ export function GlobeViewer() {
           {uploadLabel}
         </button>
 
-        <PointCloudUploader onUploadComplete={handleUploadComplete} />
+        <PointCloudUploader projectId={projectId} onUploadComplete={handleUploadComplete} />
       </section>
 
       <section className="d3d-layer-panel" aria-label="Data layer actions">
@@ -429,7 +440,7 @@ export function GlobeViewer() {
         <button
           type="button"
           className="d3d-layer-panel__btn"
-          onClick={() => loadPointCloud(`${tileRoot}/pointclouds/sample/tileset.json`)}
+          onClick={() => loadPointCloud(`${tileRoot}/pointclouds/${projectId}/tileset.json`)}
         >
           Load Sample LAS Data
         </button>

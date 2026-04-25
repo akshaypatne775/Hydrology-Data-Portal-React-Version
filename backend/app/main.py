@@ -1,14 +1,27 @@
 import asyncio
+import base64
 import hashlib
+import hmac
 import os
 import re
+import secrets
 import shutil
 import subprocess
 from pathlib import Path
 import sqlite3
 import json
+from datetime import datetime, timezone
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import laspy
@@ -30,6 +43,12 @@ DISK_HEADROOM_BYTES = int(os.getenv("UPLOAD_DISK_HEADROOM_MB", "512")) * 1024 * 
 MERGE_COPY_BUFFER_BYTES = 8 * 1024 * 1024  # streaming merge, avoid loading whole file in RAM
 POINTCLOUD_SRS_IN = os.getenv("POINTCLOUD_SRS_IN", "").strip()
 POINTCLOUD_SRS_OUT = os.getenv("POINTCLOUD_SRS_OUT", "4978").strip()
+SESSION_COOKIE_NAME = "droid_cloud_session"
+SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "604800"))
+SESSION_SIGNING_SECRET = os.getenv(
+    "SESSION_SIGNING_SECRET",
+    "change-this-secret-for-production",
+).encode("utf-8")
 
 app = FastAPI(
     title="Hydrology & Mapping Portal API",
@@ -105,6 +124,28 @@ class CompleteUploadPayload(BaseModel):
     project_id: str = "default-project"
 
 
+class AuthPayload(BaseModel):
+    email: str
+    password: str
+
+
+class ProjectCreatePayload(BaseModel):
+    name: str
+    location: str
+    date: str
+    status: str
+    type: str
+
+
+class ProjectOut(BaseModel):
+    id: str
+    name: str
+    location: str
+    date: str
+    status: str
+    type: str
+
+
 def _safe_pointcloud_basename(filename: str) -> str:
     """Reject path traversal; only allow simple .las / .laz names."""
     base = os.path.basename(filename.strip())
@@ -120,11 +161,11 @@ def _safe_pointcloud_basename(filename: str) -> str:
     return base
 
 
-def _upload_session_dir(filename: str, total_chunks: int) -> Path:
+def _upload_session_dir(filename: str, total_chunks: int, project_id: str) -> Path:
     """Stable temp folder for one logical upload (same as frontend chunk sequence)."""
     safe_name = _safe_pointcloud_basename(filename)
     digest = hashlib.sha256(
-        f"{safe_name}\0{total_chunks}".encode("utf-8"),
+        f"{project_id}\0{safe_name}\0{total_chunks}".encode("utf-8"),
     ).hexdigest()
     return Path(LOCAL_DATA_PATH) / "uploads" / "chunks" / digest
 
@@ -182,10 +223,10 @@ def _normalize_tileset_into_output_root(output_dir: Path) -> None:
         pass
 
 
-def _run_py3dtiles_conversion(input_file: Path, output_dir: Path) -> None:
+async def process_pointcloud_background(final_path: Path, output_dir: Path) -> None:
     """
     Background conversion worker:
-    py3dtiles convert <input_file> --out <output_dir>
+    py3dtiles convert <final_path> --out <output_dir>
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     err_path = output_dir / ".conversion_error.txt"
@@ -195,12 +236,12 @@ def _run_py3dtiles_conversion(input_file: Path, output_dir: Path) -> None:
     cmd = [
         "py3dtiles",
         "convert",
-        str(input_file),
+        str(final_path),
         "--out",
         str(output_dir),
     ]
     # Optional CRS reprojection for local/projected LAS sources.
-    srs_in = POINTCLOUD_SRS_IN or _detect_input_srs(input_file) or ""
+    srs_in = POINTCLOUD_SRS_IN or _detect_input_srs(final_path) or ""
     if srs_in:
         cmd.extend(["--srs_in", srs_in])
     if POINTCLOUD_SRS_OUT:
@@ -284,17 +325,113 @@ def _safe_project_id(project_id: str) -> str:
     return project_id
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _hash_password(password: str) -> str:
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
+    return f"pbkdf2_sha256${salt.hex()}${digest.hex()}"
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    try:
+        algo, salt_hex, digest_hex = stored.split("$", 2)
+        if algo != "pbkdf2_sha256":
+            return False
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(digest_hex)
+    except (ValueError, TypeError):
+        return False
+    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
+    return hmac.compare_digest(actual, expected)
+
+
+def _sign_session_token(raw_token: str) -> str:
+    sig = hmac.new(SESSION_SIGNING_SECRET, raw_token.encode("utf-8"), hashlib.sha256).digest()
+    return f"{raw_token}.{base64.urlsafe_b64encode(sig).decode('utf-8').rstrip('=')}"
+
+
+def _unsign_session_token(signed_token: str) -> str | None:
+    try:
+        raw, sig = signed_token.rsplit(".", 1)
+    except ValueError:
+        return None
+    expected = _sign_session_token(raw).rsplit(".", 1)[1]
+    if not hmac.compare_digest(sig, expected):
+        return None
+    return raw
+
+
+def _token_hash(raw_token: str) -> str:
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def _set_session_cookie(response: Response, raw_token: str) -> None:
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=_sign_session_token(raw_token),
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(SESSION_COOKIE_NAME)
+
+
+def _require_user(request: Request) -> dict[str, str | int]:
+    signed = request.cookies.get(SESSION_COOKIE_NAME)
+    if not signed:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    raw = _unsign_session_token(signed)
+    if not raw:
+        raise HTTPException(status_code=401, detail="Invalid session token")
+
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    with get_db_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT u.id AS user_id, u.email
+            FROM sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.token_hash = ? AND s.expires_at >= ?
+            """,
+            (_token_hash(raw), now_ts),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=401, detail="Session expired")
+    return {"id": int(row["user_id"]), "email": str(row["email"])}
+
+
+def _ensure_project_owner(user_id: int, project_id: str) -> None:
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT id FROM projects WHERE id = ? AND owner_user_id = ?",
+            (project_id, user_id),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+
 @app.get("/api/pointcloud-status/{project_id}")
-def pointcloud_status(project_id: str) -> dict[str, bool | str]:
+def pointcloud_status(project_id: str, request: Request) -> dict[str, bool | str]:
     """
     Poll conversion progress: tileset.json appears when py3dtiles finishes.
     If conversion fails, .conversion_error.txt is written under the output folder.
     """
+    user = _require_user(request)
     safe_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_id)
     out_dir = Path(LOCAL_DATA_PATH) / "pointclouds" / safe_id
     tileset = out_dir / "tileset.json"
     err_file = out_dir / ".conversion_error.txt"
-    tileset_url = f"http://localhost:8000/tiles/pointclouds/{safe_id}/tileset.json"
+    base_url = str(request.base_url).rstrip("/")
+    tileset_url = f"{base_url}/tiles/pointclouds/{safe_id}/tileset.json"
 
     if err_file.is_file():
         try:
@@ -328,7 +465,7 @@ def get_db_connection() -> sqlite3.Connection:
     return connection
 
 
-def ensure_issues_table() -> None:
+def ensure_tables() -> None:
     with get_db_connection() as connection:
         connection.execute(
             """
@@ -342,12 +479,183 @@ def ensure_issues_table() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                owner_user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                location TEXT NOT NULL,
+                date TEXT NOT NULL,
+                status TEXT NOT NULL,
+                type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(owner_user_id) REFERENCES users(id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sessions (
+                token_hash TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
         connection.commit()
 
 
 @app.on_event("startup")
 def startup() -> None:
-    ensure_issues_table()
+    ensure_tables()
+
+
+@app.post("/api/auth/signup")
+def auth_signup(payload: AuthPayload, response: Response) -> dict[str, str]:
+    email = payload.email.strip().lower()
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="Invalid email")
+    password_hash = _hash_password(payload.password)
+    created_at = _now_iso()
+    try:
+        with get_db_connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
+                (email, password_hash, created_at),
+            )
+            user_id = int(cursor.lastrowid)
+            connection.commit()
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Email already registered") from exc
+
+    raw_token = secrets.token_urlsafe(48)
+    expires_at = int(datetime.now(timezone.utc).timestamp()) + SESSION_TTL_SECONDS
+    with get_db_connection() as connection:
+        connection.execute(
+            "INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
+            (_token_hash(raw_token), user_id, expires_at, created_at),
+        )
+        connection.commit()
+    _set_session_cookie(response, raw_token)
+    return {"status": "success", "email": email}
+
+
+@app.post("/api/auth/login")
+def auth_login(payload: AuthPayload, response: Response) -> dict[str, str]:
+    email = payload.email.strip().lower()
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="Invalid email")
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT id, password_hash FROM users WHERE email = ?",
+            (email,),
+        ).fetchone()
+    if not row or not _verify_password(payload.password, str(row["password_hash"])):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    raw_token = secrets.token_urlsafe(48)
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    expires_at = now_ts + SESSION_TTL_SECONDS
+    with get_db_connection() as connection:
+        connection.execute("DELETE FROM sessions WHERE user_id = ?", (int(row["id"]),))
+        connection.execute(
+            "INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
+            (_token_hash(raw_token), int(row["id"]), expires_at, _now_iso()),
+        )
+        connection.commit()
+    _set_session_cookie(response, raw_token)
+    return {"status": "success", "email": email}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request, response: Response) -> dict[str, str]:
+    signed = request.cookies.get(SESSION_COOKIE_NAME)
+    raw = _unsign_session_token(signed) if signed else None
+    if raw:
+        with get_db_connection() as connection:
+            connection.execute("DELETE FROM sessions WHERE token_hash = ?", (_token_hash(raw),))
+            connection.commit()
+    _clear_session_cookie(response)
+    return {"status": "success"}
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request) -> dict[str, str | int]:
+    user = _require_user(request)
+    return {"id": int(user["id"]), "email": str(user["email"])}
+
+
+@app.get("/api/projects")
+def get_projects(request: Request) -> dict[str, list[ProjectOut]]:
+    user = _require_user(request)
+    with get_db_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, name, location, date, status, type
+            FROM projects
+            WHERE owner_user_id = ?
+            ORDER BY created_at DESC
+            """,
+            (int(user["id"]),),
+        ).fetchall()
+    projects = [
+        ProjectOut(
+            id=str(row["id"]),
+            name=str(row["name"]),
+            location=str(row["location"]),
+            date=str(row["date"]),
+            status=str(row["status"]),
+            type=str(row["type"]),
+        )
+        for row in rows
+    ]
+    return {"projects": projects}
+
+
+@app.post("/api/projects")
+def create_project(payload: ProjectCreatePayload, request: Request) -> ProjectOut:
+    user = _require_user(request)
+    project_id = f"proj_{secrets.token_hex(8)}"
+    now = _now_iso()
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO projects (id, owner_user_id, name, location, date, status, type, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                int(user["id"]),
+                payload.name.strip(),
+                payload.location.strip(),
+                payload.date.strip(),
+                payload.status.strip(),
+                payload.type.strip(),
+                now,
+            ),
+        )
+        connection.commit()
+    return ProjectOut(
+        id=project_id,
+        name=payload.name.strip(),
+        location=payload.location.strip(),
+        date=payload.date.strip(),
+        status=payload.status.strip(),
+        type=payload.type.strip(),
+    )
 
 
 @app.get("/api/project-stats")
@@ -462,7 +770,9 @@ async def run_flood_engine() -> dict[str, str]:
 
 
 @app.post("/api/process-pointcloud")
-async def process_pointcloud(payload: PointCloudProcessPayload) -> dict[str, str]:
+async def process_pointcloud(payload: PointCloudProcessPayload, request: Request) -> dict[str, str]:
+    user = _require_user(request)
+    _ensure_project_owner(int(user["id"]), _safe_project_id(payload.project_id))
     # Simulate running py3dtiles conversion:
     # input .las/.laz -> output directory containing tileset.json and .pnts files.
     await asyncio.sleep(5)
@@ -488,8 +798,10 @@ async def process_pointcloud(payload: PointCloudProcessPayload) -> dict[str, str
 
 @app.post("/api/upload-chunk")
 async def upload_chunk(
+    request: Request,
     chunk: UploadFile = File(...),
     filename: str = Form(...),
+    project_id: str = Form(...),
     chunkIndex: int = Form(...),
     totalChunks: int = Form(...),
 ) -> dict[str, str]:
@@ -497,13 +809,16 @@ async def upload_chunk(
     Accept one binary chunk of a larger LAS/LAZ upload.
     Chunks are written to a temp folder under LOCAL_DATA_PATH/uploads/chunks/.
     """
+    user = _require_user(request)
+    safe_project = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project)
     safe_name = _safe_pointcloud_basename(filename)
     if totalChunks < 1 or totalChunks > 500_000:
         raise HTTPException(status_code=400, detail="Invalid totalChunks")
     if chunkIndex < 0 or chunkIndex >= totalChunks:
         raise HTTPException(status_code=400, detail="Invalid chunkIndex")
 
-    session_dir = _upload_session_dir(safe_name, totalChunks)
+    session_dir = _upload_session_dir(safe_name, totalChunks, safe_project)
     session_dir.mkdir(parents=True, exist_ok=True)
 
     existing_size = sum(
@@ -530,18 +845,23 @@ async def upload_chunk(
 
 @app.post("/api/complete-upload")
 async def complete_upload(
-    payload: CompleteUploadPayload, background_tasks: BackgroundTasks
+    payload: CompleteUploadPayload,
+    request: Request,
+    background_tasks: BackgroundTasks,
 ) -> dict[str, str]:
     """
     Merge chunk files in order into a single LAS/LAZ under raw_uploads/.
     Uses streaming copy + per-chunk delete to limit peak disk and avoid RAM spikes.
     """
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(payload.project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
     safe_name = _safe_pointcloud_basename(payload.filename)
     total = payload.totalChunks
     if total < 1 or total > 500_000:
         raise HTTPException(status_code=400, detail="Invalid totalChunks")
 
-    session_dir = _upload_session_dir(safe_name, total)
+    session_dir = _upload_session_dir(safe_name, total, safe_project_id)
     if not session_dir.is_dir():
         raise HTTPException(
             status_code=400, detail="No chunks found for this upload session",
@@ -592,40 +912,32 @@ async def complete_upload(
     content_hash = file_digest.hexdigest()
     cached_project_id = f"pc-{content_hash[:24]}"
     cache = _read_conversion_cache()
-    reused_project_id = cache.get(content_hash, cached_project_id)
-    pointcloud_out_dir = Path(LOCAL_DATA_PATH) / "pointclouds" / reused_project_id
-    tileset_url = (
-        f"http://localhost:8000/tiles/pointclouds/{reused_project_id}/tileset.json"
-    )
+    user_cache_key = f"{int(user['id'])}:{content_hash}"
+    reused_project_id = cache.get(user_cache_key, safe_project_id or cached_project_id)
+    output_dir = Path(LOCAL_DATA_PATH) / "pointclouds" / reused_project_id
+    final_path = out_path
 
-    if (pointcloud_out_dir / "tileset.json").is_file():
-        out_path.unlink(missing_ok=True)
+    if (output_dir / "tileset.json").is_file():
+        final_path.unlink(missing_ok=True)
         return {
             "status": "success",
             "message": (
                 f"Merged {total} chunks into {safe_name}. "
                 "Found existing converted tiles for same file content; reusing cache."
             ),
-            "path": str(out_path),
-            "size_bytes": str(total_bytes),
-            "tileset_url": tileset_url,
+            "tileset_url": "PENDING",
             "project_id": reused_project_id,
         }
 
-    cache[content_hash] = reused_project_id
+    cache[user_cache_key] = reused_project_id
     _write_conversion_cache(cache)
-    background_tasks.add_task(_run_py3dtiles_conversion, out_path, pointcloud_out_dir)
+    background_tasks.add_task(process_pointcloud_background, final_path, output_dir)
 
     return {
         "status": "success",
-        "message": (
-            f"Merged {total} chunks into {safe_name}. "
-            "Background py3dtiles conversion started."
-        ),
-        "path": str(out_path),
-        "size_bytes": str(total_bytes),
-        "tileset_url": tileset_url,
-        "project_id": payload.project_id,
+        "message": "File merged. 3D Tile processing started in background.",
+        "tileset_url": "PENDING",
+        "project_id": reused_project_id,
     }
 
 
