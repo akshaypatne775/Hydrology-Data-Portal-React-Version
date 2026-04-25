@@ -2,6 +2,8 @@
 
 interface ImportMetaEnv {
   /** Preferred root URL for XYZ tiles (local FastAPI, CDN, etc.) */
+  /** Optional FastAPI origin; if unset, inferred from tile base URL (see getApiBaseUrl). */
+  readonly VITE_API_BASE_URL?: string
   readonly VITE_TILE_BASE_URL?: string
   /** Legacy alias for VITE_TILE_BASE_URL (same semantics — not AWS-specific). */
   readonly VITE_S3_TILE_BASE_URL?: string

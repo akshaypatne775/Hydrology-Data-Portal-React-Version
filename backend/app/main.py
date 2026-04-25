@@ -1,14 +1,17 @@
 import asyncio
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 import sqlite3
+import json
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+import laspy
 from PIL import Image
 from pydantic import BaseModel
 
@@ -25,6 +28,8 @@ Path(LOCAL_DATA_PATH).mkdir(parents=True, exist_ok=True)
 # Large uploads: headroom above merged file size (e.g. 14GB LAS + merge buffer).
 DISK_HEADROOM_BYTES = int(os.getenv("UPLOAD_DISK_HEADROOM_MB", "512")) * 1024 * 1024
 MERGE_COPY_BUFFER_BYTES = 8 * 1024 * 1024  # streaming merge, avoid loading whole file in RAM
+POINTCLOUD_SRS_IN = os.getenv("POINTCLOUD_SRS_IN", "").strip()
+POINTCLOUD_SRS_OUT = os.getenv("POINTCLOUD_SRS_OUT", "4978").strip()
 
 app = FastAPI(
     title="Hydrology & Mapping Portal API",
@@ -139,28 +144,182 @@ def _ensure_disk_space_for_bytes(path_on_volume: Path, required_extra: int) -> N
         )
 
 
+def _normalize_tileset_into_output_root(output_dir: Path) -> None:
+    """
+    Ensure tileset.json lives at output_dir root so static URL
+    /tiles/pointclouds/<project_id>/tileset.json resolves correctly.
+    py3dtiles sometimes writes a nested folder under --out.
+    """
+    root_tileset = output_dir / "tileset.json"
+    if root_tileset.is_file():
+        return
+
+    candidates = sorted(
+        output_dir.rglob("tileset.json"),
+        key=lambda p: (len(p.parts), str(p)),
+    )
+    if not candidates:
+        return
+
+    inner_tileset = candidates[0]
+    if inner_tileset.parent.resolve() == output_dir.resolve():
+        return
+
+    parent = inner_tileset.parent
+    for child in list(parent.iterdir()):
+        dest = output_dir / child.name
+        if dest.exists():
+            if dest.is_dir():
+                shutil.rmtree(dest, ignore_errors=True)
+            else:
+                dest.unlink(missing_ok=True)
+        shutil.move(str(child), str(dest))
+
+    try:
+        if parent.is_dir() and parent.resolve() != output_dir.resolve():
+            shutil.rmtree(parent, ignore_errors=True)
+    except OSError:
+        pass
+
+
 def _run_py3dtiles_conversion(input_file: Path, output_dir: Path) -> None:
     """
     Background conversion worker:
     py3dtiles convert <input_file> --out <output_dir>
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    err_path = output_dir / ".conversion_error.txt"
+    if err_path.exists():
+        err_path.unlink(missing_ok=True)
+
+    cmd = [
+        "py3dtiles",
+        "convert",
+        str(input_file),
+        "--out",
+        str(output_dir),
+    ]
+    # Optional CRS reprojection for local/projected LAS sources.
+    srs_in = POINTCLOUD_SRS_IN or _detect_input_srs(input_file) or ""
+    if srs_in:
+        cmd.extend(["--srs_in", srs_in])
+    if POINTCLOUD_SRS_OUT:
+        cmd.extend(["--srs_out", POINTCLOUD_SRS_OUT])
+
     try:
         subprocess.run(
-            [
-                "py3dtiles",
-                "convert",
-                str(input_file),
-                "--out",
-                str(output_dir),
-            ],
+            cmd,
             check=True,
             capture_output=True,
             text=True,
         )
+        _normalize_tileset_into_output_root(output_dir)
     except subprocess.CalledProcessError as exc:
-        # Keep backend responsive; conversion errors are logged for inspection.
-        print("py3dtiles conversion failed:", exc.stderr or exc.stdout or str(exc))
+        msg = exc.stderr or exc.stdout or str(exc)
+        print("py3dtiles conversion failed:", msg)
+        try:
+            err_path.write_text(msg, encoding="utf-8")
+        except OSError:
+            pass
+    except FileNotFoundError:
+        msg = (
+            "py3dtiles executable not found on PATH. "
+            "Install py3dtiles in the backend environment and restart the API."
+        )
+        print(msg)
+        try:
+            err_path.write_text(msg, encoding="utf-8")
+        except OSError:
+            pass
+
+
+def _detect_input_srs(input_file: Path) -> str | None:
+    """
+    Best-effort LAS/LAZ CRS detection from file metadata.
+    Returns an EPSG string like 'EPSG:32644' when available.
+    """
+    try:
+        with laspy.open(str(input_file)) as reader:
+            crs = reader.header.parse_crs()
+        if crs is None:
+            return None
+        authority = crs.to_authority()
+        if authority and authority[0] and authority[1]:
+            return f"{authority[0]}:{authority[1]}"
+    except (OSError, ValueError, laspy.errors.LaspyException):
+        return None
+    return None
+
+
+def _conversion_cache_file() -> Path:
+    return Path(LOCAL_DATA_PATH) / "pointclouds" / "_upload_cache.json"
+
+
+def _read_conversion_cache() -> dict[str, str]:
+    cache_path = _conversion_cache_file()
+    if not cache_path.is_file():
+        return {}
+    try:
+        raw = cache_path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {}
+
+
+def _write_conversion_cache(data: dict[str, str]) -> None:
+    cache_path = _conversion_cache_file()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        cache_path.write_text(json.dumps(data, ensure_ascii=True, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _safe_project_id(project_id: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,240}", project_id or ""):
+        raise HTTPException(status_code=400, detail="Invalid project_id")
+    return project_id
+
+
+@app.get("/api/pointcloud-status/{project_id}")
+def pointcloud_status(project_id: str) -> dict[str, bool | str]:
+    """
+    Poll conversion progress: tileset.json appears when py3dtiles finishes.
+    If conversion fails, .conversion_error.txt is written under the output folder.
+    """
+    safe_id = _safe_project_id(project_id)
+    out_dir = Path(LOCAL_DATA_PATH) / "pointclouds" / safe_id
+    tileset = out_dir / "tileset.json"
+    err_file = out_dir / ".conversion_error.txt"
+    tileset_url = f"http://localhost:8000/tiles/pointclouds/{safe_id}/tileset.json"
+
+    if err_file.is_file():
+        try:
+            msg = err_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            msg = "Unknown conversion error"
+        return {
+            "ready": False,
+            "failed": True,
+            "error": msg[:8000],
+            "tileset_url": tileset_url,
+        }
+
+    if tileset.is_file():
+        return {
+            "ready": True,
+            "failed": False,
+            "tileset_url": tileset_url,
+        }
+
+    return {
+        "ready": False,
+        "failed": False,
+        "tileset_url": tileset_url,
+    }
 
 
 def get_db_connection() -> sqlite3.Connection:
@@ -406,15 +565,17 @@ async def complete_upload(
     # Large-file safety: ensure enough free space for merged output (+ headroom).
     _ensure_disk_space_for_bytes(raw_dir, total_bytes)
 
+    file_digest = hashlib.sha256()
     try:
         with open(out_path, "wb") as out_f:
             for part in part_paths:
                 with open(part, "rb") as in_f:
-                    shutil.copyfileobj(
-                        in_f,
-                        out_f,
-                        length=MERGE_COPY_BUFFER_BYTES,
-                    )
+                    while True:
+                        chunk_data = in_f.read(MERGE_COPY_BUFFER_BYTES)
+                        if not chunk_data:
+                            break
+                        out_f.write(chunk_data)
+                        file_digest.update(chunk_data)
                 part.unlink(missing_ok=True)
     except OSError as exc:
         if out_path.exists():
@@ -428,10 +589,31 @@ async def complete_upload(
     except OSError:
         pass
 
-    pointcloud_out_dir = Path(LOCAL_DATA_PATH) / "pointclouds" / payload.project_id
+    content_hash = file_digest.hexdigest()
+    cached_project_id = f"pc-{content_hash[:24]}"
+    cache = _read_conversion_cache()
+    reused_project_id = cache.get(content_hash, cached_project_id)
+    pointcloud_out_dir = Path(LOCAL_DATA_PATH) / "pointclouds" / reused_project_id
     tileset_url = (
-        f"http://localhost:8000/tiles/pointclouds/{payload.project_id}/tileset.json"
+        f"http://localhost:8000/tiles/pointclouds/{reused_project_id}/tileset.json"
     )
+
+    if (pointcloud_out_dir / "tileset.json").is_file():
+        out_path.unlink(missing_ok=True)
+        return {
+            "status": "success",
+            "message": (
+                f"Merged {total} chunks into {safe_name}. "
+                "Found existing converted tiles for same file content; reusing cache."
+            ),
+            "path": str(out_path),
+            "size_bytes": str(total_bytes),
+            "tileset_url": tileset_url,
+            "project_id": reused_project_id,
+        }
+
+    cache[content_hash] = reused_project_id
+    _write_conversion_cache(cache)
     background_tasks.add_task(_run_py3dtiles_conversion, out_path, pointcloud_out_dir)
 
     return {

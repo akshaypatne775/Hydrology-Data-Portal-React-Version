@@ -140,6 +140,20 @@
   font-size: 0.78rem;
 }
 
+.gv-notice {
+  position: absolute;
+  top: 5rem;
+  right: 1rem;
+  z-index: 29;
+  max-width: min(440px, calc(100% - 2rem));
+  padding: 0.6rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid rgba(56, 189, 248, 0.55);
+  background: rgba(12, 74, 110, 0.92);
+  color: #e0f2fe;
+  font-size: 0.78rem;
+}
+
 .d3d-layer-panel {
   position: absolute;
   top: 1rem;
@@ -191,4 +205,21 @@
 .d3d-layer-panel__btn--ghost:hover {
   background: #d1e7eb;
   border-color: #0e3e49;
+}
+.d3d-layer-panel__select {
+  height: 2.1rem;
+  border-radius: 10px;
+  border: 1px solid #0e3e49;
+  background: #f4fafb;
+  color: #0e3e49;
+  padding: 0 0.55rem;
+  font-size: 0.75rem;
+  font-family: 'Montserrat', sans-serif;
+}
+
+.d3d-layer-panel__hint {
+  margin: 0;
+  font-size: 0.72rem;
+  color: #0e3e49;
+  line-height: 1.35;
 }

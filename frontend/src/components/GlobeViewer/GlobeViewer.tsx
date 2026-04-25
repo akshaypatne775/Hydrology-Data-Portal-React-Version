@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as Cesium from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
+import { getApiBaseUrl } from '../../lib/apiBase'
+import {
+  buildXyzTemplate,
+  getTileBaseUrl,
+  getTileExtension,
+} from '../MapViewer/tileSources'
 import './GlobeViewer.css'
+import PointCloudUploader from './PointCloudUploader'
 
 const CESIUM_ION_TOKEN = (import.meta.env.VITE_CESIUM_ION_TOKEN ?? '').trim()
 const HAS_VALID_ION_TOKEN =
@@ -15,7 +22,91 @@ type GlobePosition = {
   elevation: number | null
 }
 
+type UploadedTileset = {
+  label: string
+  url: string
+}
+
+const TILESET_MAX_WAIT_MS = 2 * 60 * 60 * 1000
+const TILESET_POLL_MS = 2000
+
+function projectIdFromTilesetUrl(tilesetUrl: string): string | null {
+  try {
+    const segments = new URL(tilesetUrl).pathname.split('/').filter(Boolean)
+    const idx = segments.indexOf('pointclouds')
+    if (idx >= 0 && segments[idx + 1]) {
+      return decodeURIComponent(segments[idx + 1]!)
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
+async function waitForPointCloudTileset(tilesetUrl: string): Promise<void> {
+  const start = Date.now()
+  const apiOrigin = new URL(tilesetUrl).origin
+  const projectId = projectIdFromTilesetUrl(tilesetUrl)
+
+  while (Date.now() - start < TILESET_MAX_WAIT_MS) {
+    if (projectId) {
+      const res = await fetch(
+        `${apiOrigin}/api/pointcloud-status/${encodeURIComponent(projectId)}`,
+        { cache: 'no-store' },
+      )
+      if (res.ok) {
+        const data = (await res.json()) as {
+          ready?: boolean
+          failed?: boolean
+          error?: string
+        }
+        if (data.failed) {
+          throw new Error(
+            data.error?.trim() || 'Point cloud conversion failed on the server.',
+          )
+        }
+        if (data.ready) {
+          return
+        }
+      }
+    } else {
+      const res = await fetch(tilesetUrl, { method: 'HEAD', cache: 'no-store' })
+      if (res.ok) {
+        return
+      }
+    }
+    await new Promise((r) => window.setTimeout(r, TILESET_POLL_MS))
+  }
+
+  throw new Error(
+    'Timed out waiting for tileset.json. Ensure py3dtiles is installed on the backend and conversion completed.',
+  )
+}
+
+function buildPointCloudStyle(pointSize: number, colorMode: ColorMode): Cesium.Cesium3DTileStyle {
+  if (colorMode === 'Elevation') {
+    return new Cesium.Cesium3DTileStyle({
+      pointSize: `${pointSize}`,
+      color: {
+        conditions: [
+          ['${POSITION}[2] >= 200', 'color("white")'],
+          ['${POSITION}[2] >= 100', 'color("yellow")'],
+          ['${POSITION}[2] >= 50', 'color("orange")'],
+          ['true', 'color("cyan")'],
+        ],
+      },
+    })
+  }
+  return new Cesium.Cesium3DTileStyle({
+    pointSize: `${pointSize}`,
+  })
+}
+
 export function GlobeViewer() {
+  const tileRoot = useMemo(
+    () => (getTileBaseUrl() ?? `${getApiBaseUrl()}/tiles`).replace(/\/+$/, ''),
+    [],
+  )
   const containerRef = useRef<HTMLDivElement | null>(null)
   const viewerRef = useRef<Cesium.Viewer | null>(null)
   const pointCloudRef = useRef<Cesium.Cesium3DTileset | null>(null)
@@ -25,6 +116,9 @@ export function GlobeViewer() {
   const [colorMode, setColorMode] = useState<ColorMode>('RGB')
   const [uploadLabel, setUploadLabel] = useState('Upload LAS/LAZ')
   const [viewerError, setViewerError] = useState<string | null>(null)
+  const [pipelineNotice, setPipelineNotice] = useState<string | null>(null)
+  const [uploadedTilesets, setUploadedTilesets] = useState<UploadedTileset[]>([])
+  const [selectedTilesetUrl, setSelectedTilesetUrl] = useState('')
   const [position, setPosition] = useState<GlobePosition>({
     lat: null,
     lng: null,
@@ -52,17 +146,59 @@ export function GlobeViewer() {
         pointCloudRef.current = null
       }
       const tileset = await Cesium.Cesium3DTileset.fromUrl(tilesetUrl)
+      tileset.maximumScreenSpaceError = 1
+      tileset.dynamicScreenSpaceError = false
+      tileset.style = buildPointCloudStyle(pointSize, colorMode)
+      tileset.pointCloudShading = new Cesium.PointCloudShading({
+        attenuation: true,
+        maximumAttenuation: pointSize,
+        geometricErrorScale: 1,
+        eyeDomeLighting: true,
+      })
       viewer.scene.primitives.add(tileset)
       pointCloudRef.current = tileset
       await viewer.zoomTo(tileset)
       setViewerError(null)
+      setPipelineNotice(null)
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Failed to load point cloud tileset'
       setViewerError(message)
       console.error('Point cloud load failed:', error)
     }
-  }, [])
+  }, [colorMode, pointSize])
+
+  const loadPointCloudWhenReady = useCallback(
+    async (tilesetUrl: string) => {
+      setViewerError(null)
+      setPipelineNotice('Generating 3D tiles on server… this can take several minutes.')
+      try {
+        await waitForPointCloudTileset(tilesetUrl)
+        setPipelineNotice('Loading point cloud on globe…')
+        await loadPointCloud(tilesetUrl)
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Point cloud pipeline failed.'
+        setViewerError(message)
+        console.error('Point cloud pipeline failed:', error)
+      } finally {
+        setPipelineNotice(null)
+      }
+    },
+    [loadPointCloud],
+  )
+
+  const handleUploadComplete = useCallback(
+    async (tilesetUrl: string, fileName: string) => {
+      setUploadedTilesets((prev) => {
+        const next = prev.filter((entry) => entry.url !== tilesetUrl)
+        return [{ label: fileName, url: tilesetUrl }, ...next]
+      })
+      setSelectedTilesetUrl(tilesetUrl)
+      await loadPointCloudWhenReady(tilesetUrl)
+    },
+    [loadPointCloudWhenReady],
+  )
 
   const loadOrthomosaic = useCallback((tileUrl: string) => {
     const viewer = viewerRef.current
@@ -88,6 +224,18 @@ export function GlobeViewer() {
       console.error('Orthomosaic load failed:', error)
     }
   }, [])
+
+  useEffect(() => {
+    const tileset = pointCloudRef.current
+    if (!tileset) return
+    tileset.style = buildPointCloudStyle(pointSize, colorMode)
+    tileset.pointCloudShading = new Cesium.PointCloudShading({
+      attenuation: true,
+      maximumAttenuation: pointSize,
+      geometricErrorScale: 1,
+      eyeDomeLighting: true,
+    })
+  }, [colorMode, pointSize])
 
   useEffect(() => {
     const host = containerRef.current
@@ -132,6 +280,7 @@ export function GlobeViewer() {
       if (viewer.scene.moon) viewer.scene.moon.show = true
       viewer.scene.skyBox = Cesium.SkyBox.createEarthSkyBox()
       viewer.scene.globe.enableLighting = false
+      viewer.scene.globe.depthTestAgainstTerrain = false
       viewer.scene.highDynamicRange = false
       viewer.scene.backgroundColor = Cesium.Color.BLACK
 
@@ -188,6 +337,11 @@ export function GlobeViewer() {
           Cesium Error: {viewerError}
         </div>
       ) : null}
+      {pipelineNotice ? (
+        <div className="gv-notice" role="status">
+          {pipelineNotice}
+        </div>
+      ) : null}
 
       <section className="gv-panel" aria-label="Point cloud controls">
         <h3 className="gv-panel__title">Point Cloud Controls</h3>
@@ -235,16 +389,47 @@ export function GlobeViewer() {
           <i className="fa-solid fa-upload" aria-hidden />
           {uploadLabel}
         </button>
+
+        <PointCloudUploader onUploadComplete={handleUploadComplete} />
       </section>
 
       <section className="d3d-layer-panel" aria-label="Data layer actions">
         <p className="d3d-layer-panel__title">3D Data Layers</p>
+
+        {uploadedTilesets.length > 0 ? (
+          <>
+            <select
+              className="d3d-layer-panel__select"
+              value={selectedTilesetUrl}
+              onChange={(event) => setSelectedTilesetUrl(event.target.value)}
+              aria-label="Uploaded point cloud list"
+            >
+              {uploadedTilesets.map((item) => (
+                <option key={item.url} value={item.url}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="d3d-layer-panel__btn"
+              onClick={() => {
+                if (selectedTilesetUrl) {
+                  void loadPointCloudWhenReady(selectedTilesetUrl)
+                }
+              }}
+            >
+              Show Uploaded Point Cloud
+            </button>
+          </>
+        ) : (
+          <p className="d3d-layer-panel__hint">Upload LAS/LAZ to see selectable point clouds.</p>
+        )}
+
         <button
           type="button"
           className="d3d-layer-panel__btn"
-          onClick={() =>
-            loadPointCloud('http://localhost:8000/tiles/pointclouds/sample/tileset.json')
-          }
+          onClick={() => loadPointCloud(`${tileRoot}/pointclouds/sample/tileset.json`)}
         >
           Load Sample LAS Data
         </button>
@@ -252,7 +437,13 @@ export function GlobeViewer() {
           type="button"
           className="d3d-layer-panel__btn d3d-layer-panel__btn--ghost"
           onClick={() =>
-            loadOrthomosaic('http://localhost:8000/tiles/orthomosaic/{z}/{x}/{y}.png')
+            loadOrthomosaic(
+              buildXyzTemplate(
+                tileRoot,
+                import.meta.env.VITE_S3_ORTHO_PREFIX?.trim() || 'orthomosaic',
+                getTileExtension(),
+              ),
+            )
           }
         >
           Load Orthomosaic
@@ -261,7 +452,13 @@ export function GlobeViewer() {
           type="button"
           className="d3d-layer-panel__btn d3d-layer-panel__btn--ghost"
           onClick={() =>
-            loadOrthomosaic('http://localhost:8000/tiles/dtm/{z}/{x}/{y}.png')
+            loadOrthomosaic(
+              buildXyzTemplate(
+                tileRoot,
+                import.meta.env.VITE_S3_DTM_PREFIX?.trim() || 'dtm',
+                getTileExtension(),
+              ),
+            )
           }
         >
           Load DTM

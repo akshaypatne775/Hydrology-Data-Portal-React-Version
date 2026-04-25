@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState, type DragEvent } from 'react'
+import { formatApiNetworkError, getApiBaseUrl } from '../../lib/apiBase'
 import './PointCloudUploader.css'
 
 const CHUNK_SIZE_BYTES = 10 * 1024 * 1024
@@ -11,7 +12,11 @@ type CompleteUploadResponse = {
   tileset_url?: string
 }
 
-export function PointCloudUploader() {
+type PointCloudUploaderProps = {
+  onUploadComplete?: (tilesetUrl: string, fileName: string) => void
+}
+
+export function PointCloudUploader({ onUploadComplete }: PointCloudUploaderProps) {
   const [isDragging, setIsDragging] = useState(false)
   const [uploadState, setUploadState] = useState<UploadState>('idle')
   const [progressPercent, setProgressPercent] = useState(0)
@@ -22,66 +27,74 @@ export function PointCloudUploader() {
     [progressPercent],
   )
 
-  const uploadFileInChunks = useCallback(async (file: File) => {
-    setUploadState('uploading')
-    setProgressPercent(0)
-    setStatusText(`Uploading ${file.name}...`)
+  const apiBase = useMemo(() => getApiBaseUrl(), [])
 
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE_BYTES)
+  const uploadFileInChunks = useCallback(
+    async (file: File) => {
+      setUploadState('uploading')
+      setProgressPercent(0)
+      setStatusText(`Uploading ${file.name}...`)
 
-    try {
-      for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
-        const start = chunkIndex * CHUNK_SIZE_BYTES
-        const end = Math.min(start + CHUNK_SIZE_BYTES, file.size)
-        const chunk = file.slice(start, end)
+      const totalChunks = Math.ceil(file.size / CHUNK_SIZE_BYTES)
 
-        const chunkForm = new FormData()
-        chunkForm.append('filename', file.name)
-        chunkForm.append('chunkIndex', String(chunkIndex))
-        chunkForm.append('totalChunks', String(totalChunks))
-        chunkForm.append('chunk', chunk, `${file.name}.part.${chunkIndex}`)
+      try {
+        for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+          const start = chunkIndex * CHUNK_SIZE_BYTES
+          const end = Math.min(start + CHUNK_SIZE_BYTES, file.size)
+          const chunk = file.slice(start, end)
 
-        const chunkResponse = await fetch('http://localhost:8000/api/upload-chunk', {
-          method: 'POST',
-          body: chunkForm,
-        })
+          const chunkForm = new FormData()
+          chunkForm.append('filename', file.name)
+          chunkForm.append('chunkIndex', String(chunkIndex))
+          chunkForm.append('totalChunks', String(totalChunks))
+          chunkForm.append('chunk', chunk, `${file.name}.part.${chunkIndex}`)
 
-        if (!chunkResponse.ok) {
-          throw new Error(`Chunk upload failed at part ${chunkIndex + 1}`)
+          const chunkResponse = await fetch(`${apiBase}/api/upload-chunk`, {
+            method: 'POST',
+            body: chunkForm,
+          })
+
+          if (!chunkResponse.ok) {
+            throw new Error(`Chunk upload failed at part ${chunkIndex + 1}`)
+          }
+
+          const nextPercent = ((chunkIndex + 1) / totalChunks) * 100
+          setProgressPercent(nextPercent)
         }
 
-        const nextPercent = ((chunkIndex + 1) / totalChunks) * 100
-        setProgressPercent(nextPercent)
-      }
+        const projectId = `${file.name.replace(/[^a-zA-Z0-9_-]/g, '-')}-${Date.now()}`
+        const completePayload = {
+          filename: file.name,
+          totalChunks,
+          project_id: projectId,
+        }
+        const completeResponse = await fetch(`${apiBase}/api/complete-upload`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(completePayload),
+        })
 
-      const completePayload = {
-        filename: file.name,
-        totalChunks,
-      }
-      const completeResponse = await fetch('http://localhost:8000/api/complete-upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(completePayload),
-      })
+        if (!completeResponse.ok) {
+          throw new Error('Failed to complete upload merge step')
+        }
 
-      if (!completeResponse.ok) {
-        throw new Error('Failed to complete upload merge step')
+        const completeData = (await completeResponse.json()) as CompleteUploadResponse
+        setUploadState('success')
+        setStatusText(
+          completeData.tileset_url
+            ? `Upload complete. Tileset: ${completeData.tileset_url}`
+            : 'Upload complete. Merge request sent successfully.',
+        )
+        if (completeData.tileset_url) {
+          onUploadComplete?.(completeData.tileset_url, file.name)
+        }
+      } catch (error) {
+        setUploadState('error')
+        setStatusText(formatApiNetworkError(apiBase, error))
       }
-
-      const completeData = (await completeResponse.json()) as CompleteUploadResponse
-      setUploadState('success')
-      setStatusText(
-        completeData.tileset_url
-          ? `Upload complete. Tileset: ${completeData.tileset_url}`
-          : 'Upload complete. Merge request sent successfully.',
-      )
-    } catch (error) {
-      setUploadState('error')
-      setStatusText(
-        error instanceof Error ? error.message : 'Chunked upload failed.',
-      )
-    }
-  }, [])
+    },
+    [apiBase, onUploadComplete],
+  )
 
   const onDropFile = useCallback(
     async (event: DragEvent<HTMLDivElement>) => {
