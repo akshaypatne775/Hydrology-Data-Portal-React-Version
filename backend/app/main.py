@@ -11,6 +11,7 @@ from pathlib import Path
 import sqlite3
 import json
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from fastapi import (
     BackgroundTasks,
@@ -27,6 +28,9 @@ from fastapi.staticfiles import StaticFiles
 import laspy
 from PIL import Image
 from pydantic import BaseModel
+from titiler.core.factory import TilerFactory
+from rio_cogeo.cogeo import cog_translate
+from rio_cogeo.profiles import cog_profiles
 
 # Map tiles, ortho, DEM, terrain quantized-mesh, videos, etc. (served under /tiles).
 # Keep overridable so frontend viewers (Leaflet/Cesium) can fetch local datasets.
@@ -68,6 +72,7 @@ app = FastAPI(
     description="Backend services for hydrology data and mapping.",
     version="0.1.0",
 )
+cog_tiler = TilerFactory()
 
 app.add_middleware(
     CORSMiddleware,
@@ -75,6 +80,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+app.include_router(
+    cog_tiler.router,
+    prefix="/api/cog",
+    tags=["COG"],
 )
 
 app.mount(
@@ -156,6 +166,16 @@ class ProjectOut(BaseModel):
     type: str
 
 
+class ProcessDatasetOut(BaseModel):
+    status: str
+    message: str
+    project_id: str
+    dataset_id: str
+    dataset_name: str
+    cog_path: str
+    cog_tile_url_template: str
+
+
 def _safe_pointcloud_basename(filename: str) -> str:
     """Reject path traversal; only allow simple .las / .laz names."""
     base = os.path.basename(filename.strip())
@@ -168,6 +188,18 @@ def _safe_pointcloud_basename(filename: str) -> str:
         raise HTTPException(
             status_code=400, detail="Only .las or .laz files are supported",
         )
+    return base
+
+
+def _safe_tif_basename(filename: str) -> str:
+    base = os.path.basename(filename.strip())
+    if not base or base in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if "/" in base or "\\" in base or ".." in base:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    suffix = Path(base).suffix.lower()
+    if suffix not in (".tif", ".tiff"):
+        raise HTTPException(status_code=400, detail="Only .tif/.tiff files are supported")
     return base
 
 
@@ -286,6 +318,66 @@ async def process_pointcloud_background(final_path: Path, output_dir: Path) -> N
             pass
 
 
+async def convert_to_cog(input_tif: str, output_cog: str) -> None:
+    profile = dict(cog_profiles.get("deflate", {}))
+    profile["BIGTIFF"] = "IF_SAFER"
+    await asyncio.to_thread(
+        cog_translate,
+        input_tif,
+        output_cog,
+        profile,
+        in_memory=False,
+        quiet=True,
+    )
+
+
+async def process_dataset_background(
+    project_id: str,
+    dataset_id: str,
+    input_tif: str,
+    output_cog: str,
+) -> None:
+    _write_dataset_status(
+        project_id,
+        dataset_id,
+        {
+            "status": "Converting to COG",
+            "updated_at": _now_iso(),
+            "dataset_id": dataset_id,
+        },
+    )
+    err_path = _dataset_dir(project_id, dataset_id) / ".conversion_error.txt"
+    err_path.unlink(missing_ok=True)
+    try:
+        await convert_to_cog(input_tif, output_cog)
+        _write_dataset_status(
+            project_id,
+            dataset_id,
+            {
+                "status": "Web-Ready",
+                "updated_at": _now_iso(),
+                "dataset_id": dataset_id,
+                "cog_path": output_cog,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc) or "COG conversion failed."
+        try:
+            err_path.write_text(msg, encoding="utf-8")
+        except OSError:
+            pass
+        _write_dataset_status(
+            project_id,
+            dataset_id,
+            {
+                "status": "Failed",
+                "error": msg[:8000],
+                "updated_at": _now_iso(),
+                "dataset_id": dataset_id,
+            },
+        )
+
+
 def _detect_input_srs(input_file: Path) -> str | None:
     """
     Best-effort LAS/LAZ CRS detection from file metadata.
@@ -341,6 +433,42 @@ def _safe_tileset_id(tileset_id: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,240}", tileset_id or ""):
         raise HTTPException(status_code=400, detail="Invalid tileset_id")
     return tileset_id
+
+
+def _safe_dataset_id(dataset_id: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,240}", dataset_id or ""):
+        raise HTTPException(status_code=400, detail="Invalid dataset_id")
+    return dataset_id
+
+
+def _dataset_dir(project_id: str, dataset_id: str) -> Path:
+    return Path(LOCAL_DATA_PATH) / "datasets" / project_id / dataset_id
+
+
+def _dataset_status_file(project_id: str, dataset_id: str) -> Path:
+    return _dataset_dir(project_id, dataset_id) / ".status.json"
+
+
+def _write_dataset_status(project_id: str, dataset_id: str, payload: dict[str, str]) -> None:
+    status_path = _dataset_status_file(project_id, dataset_id)
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        status_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _read_dataset_status(project_id: str, dataset_id: str) -> dict[str, str] | None:
+    status_path = _dataset_status_file(project_id, dataset_id)
+    if not status_path.is_file():
+        return None
+    try:
+        data = json.loads(status_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except (OSError, json.JSONDecodeError):
+        return None
+    return None
 
 
 def _now_iso() -> str:
@@ -1008,6 +1136,103 @@ async def complete_upload(
         ),
         "tileset_id": reused_tileset_id,
     }
+
+
+@app.post("/api/process-dataset", response_model=ProcessDatasetOut)
+async def process_dataset(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    project_id: str = Form(...),
+) -> ProcessDatasetOut:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    safe_name = _safe_tif_basename(file.filename or "")
+
+    dataset_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(safe_name).stem).strip("-") or "dataset"
+    dataset_id = _safe_dataset_id(f"{dataset_stem[:40]}-{secrets.token_hex(6)}")
+    dataset_dir = _dataset_dir(safe_project_id, dataset_id)
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    input_tif = dataset_dir / safe_name
+    output_cog = dataset_dir / f"{Path(safe_name).stem}.cog.tif"
+
+    content_length = request.headers.get("content-length")
+    expected_bytes = int(content_length) if content_length and content_length.isdigit() else 0
+    _ensure_disk_space_for_bytes(dataset_dir, max(expected_bytes * 2, 512 * 1024 * 1024))
+
+    try:
+        with open(input_tif, "wb") as out_f:
+            shutil.copyfileobj(file.file, out_f, length=MERGE_COPY_BUFFER_BYTES)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to store dataset: {exc}") from exc
+    finally:
+        await file.close()
+
+    _write_dataset_status(
+        safe_project_id,
+        dataset_id,
+        {
+            "status": "Uploading",
+            "updated_at": _now_iso(),
+            "dataset_id": dataset_id,
+            "dataset_name": safe_name,
+        },
+    )
+
+    background_tasks.add_task(
+        process_dataset_background,
+        safe_project_id,
+        dataset_id,
+        str(input_tif),
+        str(output_cog),
+    )
+
+    encoded_cog_path = quote(str(output_cog).replace("\\", "/"), safe="")
+    tile_template = (
+        f"{str(request.base_url).rstrip('/')}/api/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}"
+        f"?url={encoded_cog_path}"
+    )
+    return ProcessDatasetOut(
+        status="success",
+        message="Dataset uploaded. COG conversion started in background.",
+        project_id=safe_project_id,
+        dataset_id=dataset_id,
+        dataset_name=safe_name,
+        cog_path=str(output_cog),
+        cog_tile_url_template=tile_template,
+    )
+
+
+@app.post("/api/upload-dataset")
+async def upload_dataset(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    project_id: str = Form(...),
+) -> dict[str, str]:
+    await process_dataset(request, background_tasks, file, project_id)
+    return {"status": "processing"}
+
+
+@app.get("/api/dataset-status/{project_id}/{dataset_id}")
+def dataset_status(project_id: str, dataset_id: str, request: Request) -> dict[str, str]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    safe_dataset_id = _safe_dataset_id(dataset_id)
+    status = _read_dataset_status(safe_project_id, safe_dataset_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="Dataset status not found")
+
+    cog_path = status.get("cog_path", "")
+    if cog_path:
+        encoded_cog_path = quote(cog_path.replace("\\", "/"), safe="")
+        status["cog_tile_url_template"] = (
+            f"{str(request.base_url).rstrip('/')}/api/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}"
+            f"?url={encoded_cog_path}"
+        )
+    return status
 
 
 @app.get("/health")

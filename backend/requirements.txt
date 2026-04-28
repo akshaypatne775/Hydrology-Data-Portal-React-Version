@@ -2,3 +2,5 @@ fastapi>=0.115.0,<1
 uvicorn[standard]>=0.32.0,<1
 Pillow
 py3dtiles[las]>=12.1.1,<13
+titiler.core>=0.21.1,<1
+rio-cogeo>=5.3.3,<6

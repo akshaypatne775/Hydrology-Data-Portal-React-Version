@@ -1,0 +1,151 @@
+.dsp-root {
+  display: grid;
+  gap: 0.9rem;
+  padding: 0.95rem;
+  background: #fff;
+  height: 100%;
+  min-height: 0;
+}
+
+.dsp-head h3 {
+  margin: 0;
+  font-size: 1.02rem;
+  color: #0e3e49;
+}
+
+.dsp-head p {
+  margin: 0.2rem 0 0;
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
+.dsp-dropzone {
+  border: 1px dashed rgba(14, 62, 73, 0.42);
+  border-radius: 12px;
+  padding: 0.95rem;
+  background: linear-gradient(145deg, rgba(14, 62, 73, 0.07), rgba(14, 62, 73, 0.02));
+}
+
+.dsp-dropzone--dragging {
+  background: rgba(14, 62, 73, 0.12);
+  border-color: #0e3e49;
+}
+
+.dsp-dropzone__title {
+  margin: 0;
+  font-size: 0.84rem;
+  color: #0e3e49;
+  font-weight: 700;
+}
+
+.dsp-dropzone__meta {
+  margin: 0.3rem 0 0;
+  font-size: 0.72rem;
+  color: #64748b;
+}
+
+.dsp-progress {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.dsp-progress__track {
+  height: 0.45rem;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.dsp-progress__fill {
+  height: 100%;
+  background: linear-gradient(90deg, #0e3e49 0%, #14b8a6 100%);
+  transition: width 0.2s ease;
+}
+
+.dsp-progress__meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.72rem;
+  color: #475569;
+}
+
+.dsp-table-wrap {
+  border: 1px solid #dbe4ee;
+  border-radius: 12px;
+  overflow: auto;
+}
+
+.dsp-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 700px;
+}
+
+.dsp-table thead th {
+  text-align: left;
+  padding: 0.65rem 0.8rem;
+  background: #0e3e49;
+  color: #fff;
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.dsp-table tbody td {
+  padding: 0.65rem 0.8rem;
+  border-top: 1px solid #e2e8f0;
+  font-size: 0.79rem;
+  color: #0f172a;
+}
+
+.dsp-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.dsp-badge--raw {
+  color: #475569;
+  background: #e2e8f0;
+}
+
+.dsp-badge--processing {
+  color: #92400e;
+  background: #fef3c7;
+}
+
+.dsp-badge--ready {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.dsp-action {
+  border: 1px solid rgba(14, 62, 73, 0.22);
+  background: #fff;
+  color: #0e3e49;
+  border-radius: 999px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.dsp-state {
+  margin: 0;
+  font-size: 0.76rem;
+}
+
+.dsp-state--ok {
+  color: #166534;
+}
+
+.dsp-state--error {
+  color: #b91c1c;
+}

@@ -12,6 +12,8 @@ const MapViewer = lazy(() =>
   import('./MapViewer/MapViewer').then((m) => ({ default: m.MapViewer })),
 )
 const GlobeViewer = lazy(() => import('./GlobeViewer/GlobeViewer'))
+const DatasetsPanel = lazy(() => import('./Datasets/DatasetsPanel'))
+const DownloadsPanel = lazy(() => import('./Downloads/DownloadsPanel'))
 
 const DROID_CLOUD_LOGO_URL =
   'https://www.droidminingsolutions.com/wp-content/uploads/2026/04/ChatGPT-Image-Apr-25-2026-04_33_45-PM.png'
@@ -432,7 +434,10 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                     aria-label="Map viewer"
                   >
                     <Suspense fallback={<div className="ds-panel-loading">Loading map…</div>}>
-                      <MapViewer floodSimulationLevel={floodSimulationLevel} />
+                      <MapViewer
+                        floodSimulationLevel={floodSimulationLevel}
+                        projectId={selectedProject!.id}
+                      />
                     </Suspense>
                   </div>
                 </div>
@@ -446,6 +451,26 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                     <GlobeViewer projectId={selectedProject!.id} />
                   </Suspense>
                 </div>
+              ) : activeId === 'datasets' ? (
+                <div
+                  className="ds-map-body"
+                  role="region"
+                  aria-label="Project datasets panel"
+                >
+                  <Suspense fallback={<div className="ds-panel-loading">Loading datasets…</div>}>
+                    <DatasetsPanel projectId={selectedProject?.id} />
+                  </Suspense>
+                </div>
+              ) : activeId === 'downloads' ? (
+                <div
+                  className="ds-map-body"
+                  role="region"
+                  aria-label="Project downloads panel"
+                >
+                  <Suspense fallback={<div className="ds-panel-loading">Loading downloads…</div>}>
+                    <DownloadsPanel projectId={selectedProject?.id} />
+                  </Suspense>
+                </div>
               ) : (
                 <div
                   className="ds-map-body"
@@ -457,18 +482,14 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                       <div className="ds-map-placeholder__icon" aria-hidden>
                         <i
                           className={
-                            activeId === 'datasets'
-                              ? 'fa-solid fa-database'
-                              : activeId === 'compare'
+                            activeId === 'compare'
                                 ? 'fa-solid fa-code-compare'
                                 : 'fa-solid fa-download'
                           }
                         />
                       </div>
                       <h3 className="ds-map-placeholder__title">
-                        {activeId === 'datasets'
-                          ? 'Datasets panel coming next'
-                          : activeId === 'compare'
+                        {activeId === 'compare'
                             ? 'Compare panel coming next'
                             : 'Downloads panel coming next'}
                       </h3>

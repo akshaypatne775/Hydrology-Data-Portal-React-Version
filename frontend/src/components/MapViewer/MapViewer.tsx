@@ -40,6 +40,7 @@ import {
   getFloodOverlayTileUrlWithBust,
   hasCustomTileBase,
 } from './tileSources'
+import { getLatestCogLayer } from '../../utils/datasetLayerStorage'
 
 export type { BaseLayerId, FloodReturnPeriod } from './tileSources'
 
@@ -228,6 +229,7 @@ interface MapPaneProps {
   onIssuePick: (ll: LatLng) => void
   issues: SavedIssue[]
   showHydrologyData: boolean
+  cogTileUrl: string | null
   sync?: SyncRefs & { isA: boolean }
 }
 
@@ -255,6 +257,7 @@ function MapPane({
   onIssuePick,
   issues,
   showHydrologyData,
+  cogTileUrl,
   sync,
 }: MapPaneProps) {
   const baseUrl = useMemo(() => getBaseLayerUrlOrFallback(baseLayer), [baseLayer])
@@ -289,6 +292,15 @@ function MapPane({
         maxZoom={22}
         maxNativeZoom={20}
       />
+      {cogTileUrl ? (
+        <TileLayer
+          key={`cog-${cogTileUrl}`}
+          url={cogTileUrl}
+          opacity={0.82}
+          maxZoom={22}
+          maxNativeZoom={22}
+        />
+      ) : null}
       {showFloodLayer ? (
         <TileLayer
           key={`flood-${floodPeriod}-${floodUrl}`}
@@ -370,9 +382,10 @@ function MapPane({
 export type MapViewerProps = {
   /** 0–100 from HydrologyStats flood slider; placeholder for inundation visual. */
   floodSimulationLevel?: number
+  projectId?: string
 }
 
-export function MapViewer({ floodSimulationLevel = 0 }: MapViewerProps) {
+export function MapViewer({ floodSimulationLevel = 0, projectId }: MapViewerProps) {
   const center = useMemo(() => getDefaultMapCenter(), [])
   const zoom = useMemo(() => getDefaultZoom(), [])
   const customTilesReady = hasCustomTileBase()
@@ -387,6 +400,7 @@ export function MapViewer({ floodSimulationLevel = 0 }: MapViewerProps) {
   const [areaFrozen, setAreaFrozen] = useState(false)
   const [issueMode, setIssueMode] = useState(false)
   const [showHydrologyData, setShowHydrologyData] = useState(true)
+  const [cogTileUrl, setCogTileUrl] = useState<string | null>(null)
   const [issueDraft, setIssueDraft] = useState<IssueDraft | null>(null)
   const [issueSubmitting, setIssueSubmitting] = useState(false)
   const [issueError, setIssueError] = useState<string | null>(null)
@@ -531,6 +545,15 @@ export function MapViewer({ floodSimulationLevel = 0 }: MapViewerProps) {
     scrollWheelZoom: true,
     className: 'mv-leaflet',
   } as const
+
+  useEffect(() => {
+    if (!projectId) {
+      setCogTileUrl(null)
+      return
+    }
+    const latest = getLatestCogLayer(projectId)
+    setCogTileUrl(latest?.tileUrl ?? null)
+  }, [projectId])
 
   return (
     <div className="mv-root">
@@ -715,6 +738,7 @@ export function MapViewer({ floodSimulationLevel = 0 }: MapViewerProps) {
                 onIssuePick={onIssuePick}
                 issues={issues}
                 showHydrologyData={showHydrologyData}
+                cogTileUrl={cogTileUrl}
                 sync={splitView ? { ...syncRefs, isA: true } : undefined}
               />
             </MapContainer>
@@ -832,6 +856,7 @@ export function MapViewer({ floodSimulationLevel = 0 }: MapViewerProps) {
                   onIssuePick={() => {}}
                   issues={issues}
                   showHydrologyData={showHydrologyData}
+                  cogTileUrl={cogTileUrl}
                   sync={{ ...syncRefs, isA: false }}
                 />
               </MapContainer>

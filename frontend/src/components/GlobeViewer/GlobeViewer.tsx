@@ -239,6 +239,11 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     }
   }, [])
 
+  // Example TiTiler COG XYZ layer (reference):
+  // const cogLayer = new Cesium.UrlTemplateImageryProvider({
+  //   url: 'http://localhost:8000/api/cog/tiles/WebMercatorQuad/{z}/{x}/{y}?url=D:/Data/output.tif',
+  // })
+
   useEffect(() => {
     const stored = readUploadedTilesets(projectId)
     setUploadedTilesets(stored)
