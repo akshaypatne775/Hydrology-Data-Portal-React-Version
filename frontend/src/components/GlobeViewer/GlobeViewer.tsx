@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as Cesium from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
-import { API_BASE, apiFetch } from '../../lib/apiBase'
+import { API_BASE } from '../../lib/apiBase'
+import { getPointCloudStatus } from '../../services/pointCloudService'
 import {
   buildXyzTemplate,
   getTileBaseUrl,
@@ -9,6 +10,11 @@ import {
 } from '../MapViewer/tileSources'
 import './GlobeViewer.css'
 import PointCloudUploader from './PointCloudUploader'
+import {
+  readUploadedTilesets,
+  writeUploadedTilesets,
+  type UploadedTileset,
+} from '../../utils/pointCloudStorage'
 
 const CESIUM_ION_TOKEN = (import.meta.env.VITE_CESIUM_ION_TOKEN ?? '').trim()
 const HAS_VALID_ION_TOKEN =
@@ -20,11 +26,6 @@ type GlobePosition = {
   lat: number | null
   lng: number | null
   elevation: number | null
-}
-
-type UploadedTileset = {
-  label: string
-  url: string
 }
 
 const TILESET_MAX_WAIT_MS = 2 * 60 * 60 * 1000
@@ -43,22 +44,29 @@ function projectIdFromTilesetUrl(tilesetUrl: string): string | null {
   return null
 }
 
+function tilesetIdFromTilesetUrl(tilesetUrl: string): string | null {
+  try {
+    const segments = new URL(tilesetUrl).pathname.split('/').filter(Boolean)
+    const idx = segments.indexOf('pointclouds')
+    const maybeTilesetId = idx >= 0 ? segments[idx + 2] : null
+    if (maybeTilesetId && maybeTilesetId !== 'tileset.json') {
+      return decodeURIComponent(maybeTilesetId)
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
 async function waitForPointCloudTileset(tilesetUrl: string): Promise<void> {
   const start = Date.now()
   const projectId = projectIdFromTilesetUrl(tilesetUrl)
+  const tilesetId = tilesetIdFromTilesetUrl(tilesetUrl)
 
   while (Date.now() - start < TILESET_MAX_WAIT_MS) {
     if (projectId) {
-      const res = await apiFetch(
-        `/api/pointcloud-status/${encodeURIComponent(projectId)}`,
-        { cache: 'no-store' },
-      )
-      if (res.ok) {
-        const data = (await res.json()) as {
-          ready?: boolean
-          failed?: boolean
-          error?: string
-        }
+      const data = await getPointCloudStatus(projectId, tilesetId ?? undefined)
+      if (data) {
         if (data.failed) {
           throw new Error(
             data.error?.trim() || 'Point cloud conversion failed on the server.',
@@ -196,12 +204,14 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     async (tilesetUrl: string, fileName: string) => {
       setUploadedTilesets((prev) => {
         const next = prev.filter((entry) => entry.url !== tilesetUrl)
-        return [{ label: fileName, url: tilesetUrl }, ...next]
+        const merged = [{ label: fileName, url: tilesetUrl }, ...next]
+        writeUploadedTilesets(projectId, merged)
+        return merged
       })
       setSelectedTilesetUrl(tilesetUrl)
       await loadPointCloudWhenReady(tilesetUrl)
     },
-    [loadPointCloudWhenReady],
+    [loadPointCloudWhenReady, projectId],
   )
 
   const loadOrthomosaic = useCallback((tileUrl: string) => {
@@ -230,10 +240,37 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
   }, [])
 
   useEffect(() => {
-    setUploadedTilesets([])
-    setSelectedTilesetUrl('')
+    const stored = readUploadedTilesets(projectId)
+    setUploadedTilesets(stored)
+    setSelectedTilesetUrl(stored[0]?.url ?? '')
     setViewerError(null)
     setPipelineNotice(null)
+
+    let cancelled = false
+    const restoreSavedTileset = async () => {
+      try {
+        const data = await getPointCloudStatus(projectId)
+        if (!data || cancelled) return
+        if (!cancelled && data.ready && data.tileset_url) {
+          const readyUrl = data.tileset_url
+          setUploadedTilesets((prev) => {
+            const next = prev.some((item) => item.url === readyUrl)
+              ? prev
+              : [{ label: 'Saved Point Cloud', url: readyUrl }, ...prev]
+            writeUploadedTilesets(projectId, next)
+            return next
+          })
+          setSelectedTilesetUrl((curr) => curr || readyUrl)
+        }
+      } catch {
+        // Keep UI usable even if restore check fails.
+      }
+    }
+
+    void restoreSavedTileset()
+    return () => {
+      cancelled = true
+    }
   }, [projectId])
 
   useEffect(() => {

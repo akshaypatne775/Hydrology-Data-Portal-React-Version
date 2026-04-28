@@ -394,6 +394,24 @@
   text-transform: lowercase;
 }
 
+.mv-hydro-popup {
+  font-family: 'Montserrat', sans-serif;
+  min-width: 180px;
+}
+
+.mv-hydro-popup h4 {
+  margin: 0 0 0.35rem;
+  color: #0e3e49;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.mv-hydro-popup p {
+  margin: 0;
+  color: #334155;
+  font-size: 0.78rem;
+}
+
 @media (max-width: 720px) {
   .mv-maps--split {
     flex-direction: column;

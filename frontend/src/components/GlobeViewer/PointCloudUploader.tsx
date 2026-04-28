@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState, type DragEvent } from 'react'
-import { API_BASE, apiFetch, formatApiNetworkError } from '../../lib/apiBase'
+import { API_BASE, formatApiNetworkError } from '../../lib/apiBase'
+import { completeUpload, uploadChunk } from '../../services/pointCloudService'
 import './PointCloudUploader.css'
 
 const CHUNK_SIZE_BYTES = 10 * 1024 * 1024
@@ -11,6 +12,8 @@ type CompleteUploadResponse = {
   message?: string
   tileset_url?: string
   project_id?: string
+  target_tileset_url?: string
+  tileset_id?: string
 }
 
 type PointCloudUploaderProps = {
@@ -50,10 +53,7 @@ export function PointCloudUploader({ projectId, onUploadComplete }: PointCloudUp
           chunkForm.append('totalChunks', String(totalChunks))
           chunkForm.append('chunk', chunk, `${file.name}.part.${chunkIndex}`)
 
-          const chunkResponse = await apiFetch('/api/upload-chunk', {
-            method: 'POST',
-            body: chunkForm,
-          })
+          const chunkResponse = await uploadChunk(chunkForm)
 
           if (!chunkResponse.ok) {
             throw new Error(`Chunk upload failed at part ${chunkIndex + 1}`)
@@ -68,11 +68,7 @@ export function PointCloudUploader({ projectId, onUploadComplete }: PointCloudUp
           totalChunks,
           project_id: projectId,
         }
-        const completeResponse = await apiFetch('/api/complete-upload', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(completePayload),
-        })
+        const completeResponse = await completeUpload(completePayload)
 
         if (!completeResponse.ok) {
           throw new Error('Failed to complete upload merge step')
@@ -81,9 +77,10 @@ export function PointCloudUploader({ projectId, onUploadComplete }: PointCloudUp
         const completeData = (await completeResponse.json()) as CompleteUploadResponse
         const resolvedProjectId = completeData.project_id || projectId
         const resolvedTilesetUrl =
-          completeData.tileset_url && completeData.tileset_url !== 'PENDING'
+          completeData.target_tileset_url ||
+          (completeData.tileset_url && completeData.tileset_url !== 'PENDING'
             ? completeData.tileset_url
-            : `${API_BASE}/tiles/pointclouds/${encodeURIComponent(resolvedProjectId)}/tileset.json`
+            : `${API_BASE}/tiles/pointclouds/${encodeURIComponent(resolvedProjectId)}/tileset.json`)
 
         setUploadState('success')
         setStatusText(`Upload complete. Tileset: ${resolvedTilesetUrl}`)

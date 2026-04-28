@@ -44,3 +44,11 @@ i.fab {
   font-family: 'Font Awesome 6 Brands' !important;
   font-weight: 400 !important;
 }
+
+i,
+.fa,
+.fas,
+.fa-solid {
+  font-family: 'Font Awesome 6 Free' !important;
+  font-weight: 900 !important;
+}

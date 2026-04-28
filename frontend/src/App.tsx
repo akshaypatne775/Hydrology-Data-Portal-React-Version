@@ -1,33 +1,27 @@
-import { useEffect, useState } from 'react'
-import { Dashboard } from './components/Dashboard'
-import AuthScreen from './components/Auth/AuthScreen'
+import { Suspense, lazy } from 'react'
 import StartupLoader from './components/Brand/StartupLoader'
-import { apiJson } from './lib/apiBase'
+import { AuthProvider, useAuthContext } from './context/AuthContext'
 
-function App() {
-  const [loading, setLoading] = useState(true)
-  const [user, setUser] = useState<{ id: number; email: string } | null>(null)
+const AuthPage = lazy(() => import('./pages/AuthPage'))
+const WorkspacePage = lazy(() => import('./pages/WorkspacePage'))
 
-  useEffect(() => {
-    let mounted = true
-    void apiJson<{ id: number; email: string }>('/api/auth/me')
-      .then((me) => {
-        if (mounted) setUser(me)
-      })
-      .catch(() => {
-        if (mounted) setUser(null)
-      })
-      .finally(() => {
-        if (mounted) setLoading(false)
-      })
-    return () => {
-      mounted = false
-    }
-  }, [])
+function AppRoot() {
+  const { loading, user } = useAuthContext()
 
   if (loading) return <StartupLoader />
-  if (!user) return <AuthScreen onAuthenticated={setUser} />
-  return <Dashboard user={user} onLogout={() => setUser(null)} />
+  return (
+    <Suspense fallback={<StartupLoader />}>
+      {!user ? <AuthPage /> : <WorkspacePage />}
+    </Suspense>
+  )
+}
+
+function App() {
+  return (
+    <AuthProvider>
+      <AppRoot />
+    </AuthProvider>
+  )
 }
 
 export default App

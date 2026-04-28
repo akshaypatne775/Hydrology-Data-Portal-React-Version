@@ -25,6 +25,11 @@ import {
   useMap,
   useMapEvents,
 } from 'react-leaflet'
+import { createIssue, listIssues, type SavedIssue } from '../../services/issuesService'
+import HydrologyDataLayer, {
+  type HydrologyPoint,
+  type HydrologyZone,
+} from './HydrologyDataLayer'
 
 import {
   type BaseLayerId,
@@ -46,15 +51,6 @@ type IssueDraft = {
   description: string
 }
 
-type SavedIssue = {
-  id: number
-  lat: number
-  lng: number
-  title: string
-  description: string
-  status: string
-}
-
 const BASE_LABELS: Record<BaseLayerId, string> = {
   orthomosaic: 'Orthomosaic (drone)',
   dem: 'DEM',
@@ -66,6 +62,39 @@ const FLOOD_LABELS: Record<FloodReturnPeriod, string> = {
   '1in50': '1 : 50 years',
   '1in100': '1 : 100 years',
 }
+
+const HYDROLOGY_POINTS: HydrologyPoint[] = [
+  {
+    id: 'p-1',
+    name: 'Monitoring Well A',
+    lat: 21.1468,
+    lng: 79.0864,
+    metric: 'Water level',
+    value: '2.1 m bgl',
+  },
+  {
+    id: 'p-2',
+    name: 'Rain Gauge Station',
+    lat: 21.1442,
+    lng: 79.0911,
+    metric: 'Rainfall',
+    value: '42 mm/day',
+  },
+]
+
+const HYDROLOGY_ZONES: HydrologyZone[] = [
+  {
+    id: 'z-1',
+    name: 'Low-lying Catchment Pocket',
+    risk: 'Moderate',
+    coordinates: [
+      [21.1474, 79.0847],
+      [21.1474, 79.0886],
+      [21.1454, 79.0892],
+      [21.1449, 79.0855],
+    ],
+  },
+]
 
 function formatLengthM(meters: number): string {
   if (meters >= 1000) return `${(meters / 1000).toFixed(2)} km`
@@ -198,6 +227,7 @@ interface MapPaneProps {
   issueMode: boolean
   onIssuePick: (ll: LatLng) => void
   issues: SavedIssue[]
+  showHydrologyData: boolean
   sync?: SyncRefs & { isA: boolean }
 }
 
@@ -224,6 +254,7 @@ function MapPane({
   issueMode,
   onIssuePick,
   issues,
+  showHydrologyData,
   sync,
 }: MapPaneProps) {
   const baseUrl = useMemo(() => getBaseLayerUrlOrFallback(baseLayer), [baseLayer])
@@ -321,6 +352,9 @@ function MapPane({
           </Popup>
         </Marker>
       ))}
+      {showHydrologyData ? (
+        <HydrologyDataLayer points={HYDROLOGY_POINTS} zones={HYDROLOGY_ZONES} />
+      ) : null}
       {sync ? (
         <MapSyncBridge
           isA={sync.isA}
@@ -352,6 +386,7 @@ export function MapViewer({ floodSimulationLevel = 0 }: MapViewerProps) {
   const [points, setPoints] = useState<LatLng[]>([])
   const [areaFrozen, setAreaFrozen] = useState(false)
   const [issueMode, setIssueMode] = useState(false)
+  const [showHydrologyData, setShowHydrologyData] = useState(true)
   const [issueDraft, setIssueDraft] = useState<IssueDraft | null>(null)
   const [issueSubmitting, setIssueSubmitting] = useState(false)
   const [issueError, setIssueError] = useState<string | null>(null)
@@ -424,11 +459,7 @@ export function MapViewer({ floodSimulationLevel = 0 }: MapViewerProps) {
 
     async function loadIssues() {
       try {
-        const response = await fetch('http://localhost:8000/api/issues')
-        if (!response.ok) {
-          throw new Error(`Request failed (${response.status})`)
-        }
-        const data = (await response.json()) as SavedIssue[]
+        const data = await listIssues()
         if (!cancelled) {
           setIssues(data ?? [])
         }
@@ -473,19 +504,12 @@ export function MapViewer({ floodSimulationLevel = 0 }: MapViewerProps) {
       setIssueSubmitting(true)
       setIssueError(null)
       try {
-        const response = await fetch('http://localhost:8000/api/issues', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            lat: issueDraft.lat,
-            lng: issueDraft.lng,
-            title: issueDraft.title,
-            description: issueDraft.description,
-          }),
+        await createIssue({
+          lat: issueDraft.lat,
+          lng: issueDraft.lng,
+          title: issueDraft.title,
+          description: issueDraft.description,
         })
-        if (!response.ok) {
-          throw new Error(`Request failed (${response.status})`)
-        }
         setIssuesRefreshTick((prev) => prev + 1)
         clearIssueMode()
       } catch (error) {
@@ -566,6 +590,18 @@ export function MapViewer({ floodSimulationLevel = 0 }: MapViewerProps) {
                 </label>
               ))}
             </div>
+          </fieldset>
+
+          <fieldset className="mv-fieldset">
+            <legend className="mv-legend">Hydrology data</legend>
+            <label className="mv-check">
+              <input
+                type="checkbox"
+                checked={showHydrologyData}
+                onChange={(e) => setShowHydrologyData(e.target.checked)}
+              />
+              <span>Show hydrology points & zones</span>
+            </label>
           </fieldset>
         </div>
 
@@ -678,6 +714,7 @@ export function MapViewer({ floodSimulationLevel = 0 }: MapViewerProps) {
                 issueMode={issueMode && !splitView}
                 onIssuePick={onIssuePick}
                 issues={issues}
+                showHydrologyData={showHydrologyData}
                 sync={splitView ? { ...syncRefs, isA: true } : undefined}
               />
             </MapContainer>
@@ -794,6 +831,7 @@ export function MapViewer({ floodSimulationLevel = 0 }: MapViewerProps) {
                   issueMode={false}
                   onIssuePick={() => {}}
                   issues={issues}
+                  showHydrologyData={showHydrologyData}
                   sync={{ ...syncRefs, isA: false }}
                 />
               </MapContainer>

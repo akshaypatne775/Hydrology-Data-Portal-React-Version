@@ -45,10 +45,23 @@ POINTCLOUD_SRS_IN = os.getenv("POINTCLOUD_SRS_IN", "").strip()
 POINTCLOUD_SRS_OUT = os.getenv("POINTCLOUD_SRS_OUT", "4978").strip()
 SESSION_COOKIE_NAME = "droid_cloud_session"
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "604800"))
-SESSION_SIGNING_SECRET = os.getenv(
-    "SESSION_SIGNING_SECRET",
-    "change-this-secret-for-production",
-).encode("utf-8")
+SESSION_SIGNING_SECRET_RAW = os.getenv("SESSION_SIGNING_SECRET", "").strip()
+if not SESSION_SIGNING_SECRET_RAW:
+    # Safe development fallback only. In production, SESSION_SIGNING_SECRET must be configured.
+    SESSION_SIGNING_SECRET_RAW = secrets.token_urlsafe(48)
+    print(
+        "WARNING: SESSION_SIGNING_SECRET is not set. "
+        "Using ephemeral in-memory secret; sessions will reset on restart.",
+    )
+SESSION_SIGNING_SECRET = SESSION_SIGNING_SECRET_RAW.encode("utf-8")
+FRONTEND_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "FRONTEND_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if origin.strip()
+]
 
 app = FastAPI(
     title="Hydrology & Mapping Portal API",
@@ -58,10 +71,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=FRONTEND_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -228,6 +238,8 @@ async def process_pointcloud_background(final_path: Path, output_dir: Path) -> N
     Background conversion worker:
     py3dtiles convert <final_path> --out <output_dir>
     """
+    if output_dir.is_dir():
+        shutil.rmtree(output_dir, ignore_errors=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     err_path = output_dir / ".conversion_error.txt"
     if err_path.exists():
@@ -325,6 +337,12 @@ def _safe_project_id(project_id: str) -> str:
     return project_id
 
 
+def _safe_tileset_id(tileset_id: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,240}", tileset_id or ""):
+        raise HTTPException(status_code=400, detail="Invalid tileset_id")
+    return tileset_id
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -419,7 +437,9 @@ def _ensure_project_owner(user_id: int, project_id: str) -> None:
 
 
 @app.get("/api/pointcloud-status/{project_id}")
-def pointcloud_status(project_id: str, request: Request) -> dict[str, bool | str]:
+def pointcloud_status(
+    project_id: str, request: Request, tileset_id: str | None = None
+) -> dict[str, bool | str]:
     """
     Poll conversion progress: tileset.json appears when py3dtiles finishes.
     If conversion fails, .conversion_error.txt is written under the output folder.
@@ -427,35 +447,56 @@ def pointcloud_status(project_id: str, request: Request) -> dict[str, bool | str
     user = _require_user(request)
     safe_id = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_id)
-    out_dir = Path(LOCAL_DATA_PATH) / "pointclouds" / safe_id
-    tileset = out_dir / "tileset.json"
-    err_file = out_dir / ".conversion_error.txt"
     base_url = str(request.base_url).rstrip("/")
-    tileset_url = f"{base_url}/tiles/pointclouds/{safe_id}/tileset.json"
+    project_root = Path(LOCAL_DATA_PATH) / "pointclouds" / safe_id
 
-    if err_file.is_file():
-        try:
-            msg = err_file.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            msg = "Unknown conversion error"
-        return {
-            "ready": False,
-            "failed": True,
-            "error": msg[:8000],
-            "tileset_url": tileset_url,
-        }
+    candidates: list[Path] = []
+    if tileset_id:
+        safe_tileset_id = _safe_tileset_id(tileset_id)
+        candidates.append(project_root / safe_tileset_id)
+    else:
+        if (project_root / "tileset.json").is_file():
+            candidates.append(project_root)
+        if project_root.is_dir():
+            children = sorted(
+                [p for p in project_root.iterdir() if p.is_dir()],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            candidates.extend(children)
 
-    if tileset.is_file():
-        return {
-            "ready": True,
-            "failed": False,
-            "tileset_url": tileset_url,
-        }
+    for candidate in candidates:
+        tileset = candidate / "tileset.json"
+        err_file = candidate / ".conversion_error.txt"
+        if err_file.is_file():
+            try:
+                msg = err_file.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                msg = "Unknown conversion error"
+            suffix = (
+                f"/{candidate.name}" if candidate.resolve() != project_root.resolve() else ""
+            )
+            return {
+                "ready": False,
+                "failed": True,
+                "error": msg[:8000],
+                "tileset_url": f"{base_url}/tiles/pointclouds/{safe_id}{suffix}/tileset.json",
+            }
+        if tileset.is_file():
+            suffix = (
+                f"/{candidate.name}" if candidate.resolve() != project_root.resolve() else ""
+            )
+            return {
+                "ready": True,
+                "failed": False,
+                "tileset_url": f"{base_url}/tiles/pointclouds/{safe_id}{suffix}/tileset.json",
+            }
 
+    pending_suffix = f"/{_safe_tileset_id(tileset_id)}" if tileset_id else ""
     return {
         "ready": False,
         "failed": False,
-        "tileset_url": tileset_url,
+        "tileset_url": f"{base_url}/tiles/pointclouds/{safe_id}{pending_suffix}/tileset.json",
     }
 
 
@@ -677,11 +718,12 @@ def hydrology_stats() -> dict[str, list]:
 
 
 @app.get("/api/media")
-def media() -> dict[str, list[dict[str, str]]]:
+def media(request: Request) -> dict[str, list[dict[str, str]]]:
     media_dir = Path(LOCAL_DATA_PATH) / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
 
     files: list[dict[str, str]] = []
+    base_url = str(request.base_url).rstrip("/")
     for file_path in sorted(media_dir.iterdir(), key=lambda p: p.name.lower()):
         if not file_path.is_file():
             continue
@@ -698,7 +740,7 @@ def media() -> dict[str, list[dict[str, str]]]:
             {
                 "filename": file_path.name,
                 "type": media_type,
-                "url": f"http://localhost:8000/tiles/media/{file_path.name}",
+                "url": f"{base_url}/tiles/media/{file_path.name}",
             }
         )
 
@@ -786,7 +828,8 @@ async def process_pointcloud(payload: PointCloudProcessPayload, request: Request
         tileset_path.write_text('{"asset":{"version":"1.0"}}', encoding="utf-8")
 
     tileset_url = (
-        f"http://localhost:8000/tiles/pointclouds/{payload.project_id}/tileset.json"
+        f"{str(request.base_url).rstrip('/')}/tiles/pointclouds/"
+        f"{payload.project_id}/tileset.json"
     )
 
     return {
@@ -880,7 +923,7 @@ async def complete_upload(
 
     raw_dir = Path(LOCAL_DATA_PATH) / "raw_uploads"
     raw_dir.mkdir(parents=True, exist_ok=True)
-    out_path = raw_dir / safe_name
+    out_path = raw_dir / f"{safe_project_id}__{safe_name}"
 
     # Large-file safety: ensure enough free space for merged output (+ headroom).
     _ensure_disk_space_for_bytes(raw_dir, total_bytes)
@@ -910,26 +953,47 @@ async def complete_upload(
         pass
 
     content_hash = file_digest.hexdigest()
-    cached_project_id = f"pc-{content_hash[:24]}"
     cache = _read_conversion_cache()
-    user_cache_key = f"{int(user['id'])}:{content_hash}"
-    reused_project_id = cache.get(user_cache_key, safe_project_id or cached_project_id)
-    output_dir = Path(LOCAL_DATA_PATH) / "pointclouds" / reused_project_id
+    user_cache_key = f"{int(user['id'])}:{safe_project_id}:{content_hash}"
+    reused_tileset_id = cache.get(user_cache_key)
+    if reused_tileset_id:
+        reused_tileset_id = _safe_tileset_id(reused_tileset_id)
+    else:
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(safe_name).stem).strip("-") or "cloud"
+        reused_tileset_id = f"{stem[:40]}-{content_hash[:12]}"
+    output_dir = Path(LOCAL_DATA_PATH) / "pointclouds" / safe_project_id / reused_tileset_id
     final_path = out_path
+    hash_marker = output_dir / ".source_hash.txt"
+    existing_hash = None
+    try:
+        if hash_marker.is_file():
+            existing_hash = hash_marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        existing_hash = None
 
-    if (output_dir / "tileset.json").is_file():
+    if (output_dir / "tileset.json").is_file() and existing_hash == content_hash:
         final_path.unlink(missing_ok=True)
         return {
             "status": "success",
             "message": (
                 f"Merged {total} chunks into {safe_name}. "
-                "Found existing converted tiles for same file content; reusing cache."
+                "Found existing converted tiles for same file content; reusing project tiles."
             ),
             "tileset_url": "PENDING",
-            "project_id": reused_project_id,
+            "project_id": safe_project_id,
+            "target_tileset_url": (
+                f"{str(request.base_url).rstrip('/')}/tiles/pointclouds/"
+                f"{safe_project_id}/{reused_tileset_id}/tileset.json"
+            ),
+            "tileset_id": reused_tileset_id,
         }
 
-    cache[user_cache_key] = reused_project_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        hash_marker.write_text(content_hash, encoding="utf-8")
+    except OSError:
+        pass
+    cache[user_cache_key] = reused_tileset_id
     _write_conversion_cache(cache)
     background_tasks.add_task(process_pointcloud_background, final_path, output_dir)
 
@@ -937,7 +1001,12 @@ async def complete_upload(
         "status": "success",
         "message": "File merged. 3D Tile processing started in background.",
         "tileset_url": "PENDING",
-        "project_id": reused_project_id,
+        "project_id": safe_project_id,
+        "target_tileset_url": (
+            f"{str(request.base_url).rstrip('/')}/tiles/pointclouds/"
+            f"{safe_project_id}/{reused_tileset_id}/tileset.json"
+        ),
+        "tileset_id": reused_tileset_id,
     }
 
 

@@ -1,33 +1,30 @@
-import { useCallback, useEffect, useState } from 'react'
-import { HydrologyStats } from './HydrologyStats/HydrologyStats'
-import GlobeViewer from './GlobeViewer/GlobeViewer'
-import { MediaGallery } from './MediaGallery/MediaGallery'
-import { MapViewer } from './MapViewer/MapViewer'
-import { apiFetch, apiJson } from '../lib/apiBase'
+import { Suspense, lazy, useCallback, useEffect, useMemo } from 'react'
+import { useProjects } from '../hooks/useProjects'
+import { logout } from '../services/authService'
+import type { Project } from '../services/projectService'
+import { useWorkspaceContext } from '../context/WorkspaceContext'
 import './Dashboard.css'
+
+const HydrologyStats = lazy(() =>
+  import('./HydrologyStats/HydrologyStats').then((m) => ({ default: m.HydrologyStats })),
+)
+const MapViewer = lazy(() =>
+  import('./MapViewer/MapViewer').then((m) => ({ default: m.MapViewer })),
+)
+const GlobeViewer = lazy(() => import('./GlobeViewer/GlobeViewer'))
 
 const DROID_CLOUD_LOGO_URL =
   'https://www.droidminingsolutions.com/wp-content/uploads/2026/04/ChatGPT-Image-Apr-25-2026-04_33_45-PM.png'
 
 const NAV_ITEMS = [
-  { id: 'projects', label: 'Projects', icon: 'fa-solid fa-folder-open' },
-  { id: 'overview', label: 'Dashboard Overview', icon: 'fa-solid fa-chart-line' },
-  { id: 'map', label: 'Map Viewer', icon: 'fa-solid fa-map-location-dot' },
-  { id: 'globe', label: 'Globe View', icon: 'fa-solid fa-earth-asia' },
-  { id: 'analysis', label: 'Hydrology Analysis', icon: 'fa-solid fa-droplet' },
-  { id: 'media', label: 'Media Gallery', icon: 'fa-solid fa-images' },
-  { id: 'issues', label: 'Issue Tracker', icon: 'fa-solid fa-clipboard-list' },
-  { id: 'downloads', label: 'Downloads', icon: 'fa-solid fa-file-arrow-down' },
+  { id: 'dashboard', label: 'Dashboard', icon: 'fa-solid fa-house' },
+  { id: 'projects', label: 'Projects', icon: 'fa-solid fa-folder-tree' },
+  { id: 'datasets', label: 'Datasets', icon: 'fa-solid fa-database' },
+  { id: 'map', label: 'Map View', icon: 'fa-solid fa-map' },
+  { id: 'globe', label: 'Globe View', icon: 'fa-solid fa-earth-americas' },
+  { id: 'compare', label: 'Compare', icon: 'fa-solid fa-code-compare' },
+  { id: 'downloads', label: 'Downloads', icon: 'fa-solid fa-download' },
 ] as const
-
-type Project = {
-  id: string
-  name: string
-  location: string
-  date: string
-  status: string
-  type: string
-}
 
 const DASHBOARD_METRICS = [
   { label: 'Active Modeling Jobs', value: '08', meta: 'Across 3 basins', icon: 'fa-solid fa-wave-square' },
@@ -38,7 +35,7 @@ const DASHBOARD_METRICS = [
 
 const DASHBOARD_MODULES = [
   {
-    id: 'analysis',
+    id: 'map',
     title: 'Hydrology Analysis & Modeling',
     icon: 'fa-solid fa-droplet',
     description:
@@ -46,20 +43,20 @@ const DASHBOARD_MODULES = [
     action: 'Open analysis workspace',
   },
   {
-    id: 'media',
-    title: 'Media Repository Gallery',
-    icon: 'fa-solid fa-images',
+    id: 'datasets',
+    title: 'Project Datasets',
+    icon: 'fa-solid fa-database',
     description:
-      'Review imagery and site evidence in a structured repository for documentation workflows.',
-    action: 'Explore media repository',
+      'Access project datasets and prepare structured inputs for map and model workflows.',
+    action: 'Open datasets panel',
   },
   {
-    id: 'issues',
-    title: 'Project Issue Tracking',
-    icon: 'fa-solid fa-clipboard-list',
+    id: 'compare',
+    title: 'Compare Scenarios',
+    icon: 'fa-solid fa-code-compare',
     description:
-      'Track field observations, assign priority, and maintain an auditable issue register.',
-    action: 'Manage issue register',
+      'Compare outcomes across different model configurations and project versions.',
+    action: 'Open compare panel',
   },
   {
     id: 'downloads',
@@ -77,21 +74,27 @@ type DashboardProps = {
 }
 
 export function Dashboard({ user, onLogout }: DashboardProps) {
-  const [activeId, setActiveId] = useState<string>('projects')
-  const [selectedProject, setSelectedProject] = useState<Project | null>(null)
-  const [projects, setProjects] = useState<Project[]>([])
-  const [projectsLoading, setProjectsLoading] = useState(false)
-  const [projectsError, setProjectsError] = useState<string | null>(null)
-  const [showCreateProject, setShowCreateProject] = useState(false)
-  const [createForm, setCreateForm] = useState({
-    name: '',
-    location: '',
-    date: '',
-    status: 'Active',
-    type: 'Drone Survey',
-  })
-  const [shareCopied, setShareCopied] = useState(false)
-  const [floodSimulationLevel, setFloodSimulationLevel] = useState(0)
+  const {
+    activeId,
+    setActiveId,
+    selectedProject,
+    setSelectedProject,
+    floodSimulationLevel,
+    setFloodSimulationLevel,
+    showCreateProject,
+    setShowCreateProject,
+    createForm,
+    setCreateForm,
+    shareCopied,
+    setShareCopied,
+  } = useWorkspaceContext()
+  const { projects, loading: projectsLoading, error: projectsError, addProject } = useProjects()
+
+  const visibleNavItems = useMemo(
+    () =>
+      selectedProject ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.id === 'projects'),
+    [selectedProject],
+  )
 
   const handleShare = useCallback(() => {
     const url = `${window.location.origin}${window.location.pathname}`
@@ -108,37 +111,24 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     }
   }, [])
 
-  const loadProjects = useCallback(async () => {
-    setProjectsLoading(true)
-    setProjectsError(null)
-    try {
-      const data = await apiJson<{ projects: Project[] }>('/api/projects')
-      setProjects(data.projects)
-      setSelectedProject((prev) =>
-        prev ? data.projects.find((p) => p.id === prev.id) ?? null : null,
-      )
-    } catch (e) {
-      setProjectsError(e instanceof Error ? e.message : 'Failed to load projects')
-    } finally {
-      setProjectsLoading(false)
-    }
-  }, [])
+  const openProject = useCallback(
+    (project: Project) => {
+      setSelectedProject(project)
+      setActiveId('dashboard')
+    },
+    [setActiveId, setSelectedProject],
+  )
 
   useEffect(() => {
-    void loadProjects()
-  }, [loadProjects])
+    setSelectedProject((prev) => (prev ? projects.find((p) => p.id === prev.id) ?? null : null))
+  }, [projects])
 
   const createProject = async () => {
     try {
-      const project = await apiJson<Project>('/api/projects', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(createForm),
-      })
-      setProjects((prev) => [project, ...prev])
+      const project = await addProject(createForm)
       setSelectedProject(project)
       setShowCreateProject(false)
-      setActiveId('overview')
+      setActiveId('dashboard')
       setCreateForm({
         name: '',
         location: '',
@@ -146,19 +136,80 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
         status: 'Active',
         type: 'Drone Survey',
       })
-    } catch (e) {
-      setProjectsError(e instanceof Error ? e.message : 'Failed to create project')
-    }
+    } catch {}
   }
 
   const handleLogout = async () => {
-    await apiFetch('/api/auth/logout', { method: 'POST' })
+    await logout()
     onLogout()
   }
 
+  const createProjectForm = useMemo(
+    () => (
+      <div className="ds-project-modal" role="dialog" aria-label="Create project">
+        <div className="ds-project-modal__card">
+          <h3>Create New Project</h3>
+          <label>
+            Name
+            <input
+              value={createForm.name}
+              onChange={(e) => setCreateForm((s) => ({ ...s, name: e.target.value }))}
+            />
+          </label>
+          <label>
+            Location
+            <input
+              value={createForm.location}
+              onChange={(e) => setCreateForm((s) => ({ ...s, location: e.target.value }))}
+            />
+          </label>
+          <label>
+            Date
+            <input
+              value={createForm.date}
+              onChange={(e) => setCreateForm((s) => ({ ...s, date: e.target.value }))}
+              placeholder="April 2026"
+            />
+          </label>
+          <label>
+            Type
+            <input
+              value={createForm.type}
+              onChange={(e) => setCreateForm((s) => ({ ...s, type: e.target.value }))}
+            />
+          </label>
+          <label>
+            Status
+            <input
+              value={createForm.status}
+              onChange={(e) => setCreateForm((s) => ({ ...s, status: e.target.value }))}
+            />
+          </label>
+          <div className="ds-project-modal__actions">
+            <button
+              type="button"
+              className="ds-project-card__open"
+              onClick={() => void createProject()}
+            >
+              Create
+            </button>
+            <button
+              type="button"
+              className="ds-project-modal__cancel"
+              onClick={() => setShowCreateProject(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    ),
+    [createForm, createProject, setCreateForm, setShowCreateProject],
+  )
+
   return (
     <div className="ds-dashboard">
-      <aside className="ds-sidebar" aria-label="Droid Survair navigation">
+      <aside className="ds-sidebar" aria-label="Droid Cloud navigation">
         <div className="ds-sidebar__brand">
           <div className="ds-sidebar__brand-mark">
             <img src={DROID_CLOUD_LOGO_URL} alt="Droid Cloud" className="ds-sidebar__logo-img" />
@@ -166,7 +217,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
         </div>
 
         <nav className="ds-sidebar__nav">
-          {NAV_ITEMS.map((item) => (
+          {visibleNavItems.map((item) => (
             <a
               key={item.id}
               href={`#${item.id}`}
@@ -200,7 +251,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
           <div className="ds-topbar__project">
             <span className="ds-topbar__label">Project</span>
             <h1 className="ds-topbar__name">
-              {selectedProject ? selectedProject.name : 'All Projects'}
+              {selectedProject ? selectedProject.name : 'Select Project'}
             </h1>
           </div>
 
@@ -273,89 +324,17 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                     <button
                       type="button"
                       className="ds-project-card__open"
-                      onClick={() => {
-                        setSelectedProject(project)
-                        setActiveId('overview')
-                      }}
+                      onClick={() => openProject(project)}
                     >
                       <i className="fa-solid fa-arrow-up-right-from-square" aria-hidden />
-                      Open Workspace
+                      Open Project
                     </button>
                   </article>
                 ))}
               </div>
-              {showCreateProject ? (
-                <div className="ds-project-modal" role="dialog" aria-label="Create project">
-                  <div className="ds-project-modal__card">
-                    <h3>Create New Project</h3>
-                    <label>
-                      Name
-                      <input
-                        value={createForm.name}
-                        onChange={(e) => setCreateForm((s) => ({ ...s, name: e.target.value }))}
-                      />
-                    </label>
-                    <label>
-                      Location
-                      <input
-                        value={createForm.location}
-                        onChange={(e) => setCreateForm((s) => ({ ...s, location: e.target.value }))}
-                      />
-                    </label>
-                    <label>
-                      Date
-                      <input
-                        value={createForm.date}
-                        onChange={(e) => setCreateForm((s) => ({ ...s, date: e.target.value }))}
-                        placeholder="April 2026"
-                      />
-                    </label>
-                    <label>
-                      Type
-                      <input
-                        value={createForm.type}
-                        onChange={(e) => setCreateForm((s) => ({ ...s, type: e.target.value }))}
-                      />
-                    </label>
-                    <label>
-                      Status
-                      <input
-                        value={createForm.status}
-                        onChange={(e) => setCreateForm((s) => ({ ...s, status: e.target.value }))}
-                      />
-                    </label>
-                    <div className="ds-project-modal__actions">
-                      <button
-                        type="button"
-                        className="ds-project-card__open"
-                        onClick={() => void createProject()}
-                      >
-                        Create
-                      </button>
-                      <button
-                        type="button"
-                        className="ds-project-modal__cancel"
-                        onClick={() => setShowCreateProject(false)}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              ) : null}
+              {showCreateProject ? createProjectForm : null}
             </section>
-          ) : !selectedProject ? (
-            <section className="ds-projects ds-projects--empty" aria-label="Project selection required">
-              <p>Select a project from the Projects tab to open tools.</p>
-              <button
-                type="button"
-                className="ds-project-card__open"
-                onClick={() => setActiveId('projects')}
-              >
-                Go to Projects
-              </button>
-            </section>
-          ) : activeId === 'overview' ? (
+          ) : activeId === 'dashboard' ? (
             <section className="ds-overview" aria-label="Dashboard overview">
               <article className="ds-overview-hero">
                 <div>
@@ -410,64 +389,94 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
           ) : (
             <div
               className={
-                activeId === 'analysis'
+                activeId === 'map'
                   ? 'ds-map-shell ds-map-shell--viewer ds-map-shell--analysis'
                   : 'ds-map-shell ds-map-shell--viewer'
               }
             >
               <div className="ds-map-toolbar">
                 <h2 className="ds-map-toolbar__title">
-                  {activeId === 'analysis'
-                    ? 'Hydrology analysis workspace'
+                  {activeId === 'map'
+                    ? 'Map View · Hydrology Analysis'
                     : activeId === 'globe'
-                      ? '3D globe workspace'
-                    : activeId === 'media'
-                      ? 'Project media gallery'
-                      : 'Live map canvas'}
+                      ? '3D Globe Workspace'
+                    : activeId === 'datasets'
+                      ? 'Project Datasets'
+                    : activeId === 'compare'
+                      ? 'Model Comparison'
+                      : 'Downloads'}
                 </h2>
                 <span className="ds-map-toolbar__badge">
-                  {activeId === 'analysis'
+                  {activeId === 'map'
                     ? 'Stats · Map'
                     : activeId === 'globe'
                       ? 'CesiumJS · 3D'
-                    : activeId === 'media'
-                      ? 'Images · Videos'
-                      : 'React Leaflet'}
+                    : activeId === 'datasets'
+                      ? 'Data Catalog'
+                    : activeId === 'compare'
+                      ? 'Scenario Compare'
+                      : 'Export Center'}
                 </span>
               </div>
-              {activeId === 'analysis' ? (
+              {activeId === 'map' ? (
                 <div className="ds-analysis-split">
-                  <HydrologyStats
-                    floodSimulationLevel={floodSimulationLevel}
-                    onFloodSimulationChange={setFloodSimulationLevel}
-                  />
+                  <Suspense fallback={<div className="ds-panel-loading">Loading analytics…</div>}>
+                    <HydrologyStats
+                      floodSimulationLevel={floodSimulationLevel}
+                      onFloodSimulationChange={setFloodSimulationLevel}
+                    />
+                  </Suspense>
                   <div
                     className="ds-map-body"
                     role="region"
                     aria-label="Map viewer"
                   >
-                    <MapViewer
-                      floodSimulationLevel={floodSimulationLevel}
-                    />
+                    <Suspense fallback={<div className="ds-panel-loading">Loading map…</div>}>
+                      <MapViewer floodSimulationLevel={floodSimulationLevel} />
+                    </Suspense>
                   </div>
                 </div>
-              ) : activeId === 'media' ? (
-                <MediaGallery />
               ) : activeId === 'globe' ? (
                 <div
                   className="ds-map-body ds-map-body--globe"
                   role="region"
                   aria-label="3D globe viewer"
                 >
-                  <GlobeViewer projectId={selectedProject.id} />
+                  <Suspense fallback={<div className="ds-panel-loading">Loading 3D globe…</div>}>
+                    <GlobeViewer projectId={selectedProject!.id} />
+                  </Suspense>
                 </div>
               ) : (
                 <div
                   className="ds-map-body"
                   role="region"
-                  aria-label="Map viewer"
+                  aria-label="Workspace panel"
                 >
-                  <MapViewer floodSimulationLevel={floodSimulationLevel} />
+                  <div className="ds-map-placeholder">
+                    <div className="ds-map-placeholder__inner">
+                      <div className="ds-map-placeholder__icon" aria-hidden>
+                        <i
+                          className={
+                            activeId === 'datasets'
+                              ? 'fa-solid fa-database'
+                              : activeId === 'compare'
+                                ? 'fa-solid fa-code-compare'
+                                : 'fa-solid fa-download'
+                          }
+                        />
+                      </div>
+                      <h3 className="ds-map-placeholder__title">
+                        {activeId === 'datasets'
+                          ? 'Datasets panel coming next'
+                          : activeId === 'compare'
+                            ? 'Compare panel coming next'
+                            : 'Downloads panel coming next'}
+                      </h3>
+                      <p className="ds-map-placeholder__text">
+                        This workspace is ready and scoped to the selected project.
+                      </p>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>

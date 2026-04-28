@@ -17,12 +17,20 @@ export type BaseLayerId = 'orthomosaic' | 'dem' | 'dtm'
 
 /** Flood return period folders under the tile root. */
 export type FloodReturnPeriod = '1in25' | '1in50' | '1in100'
-const LOCAL_FLOOD_TILE_BASE = 'http://localhost:8000/tiles/flood'
 
 const env = import.meta.env
 
 function trimSlash(s: string): string {
   return s.replace(/\/+$/, '').replace(/^\/+/, '')
+}
+
+function runtimeApiBase(): string {
+  const viteVal = env.VITE_API_BASE_URL?.trim()
+  if (viteVal) return viteVal
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return window.location.origin.replace(/\/+$/, '')
+  }
+  return 'http://127.0.0.1:8000'
 }
 
 /** Resolved HTTP root for tiles (local API, S3 static site, CDN, …). */
@@ -89,7 +97,13 @@ export function getBaseLayerTileUrl(layer: BaseLayerId): string | null {
 
 /** XYZ URL template for flood hazard tiles from local FastAPI tiles endpoint. */
 export function getFloodOverlayTileUrl(period: FloodReturnPeriod): string | null {
-  return `${LOCAL_FLOOD_TILE_BASE}/${period}/{z}/{x}/{y}.png`
+  const explicitFloodBase = env.VITE_FLOOD_TILE_BASE_URL?.trim()
+  const tileBase = getTileBaseUrl()
+  const apiBase = runtimeApiBase()
+  const resolvedFloodBase =
+    explicitFloodBase || (tileBase ? `${trimSlash(tileBase)}/flood` : `${apiBase}/tiles/flood`)
+  if (!resolvedFloodBase) return null
+  return `${resolvedFloodBase.replace(/\/+$/, '')}/${period}/{z}/{x}/{y}.png`
 }
 
 /** OpenStreetMap fallback when no custom tile base is configured. */

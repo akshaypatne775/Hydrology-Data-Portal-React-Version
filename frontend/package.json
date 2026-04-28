@@ -10,14 +10,14 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@fortawesome/fontawesome-free": "^7.2.0",
     "@turf/area": "^7.3.4",
     "@turf/helpers": "^7.3.4",
     "cesium": "^1.140.0",
     "leaflet": "^1.9.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "react-leaflet": "^5.0.0"
+    "react-leaflet": "^5.0.0",
+    "recharts": "^3.8.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

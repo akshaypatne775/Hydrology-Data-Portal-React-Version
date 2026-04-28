@@ -1,11 +1,11 @@
 import { useMemo, useState } from 'react'
-import { apiJson } from '../../lib/apiBase'
+import { getCurrentUser, login, signup, type AuthUser } from '../../services/authService'
 import './AuthScreen.css'
 
 type AuthMode = 'login' | 'signup'
 
 type AuthScreenProps = {
-  onAuthenticated: (user: { id: number; email: string }) => void
+  onAuthenticated: (user: AuthUser) => void
 }
 
 export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
@@ -25,12 +25,12 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     setSubmitting(true)
     try {
       const endpoint = mode === 'login' ? '/api/auth/login' : '/api/auth/signup'
-      await apiJson<{ status: string }>(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-      })
-      const me = await apiJson<{ id: number; email: string }>('/api/auth/me')
+      if (endpoint.includes('login')) {
+        await login(email, password)
+      } else {
+        await signup(email, password)
+      }
+      const me = await getCurrentUser()
       onAuthenticated(me)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Authentication failed')

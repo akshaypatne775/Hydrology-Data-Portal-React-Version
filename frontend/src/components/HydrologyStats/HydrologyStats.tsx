@@ -1,4 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useMemo } from 'react'
+import { useHydrologyStats } from '../../hooks/useHydrologyStats'
+import HydrologyBarChart from '../charts/HydrologyBarChart'
+import HydrologyLineChart from '../charts/HydrologyLineChart'
+import SummaryStatsCards from '../charts/SummaryStatsCards'
 
 import './HydrologyStats.css'
 
@@ -7,78 +11,48 @@ export type HydrologyStatsProps = {
   onFloodSimulationChange: (level: number) => void
 }
 
-type CatchmentStat = { label: string; value: string; unit: string }
-type StreamStat = { label: string; value: string; unit: string }
-type LulcRow = { name: string; pct: number; color: string }
-
-type ProjectStatsPayload = {
-  catchment_stats: CatchmentStat[]
-  stream_stats: StreamStat[]
-  lulc_rows: LulcRow[]
-}
-
-const PROJECT_STATS_URL = 'http://localhost:8000/api/hydrology-stats'
-const RUN_FLOOD_ENGINE_URL = 'http://localhost:8000/api/run-flood-engine'
-
 export function HydrologyStats({
   floodSimulationLevel,
   onFloodSimulationChange,
 }: HydrologyStatsProps) {
-  const [catchmentStats, setCatchmentStats] = useState<CatchmentStat[]>([])
-  const [streamStats, setStreamStats] = useState<StreamStat[]>([])
-  const [lulcRows, setLulcRows] = useState<LulcRow[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [isSimulating, setIsSimulating] = useState(false)
-  const [simulationDone, setSimulationDone] = useState(false)
+  const {
+    catchmentStats,
+    streamStats,
+    lulcRows,
+    loading,
+    error,
+    isSimulating,
+    simulationDone,
+    runEngine,
+  } = useHydrologyStats()
 
-  async function runHydrologyEngine() {
-    if (isSimulating || simulationDone) return
-    setIsSimulating(true)
-    try {
-      const res = await fetch(RUN_FLOOD_ENGINE_URL, { method: 'POST' })
-      if (!res.ok) {
-        throw new Error(`Request failed (${res.status})`)
-      }
-      setSimulationDone(true)
-    } finally {
-      setIsSimulating(false)
-    }
-  }
+  const summaryStats = useMemo(
+    () =>
+      catchmentStats.slice(0, 4).map((row) => ({
+        id: row.label,
+        label: row.label,
+        value: `${row.value}${row.unit ? ` ${row.unit}` : ''}`,
+      })),
+    [catchmentStats],
+  )
 
-  useEffect(() => {
-    let cancelled = false
+  const streamLineData = useMemo(
+    () =>
+      streamStats.map((row, idx) => ({
+        name: row.label.replace(/\s+/g, ' ').slice(0, 18) || `S${idx + 1}`,
+        value: Number.parseFloat(row.value) || idx + 1,
+      })),
+    [streamStats],
+  )
 
-    async function load() {
-      setLoading(true)
-      setError(null)
-      try {
-        const res = await fetch(PROJECT_STATS_URL)
-        if (!res.ok) {
-          throw new Error(`Request failed (${res.status})`)
-        }
-        const data = (await res.json()) as ProjectStatsPayload
-        if (cancelled) return
-        setCatchmentStats(data.catchment_stats ?? [])
-        setStreamStats(data.stream_stats ?? [])
-        setLulcRows(data.lulc_rows ?? [])
-      } catch (e) {
-        if (!cancelled) {
-          setError(e instanceof Error ? e.message : 'Failed to load project stats')
-          setCatchmentStats([])
-          setStreamStats([])
-          setLulcRows([])
-        }
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
-
-    void load()
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  const lulcBarData = useMemo(
+    () =>
+      lulcRows.map((row) => ({
+        name: row.name.replace(/\s+/g, ' ').slice(0, 14),
+        value: row.pct,
+      })),
+    [lulcRows],
+  )
 
   return (
     <div className="hs-root">
@@ -106,6 +80,10 @@ export function HydrologyStats({
 
       {!loading && !error ? (
         <>
+          <SummaryStatsCards title="Summary Stats" stats={summaryStats} />
+          <HydrologyLineChart title="Stream Trend (API)" data={streamLineData} />
+          <HydrologyBarChart title="LULC Distribution (API)" data={lulcBarData} />
+
           <section className="hs-section" aria-labelledby="hs-catchment-heading">
             <div className="hs-section__head">
               <h3 id="hs-catchment-heading" className="hs-section__title">
@@ -232,7 +210,7 @@ export function HydrologyStats({
               : 'hs-engine-btn'
           }
           onClick={() => {
-            void runHydrologyEngine()
+            void runEngine()
           }}
           disabled={isSimulating || simulationDone}
         >

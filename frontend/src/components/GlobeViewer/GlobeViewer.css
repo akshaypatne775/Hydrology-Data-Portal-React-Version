@@ -156,7 +156,7 @@
 
 .d3d-layer-panel {
   position: absolute;
-  top: 1rem;
+  top: 4.25rem;
   right: 1rem;
   z-index: 24;
   width: min(260px, calc(100% - 2rem));

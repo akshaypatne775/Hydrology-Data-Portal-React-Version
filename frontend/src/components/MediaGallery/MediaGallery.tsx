@@ -1,54 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useMediaGallery } from '../../hooks/useMediaGallery'
 
 import './MediaGallery.css'
 
-type MediaType = 'image' | 'video'
-
-type MediaItem = {
-  filename: string
-  type: MediaType
-  url: string
-}
-
-type MediaResponse = {
-  media: MediaItem[]
-}
-
-const MEDIA_URL = 'http://localhost:8000/api/media'
-
 export function MediaGallery() {
-  const [items, setItems] = useState<MediaItem[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-
-    async function loadMedia() {
-      setLoading(true)
-      setError(null)
-      try {
-        const response = await fetch(MEDIA_URL)
-        if (!response.ok) {
-          throw new Error(`Request failed (${response.status})`)
-        }
-        const data = (await response.json()) as MediaResponse
-        if (cancelled) return
-        setItems(data.media ?? [])
-      } catch (e) {
-        if (cancelled) return
-        setError(e instanceof Error ? e.message : 'Failed to load media')
-        setItems([])
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
-
-    void loadMedia()
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  const { items, loading, error } = useMediaGallery()
 
   return (
     <section className="mg-root" aria-labelledby="mg-title">

@@ -1,0 +1,57 @@
+.ch-card {
+  background: #0c262d;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 0.85rem 0.95rem;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.2),
+    0 12px 28px rgba(0, 0, 0, 0.2);
+}
+
+.ch-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.65rem;
+}
+
+.ch-card__head h3 {
+  margin: 0;
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #e8f4f6;
+}
+
+.ch-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 0.6rem;
+}
+
+.ch-summary-item {
+  background: #102f38;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  padding: 0.55rem 0.65rem;
+}
+
+.ch-summary-item__label {
+  margin: 0;
+  color: rgba(232, 244, 246, 0.6);
+  font-size: 0.64rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.ch-summary-item__value {
+  margin: 0.25rem 0 0;
+  color: #5eead4;
+  font-weight: 700;
+  font-size: 0.96rem;
+}
+
+.ch-plot {
+  width: 100%;
+  min-height: 220px;
+}

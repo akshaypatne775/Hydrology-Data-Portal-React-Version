@@ -1,23 +1,39 @@
 import { getTileBaseUrl } from '../components/MapViewer/tileSources'
 
-const DEFAULT_API = 'http://localhost:8000'
+function getRuntimeEnvVar(name: string): string | undefined {
+  const viteVal = import.meta.env[name as keyof ImportMetaEnv]
+  if (typeof viteVal === 'string' && viteVal.trim()) {
+    return viteVal.trim()
+  }
+  const processEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } })
+    .process?.env
+  const processVal = processEnv?.[name]
+  return processVal?.trim() || undefined
+}
+
+function defaultApiBase(): string {
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return window.location.origin.replace(/\/+$/, '')
+  }
+  return 'http://127.0.0.1:8000'
+}
 
 /**
  * Origin of the FastAPI app (chunk upload, merge, status, issues, …).
  *
- * - `VITE_API_BASE_URL` when set (e.g. `http://127.0.0.1:8000`)
+ * - `VITE_API_BASE_URL` / `process.env.VITE_API_BASE_URL` when set
  * - Else derived from `VITE_TILE_BASE_URL` / `VITE_S3_TILE_BASE_URL` by removing a trailing `/tiles`
- * - Else `http://localhost:8000`
+ * - Else browser origin (same-host deployment)
  */
 export function getApiBaseUrl(): string {
-  const explicit = import.meta.env.VITE_API_BASE_URL?.trim()
+  const explicit = getRuntimeEnvVar('VITE_API_BASE_URL')
   if (explicit) {
     return explicit.replace(/\/+$/, '')
   }
 
   const tileBase = getTileBaseUrl()?.replace(/\/+$/, '')
   if (!tileBase) {
-    return DEFAULT_API
+    return defaultApiBase()
   }
 
   if (tileBase.toLowerCase().endsWith('/tiles')) {
@@ -27,7 +43,7 @@ export function getApiBaseUrl(): string {
   try {
     return new URL(tileBase).origin
   } catch {
-    return DEFAULT_API
+    return defaultApiBase()
   }
 }
 
