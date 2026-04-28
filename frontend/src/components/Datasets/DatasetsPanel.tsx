@@ -1,21 +1,10 @@
-import { useCallback, useMemo, useState, type DragEvent } from 'react'
-import { API_BASE, formatApiNetworkError } from '../../lib/apiBase'
-import { completeUpload, uploadChunk } from '../../services/pointCloudService'
-import { getDatasetStatus, processDatasetTif } from '../../services/datasetService'
-import { saveWebReadyCogLayer } from '../../utils/datasetLayerStorage'
+import { useCallback, useEffect, useMemo, useState, type DragEvent } from 'react'
+import { useUploadContext } from '../../context/UploadContext'
+import { getProjectJobs, type ProjectJob } from '../../services/datasetService'
 import './DatasetsPanel.css'
-
-const CHUNK_SIZE_BYTES = 10 * 1024 * 1024
 const ALLOWED_EXTENSIONS = new Set(['las', 'laz', 'tif'])
-
-type UploadState = 'idle' | 'uploading' | 'success' | 'error'
 type DatasetType = 'Ortho' | 'DTM' | 'DSM' | 'Point Cloud'
 type DatasetStatus = 'Raw' | 'Processing' | 'Web-Ready'
-
-type CompleteUploadResponse = {
-  project_id?: string
-  target_tileset_url?: string
-}
 
 type DatasetRow = {
   id: string
@@ -66,158 +55,90 @@ function inferDatasetType(fileName: string): DatasetType {
   return 'Point Cloud'
 }
 
-function readableSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB'
-  const gb = bytes / (1024 * 1024 * 1024)
-  if (gb >= 1) return `${gb.toFixed(2)} GB`
-  const mb = bytes / (1024 * 1024)
-  return `${mb.toFixed(0)} MB`
+function normalizeJobStatus(status: string): DatasetStatus {
+  return status === 'Completed' ? 'Web-Ready' : 'Processing'
 }
 
 export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   const [isDragging, setIsDragging] = useState(false)
-  const [uploadState, setUploadState] = useState<UploadState>('idle')
-  const [progressPercent, setProgressPercent] = useState(0)
-  const [statusText, setStatusText] = useState('Drop .las, .laz, .tif files or click to select')
   const [datasets, setDatasets] = useState<DatasetRow[]>(MOCK_DATASETS)
+  const { tasks, startDatasetUpload, startPointCloudUpload } = useUploadContext()
 
-  const progressLabel = useMemo(
-    () => `${Math.max(0, Math.min(100, Math.round(progressPercent)))}%`,
-    [progressPercent],
+  const activeTasks = useMemo(
+    () => tasks.filter((task) => task.projectId === projectId),
+    [projectId, tasks],
   )
 
-  const addDatasetRow = useCallback((file: File, status: DatasetStatus, datasetId?: string) => {
-    setDatasets((prev) => [
-      {
-        id: `${file.name}-${Date.now()}-${datasetId ?? 'local'}`,
-        datasetId,
-        fileName: file.name,
-        type: inferDatasetType(file.name),
-        size: readableSize(file.size),
-        status,
-        actionLabel: status === 'Raw' ? 'Delete' : 'View on Map',
-      },
-      ...prev,
-    ])
-  }, [])
-
-  const updateDatasetStatus = useCallback((datasetId: string, status: DatasetStatus) => {
-    setDatasets((prev) =>
-      prev.map((row) => (row.datasetId === datasetId ? { ...row, status, actionLabel: status === 'Raw' ? 'Delete' : 'View on Map' } : row)),
-    )
-  }, [])
-
-  const uploadPointCloudInChunks = useCallback(
-    async (file: File) => {
-      if (!projectId) {
-        throw new Error('Project is required for point cloud upload.')
-      }
-      setUploadState('uploading')
-      setProgressPercent(0)
-      setStatusText(`Uploading ${file.name}...`)
-
-      const totalChunks = Math.ceil(file.size / CHUNK_SIZE_BYTES)
-
+  useEffect(() => {
+    if (!projectId) return
+    let cancelled = false
+    const loadJobs = async () => {
       try {
-        for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
-          const start = chunkIndex * CHUNK_SIZE_BYTES
-          const end = Math.min(start + CHUNK_SIZE_BYTES, file.size)
-          const chunk = file.slice(start, end)
-
-          const chunkForm = new FormData()
-          chunkForm.append('filename', file.name)
-          chunkForm.append('project_id', projectId)
-          chunkForm.append('chunkIndex', String(chunkIndex))
-          chunkForm.append('totalChunks', String(totalChunks))
-          chunkForm.append('chunk', chunk, `${file.name}.part.${chunkIndex}`)
-
-          const chunkResponse = await uploadChunk(chunkForm)
-          if (!chunkResponse.ok) {
-            throw new Error(`Chunk upload failed at part ${chunkIndex + 1}`)
-          }
-          setProgressPercent(((chunkIndex + 1) / totalChunks) * 100)
-        }
-
-        const completeResponse = await completeUpload({
-          filename: file.name,
-          totalChunks,
-          project_id: projectId,
+        const jobs = await getProjectJobs(projectId)
+        if (cancelled) return
+        const mapped: DatasetRow[] = jobs.map((job: ProjectJob) => ({
+          id: `job-${job.job_id}`,
+          datasetId: job.job_id,
+          fileName: job.file_name,
+          type: inferDatasetType(job.file_name),
+          size: 'Server Job',
+          status: normalizeJobStatus(job.status),
+          actionLabel: job.status === 'Completed' ? 'View on Map' : 'Delete',
+        }))
+        setDatasets((prev) => {
+          const keepMocks = prev.filter((row) => !row.id.startsWith('job-'))
+          const merged = [...mapped, ...keepMocks]
+          return merged.filter(
+            (row, index, arr) => arr.findIndex((item) => item.fileName === row.fileName) === index,
+          )
         })
-        if (!completeResponse.ok) {
-          throw new Error('Failed to complete upload merge step')
-        }
-
-        const completeData = (await completeResponse.json()) as CompleteUploadResponse
-        const resolvedProjectId = completeData.project_id || projectId
-        const resolvedUrl =
-          completeData.target_tileset_url ||
-          `${API_BASE}/tiles/pointclouds/${encodeURIComponent(resolvedProjectId)}/tileset.json`
-
-        setUploadState('success')
-        setStatusText(`Queued for processing. Tileset target: ${resolvedUrl}`)
-        addDatasetRow(file, 'Processing')
-      } catch (error) {
-        setUploadState('error')
-        setStatusText(formatApiNetworkError(API_BASE, error))
+      } catch {
+        // keep current state
       }
-    },
-    [addDatasetRow, projectId],
-  )
+    }
+    void loadJobs()
+    return () => {
+      cancelled = true
+    }
+  }, [projectId])
+
+  useEffect(() => {
+    if (!projectId) return
+    setDatasets((prev) => {
+      const liveRows = activeTasks.map((task) => ({
+        id: `live-${task.id}`,
+        datasetId: task.datasetId,
+        fileName: task.fileName,
+        type: inferDatasetType(task.fileName),
+        size: 'Uploading',
+        status: (task.state === 'success' ? 'Web-Ready' : 'Processing') as DatasetStatus,
+        actionLabel: (task.state === 'success' ? 'View on Map' : 'Delete') as 'View on Map' | 'Delete',
+      }))
+      const base = prev.filter((row) => !row.id.startsWith('live-'))
+      return [...liveRows, ...base].filter(
+        (row, index, arr) => arr.findIndex((item) => item.fileName === row.fileName) === index,
+      )
+    })
+  }, [activeTasks, projectId])
 
   const handleFile = useCallback(
     async (file: File) => {
       if (!projectId) {
-        setUploadState('error')
-        setStatusText('Please select a project before uploading datasets.')
         return
       }
       const extension = file.name.split('.').pop()?.toLowerCase() || ''
       if (!ALLOWED_EXTENSIONS.has(extension)) {
-        setUploadState('error')
-        setStatusText('Only .las, .laz, and .tif files are supported.')
         return
       }
 
       if (extension === 'tif') {
-        setUploadState('uploading')
-        setProgressPercent(15)
-        setStatusText(`Uploading ${file.name}...`)
-
-        const form = new FormData()
-        form.append('project_id', projectId)
-        form.append('file', file)
-        const created = await processDatasetTif(form)
-        addDatasetRow(file, 'Processing', created.dataset_id)
-        setProgressPercent(45)
-        setStatusText(`Converting ${file.name} to COG...`)
-
-        const start = Date.now()
-        const timeoutMs = 2 * 60 * 60 * 1000
-        while (Date.now() - start < timeoutMs) {
-          const status = await getDatasetStatus(projectId, created.dataset_id)
-          if (status.status === 'Web-Ready') {
-            updateDatasetStatus(created.dataset_id, 'Web-Ready')
-            if (status.cog_tile_url_template) {
-              saveWebReadyCogLayer(projectId, created.dataset_id, file.name, status.cog_tile_url_template)
-            }
-            setUploadState('success')
-            setProgressPercent(100)
-            setStatusText(`${file.name} is Web-Ready via COG tiles.`)
-            return
-          }
-          if (status.status === 'Failed') {
-            throw new Error(status.error || 'COG conversion failed.')
-          }
-          setStatusText(`Converting ${file.name} to COG...`)
-          setProgressPercent((p) => Math.min(95, Math.max(45, p + 4)))
-          await new Promise((resolve) => window.setTimeout(resolve, 2000))
-        }
-        throw new Error('Timed out waiting for COG conversion.')
+        await startDatasetUpload(file, projectId)
+        return
       }
 
-      await uploadPointCloudInChunks(file)
+      await startPointCloudUpload(file, projectId)
     },
-    [addDatasetRow, projectId, updateDatasetStatus, uploadPointCloudInChunks],
+    [projectId, startDatasetUpload, startPointCloudUpload],
   )
 
   const onDropFile = useCallback(
@@ -268,15 +189,17 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         <p className="dsp-dropzone__meta">Point cloud uploads are chunked at 10MB</p>
       </div>
 
-      <div className="dsp-progress" aria-live="polite">
-        <div className="dsp-progress__track">
-          <div className="dsp-progress__fill" style={{ width: `${progressPercent}%` }} />
+      {activeTasks[0] ? (
+        <div className="dsp-progress" aria-live="polite">
+          <div className="dsp-progress__track">
+            <div className="dsp-progress__fill" style={{ width: `${activeTasks[0].progressPercent}%` }} />
+          </div>
+          <div className="dsp-progress__meta">
+            <span>{`${Math.round(activeTasks[0].progressPercent)}%`}</span>
+            <span>{activeTasks[0].statusText}</span>
+          </div>
         </div>
-        <div className="dsp-progress__meta">
-          <span>{progressLabel}</span>
-          <span>{statusText}</span>
-        </div>
-      </div>
+      ) : null}
 
       <div className="dsp-table-wrap">
         <table className="dsp-table">
@@ -318,9 +241,6 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
           </tbody>
         </table>
       </div>
-
-      {uploadState === 'error' ? <p className="dsp-state dsp-state--error">Upload failed.</p> : null}
-      {uploadState === 'success' ? <p className="dsp-state dsp-state--ok">Dataset updated.</p> : null}
     </section>
   )
 }

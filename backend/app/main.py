@@ -265,7 +265,13 @@ def _normalize_tileset_into_output_root(output_dir: Path) -> None:
         pass
 
 
-async def process_pointcloud_background(final_path: Path, output_dir: Path) -> None:
+async def process_pointcloud_background(
+    final_path: Path,
+    output_dir: Path,
+    project_id: str | None = None,
+    job_id: str | None = None,
+    file_name: str | None = None,
+) -> None:
     """
     Background conversion worker:
     py3dtiles convert <final_path> --out <output_dir>
@@ -299,6 +305,18 @@ async def process_pointcloud_background(final_path: Path, output_dir: Path) -> N
             text=True,
         )
         _normalize_tileset_into_output_root(output_dir)
+        if project_id and job_id:
+            _upsert_processing_job(
+                project_id,
+                {
+                    "job_id": job_id,
+                    "kind": "pointcloud",
+                    "file_name": file_name or final_path.name,
+                    "status": "Completed",
+                    "updated_at": _now_iso(),
+                    "result_url": f"/tiles/pointclouds/{project_id}/{output_dir.name}/tileset.json",
+                },
+            )
     except subprocess.CalledProcessError as exc:
         msg = exc.stderr or exc.stdout or str(exc)
         print("py3dtiles conversion failed:", msg)
@@ -306,6 +324,18 @@ async def process_pointcloud_background(final_path: Path, output_dir: Path) -> N
             err_path.write_text(msg, encoding="utf-8")
         except OSError:
             pass
+        if project_id and job_id:
+            _upsert_processing_job(
+                project_id,
+                {
+                    "job_id": job_id,
+                    "kind": "pointcloud",
+                    "file_name": file_name or final_path.name,
+                    "status": "Failed",
+                    "error": msg[:8000],
+                    "updated_at": _now_iso(),
+                },
+            )
     except FileNotFoundError:
         msg = (
             "py3dtiles executable not found on PATH. "
@@ -316,6 +346,18 @@ async def process_pointcloud_background(final_path: Path, output_dir: Path) -> N
             err_path.write_text(msg, encoding="utf-8")
         except OSError:
             pass
+        if project_id and job_id:
+            _upsert_processing_job(
+                project_id,
+                {
+                    "job_id": job_id,
+                    "kind": "pointcloud",
+                    "file_name": file_name or final_path.name,
+                    "status": "Failed",
+                    "error": msg[:8000],
+                    "updated_at": _now_iso(),
+                },
+            )
 
 
 async def convert_to_cog(input_tif: str, output_cog: str) -> None:
@@ -336,6 +378,7 @@ async def process_dataset_background(
     dataset_id: str,
     input_tif: str,
     output_cog: str,
+    file_name: str | None = None,
 ) -> None:
     _write_dataset_status(
         project_id,
@@ -350,6 +393,17 @@ async def process_dataset_background(
     err_path.unlink(missing_ok=True)
     try:
         await convert_to_cog(input_tif, output_cog)
+        _upsert_processing_job(
+            project_id,
+            {
+                "job_id": dataset_id,
+                "kind": "dataset",
+                "file_name": file_name or Path(input_tif).name,
+                "status": "Completed",
+                "updated_at": _now_iso(),
+                "result_url": output_cog,
+            },
+        )
         _write_dataset_status(
             project_id,
             dataset_id,
@@ -374,6 +428,17 @@ async def process_dataset_background(
                 "error": msg[:8000],
                 "updated_at": _now_iso(),
                 "dataset_id": dataset_id,
+            },
+        )
+        _upsert_processing_job(
+            project_id,
+            {
+                "job_id": dataset_id,
+                "kind": "dataset",
+                "file_name": file_name or Path(input_tif).name,
+                "status": "Failed",
+                "error": msg[:8000],
+                "updated_at": _now_iso(),
             },
         )
 
@@ -447,6 +512,50 @@ def _dataset_dir(project_id: str, dataset_id: str) -> Path:
 
 def _dataset_status_file(project_id: str, dataset_id: str) -> Path:
     return _dataset_dir(project_id, dataset_id) / ".status.json"
+
+
+def _processing_jobs_file() -> Path:
+    return Path(LOCAL_DATA_PATH) / "processing_jobs.json"
+
+
+def _read_processing_jobs() -> dict[str, list[dict[str, str]]]:
+    jobs_path = _processing_jobs_file()
+    if not jobs_path.is_file():
+        return {}
+    try:
+        raw = jobs_path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            normalized: dict[str, list[dict[str, str]]] = {}
+            for project_id, jobs in data.items():
+                if isinstance(jobs, list):
+                    normalized[str(project_id)] = [
+                        {str(k): str(v) for k, v in job.items()}
+                        for job in jobs
+                        if isinstance(job, dict)
+                    ]
+            return normalized
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {}
+
+
+def _write_processing_jobs(data: dict[str, list[dict[str, str]]]) -> None:
+    jobs_path = _processing_jobs_file()
+    jobs_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        jobs_path.write_text(json.dumps(data, ensure_ascii=True, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _upsert_processing_job(project_id: str, job: dict[str, str]) -> None:
+    jobs = _read_processing_jobs()
+    current = jobs.get(project_id, [])
+    current = [item for item in current if item.get("job_id") != job.get("job_id")]
+    current.insert(0, job)
+    jobs[project_id] = current[:200]
+    _write_processing_jobs(jobs)
 
 
 def _write_dataset_status(project_id: str, dataset_id: str, payload: dict[str, str]) -> None:
@@ -1101,6 +1210,17 @@ async def complete_upload(
 
     if (output_dir / "tileset.json").is_file() and existing_hash == content_hash:
         final_path.unlink(missing_ok=True)
+        _upsert_processing_job(
+            safe_project_id,
+            {
+                "job_id": reused_tileset_id,
+                "kind": "pointcloud",
+                "file_name": safe_name,
+                "status": "Completed",
+                "updated_at": _now_iso(),
+                "result_url": f"/tiles/pointclouds/{safe_project_id}/{reused_tileset_id}/tileset.json",
+            },
+        )
         return {
             "status": "success",
             "message": (
@@ -1123,7 +1243,24 @@ async def complete_upload(
         pass
     cache[user_cache_key] = reused_tileset_id
     _write_conversion_cache(cache)
-    background_tasks.add_task(process_pointcloud_background, final_path, output_dir)
+    _upsert_processing_job(
+        safe_project_id,
+        {
+            "job_id": reused_tileset_id,
+            "kind": "pointcloud",
+            "file_name": safe_name,
+            "status": "Processing",
+            "updated_at": _now_iso(),
+        },
+    )
+    background_tasks.add_task(
+        process_pointcloud_background,
+        final_path,
+        output_dir,
+        safe_project_id,
+        reused_tileset_id,
+        safe_name,
+    )
 
     return {
         "status": "success",
@@ -1179,6 +1316,16 @@ async def process_dataset(
             "dataset_name": safe_name,
         },
     )
+    _upsert_processing_job(
+        safe_project_id,
+        {
+            "job_id": dataset_id,
+            "kind": "dataset",
+            "file_name": safe_name,
+            "status": "Processing",
+            "updated_at": _now_iso(),
+        },
+    )
 
     background_tasks.add_task(
         process_dataset_background,
@@ -1186,6 +1333,7 @@ async def process_dataset(
         dataset_id,
         str(input_tif),
         str(output_cog),
+        safe_name,
     )
 
     encoded_cog_path = quote(str(output_cog).replace("\\", "/"), safe="")
@@ -1233,6 +1381,15 @@ def dataset_status(project_id: str, dataset_id: str, request: Request) -> dict[s
             f"?url={encoded_cog_path}"
         )
     return status
+
+
+@app.get("/api/jobs/{project_id}")
+def project_jobs(project_id: str, request: Request) -> dict[str, list[dict[str, str]]]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    jobs = _read_processing_jobs()
+    return {"jobs": jobs.get(safe_project_id, [])}
 
 
 @app.get("/health")

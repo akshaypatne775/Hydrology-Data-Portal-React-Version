@@ -20,6 +20,16 @@ export type DatasetStatusResponse = {
   cog_tile_url_template?: string
 }
 
+export type ProjectJob = {
+  job_id: string
+  kind: string
+  file_name: string
+  status: string
+  updated_at?: string
+  error?: string
+  result_url?: string
+}
+
 export async function processDatasetTif(form: FormData): Promise<ProcessDatasetResponse> {
   const res = await apiRequest('/api/process-dataset', {
     method: 'POST',
@@ -39,4 +49,12 @@ export async function getDatasetStatus(
     `/api/dataset-status/${encodeURIComponent(projectId)}/${encodeURIComponent(datasetId)}`,
     { cache: 'no-store' },
   )
+}
+
+export async function getProjectJobs(projectId: string): Promise<ProjectJob[]> {
+  const data = await apiRequestJson<{ jobs: ProjectJob[] }>(
+    `/api/jobs/${encodeURIComponent(projectId)}`,
+    { cache: 'no-store' },
+  )
+  return data.jobs ?? []
 }

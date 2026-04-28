@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as Cesium from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 import { API_BASE } from '../../lib/apiBase'
+import { useUploadContext } from '../../context/UploadContext'
 import { getPointCloudStatus } from '../../services/pointCloudService'
 import {
   buildXyzTemplate,
@@ -118,6 +119,7 @@ type GlobeViewerProps = {
 }
 
 export function GlobeViewer({ projectId }: GlobeViewerProps) {
+  const { tasks } = useUploadContext()
   const tileRoot = useMemo(() => (getTileBaseUrl() ?? `${API_BASE}/tiles`).replace(/\/+$/, ''), [])
   const containerRef = useRef<HTMLDivElement | null>(null)
   const viewerRef = useRef<Cesium.Viewer | null>(null)
@@ -200,20 +202,6 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     [loadPointCloud],
   )
 
-  const handleUploadComplete = useCallback(
-    async (tilesetUrl: string, fileName: string) => {
-      setUploadedTilesets((prev) => {
-        const next = prev.filter((entry) => entry.url !== tilesetUrl)
-        const merged = [{ label: fileName, url: tilesetUrl }, ...next]
-        writeUploadedTilesets(projectId, merged)
-        return merged
-      })
-      setSelectedTilesetUrl(tilesetUrl)
-      await loadPointCloudWhenReady(tilesetUrl)
-    },
-    [loadPointCloudWhenReady, projectId],
-  )
-
   const loadOrthomosaic = useCallback((tileUrl: string) => {
     const viewer = viewerRef.current
     if (!viewer) {
@@ -277,6 +265,27 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       cancelled = true
     }
   }, [projectId])
+
+  useEffect(() => {
+    const completed = tasks
+      .filter(
+        (task) =>
+          task.projectId === projectId &&
+          task.kind === 'pointcloud' &&
+          task.state === 'success' &&
+          task.resultUrl,
+      )
+      .map((task) => ({ label: task.fileName, url: task.resultUrl! }))
+    if (completed.length === 0) return
+    setUploadedTilesets((prev) => {
+      const merged = [...completed, ...prev].filter(
+        (row, index, arr) => arr.findIndex((item) => item.url === row.url) === index,
+      )
+      writeUploadedTilesets(projectId, merged)
+      return merged
+    })
+    setSelectedTilesetUrl((curr) => curr || completed[0]!.url)
+  }, [projectId, tasks])
 
   useEffect(() => {
     const tileset = pointCloudRef.current
@@ -443,7 +452,7 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
           {uploadLabel}
         </button>
 
-        <PointCloudUploader projectId={projectId} onUploadComplete={handleUploadComplete} />
+        <PointCloudUploader projectId={projectId} />
       </section>
 
       <section className="d3d-layer-panel" aria-label="Data layer actions">
