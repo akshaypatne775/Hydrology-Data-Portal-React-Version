@@ -26,6 +26,8 @@ import {
   useMapEvents,
 } from 'react-leaflet'
 import { createIssue, listIssues, type SavedIssue } from '../../services/issuesService'
+import { useWorkspaceContext } from '../../context/WorkspaceContext'
+import { getLatestCogLayer } from '../../utils/datasetLayerStorage'
 import HydrologyDataLayer, {
   type HydrologyPoint,
   type HydrologyZone,
@@ -40,7 +42,6 @@ import {
   getFloodOverlayTileUrlWithBust,
   hasCustomTileBase,
 } from './tileSources'
-import { getLatestCogLayer } from '../../utils/datasetLayerStorage'
 
 export type { BaseLayerId, FloodReturnPeriod } from './tileSources'
 
@@ -64,38 +65,8 @@ const FLOOD_LABELS: Record<FloodReturnPeriod, string> = {
   '1in100': '1 : 100 years',
 }
 
-const HYDROLOGY_POINTS: HydrologyPoint[] = [
-  {
-    id: 'p-1',
-    name: 'Monitoring Well A',
-    lat: 21.1468,
-    lng: 79.0864,
-    metric: 'Water level',
-    value: '2.1 m bgl',
-  },
-  {
-    id: 'p-2',
-    name: 'Rain Gauge Station',
-    lat: 21.1442,
-    lng: 79.0911,
-    metric: 'Rainfall',
-    value: '42 mm/day',
-  },
-]
-
-const HYDROLOGY_ZONES: HydrologyZone[] = [
-  {
-    id: 'z-1',
-    name: 'Low-lying Catchment Pocket',
-    risk: 'Moderate',
-    coordinates: [
-      [21.1474, 79.0847],
-      [21.1474, 79.0886],
-      [21.1454, 79.0892],
-      [21.1449, 79.0855],
-    ],
-  },
-]
+const HYDROLOGY_POINTS: HydrologyPoint[] = []
+const HYDROLOGY_ZONES: HydrologyZone[] = []
 
 function formatLengthM(meters: number): string {
   if (meters >= 1000) return `${(meters / 1000).toFixed(2)} km`
@@ -386,6 +357,7 @@ export type MapViewerProps = {
 }
 
 export function MapViewer({ floodSimulationLevel = 0, projectId }: MapViewerProps) {
+  const { activeLayers } = useWorkspaceContext()
   const center = useMemo(() => getDefaultMapCenter(), [])
   const zoom = useMemo(() => getDefaultZoom(), [])
   const customTilesReady = hasCustomTileBase()
@@ -551,9 +523,16 @@ export function MapViewer({ floodSimulationLevel = 0, projectId }: MapViewerProp
       setCogTileUrl(null)
       return
     }
+    const layer = activeLayers.find(
+      (item) => item.projectId === projectId && item.layerType === 'cog',
+    )
+    if (layer?.url) {
+      setCogTileUrl(layer.url)
+      return
+    }
     const latest = getLatestCogLayer(projectId)
     setCogTileUrl(latest?.tileUrl ?? null)
-  }, [projectId])
+  }, [activeLayers, projectId])
 
   return (
     <div className="mv-root">

@@ -1,7 +1,8 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react'
 import { useProjects } from '../hooks/useProjects'
 import { logout } from '../services/authService'
 import type { Project } from '../services/projectService'
+import { getProjectFiles, getProjectJobs } from '../services/datasetService'
 import { useWorkspaceContext } from '../context/WorkspaceContext'
 import './Dashboard.css'
 
@@ -28,12 +29,7 @@ const NAV_ITEMS = [
   { id: 'downloads', label: 'Downloads', icon: 'fa-solid fa-download' },
 ] as const
 
-const DASHBOARD_METRICS = [
-  { label: 'Active Modeling Jobs', value: '08', meta: 'Across 3 basins', icon: 'fa-solid fa-wave-square' },
-  { label: 'Validated Media Files', value: '214', meta: 'Images and field clips', icon: 'fa-solid fa-photo-film' },
-  { label: 'Open Engineering Issues', value: '11', meta: 'Needs review this week', icon: 'fa-solid fa-triangle-exclamation' },
-  { label: 'Release Packages', value: '06', meta: 'Ready for stakeholder export', icon: 'fa-solid fa-box-archive' },
-]
+type DashboardMetric = { label: string; value: string; meta: string; icon: string }
 
 const DASHBOARD_MODULES = [
   {
@@ -91,6 +87,12 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     setShareCopied,
   } = useWorkspaceContext()
   const { projects, loading: projectsLoading, error: projectsError, addProject } = useProjects()
+  const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetric[]>([
+    { label: 'Projects', value: '0', meta: 'Available workspaces', icon: 'fa-solid fa-folder-tree' },
+    { label: 'Datasets', value: '0', meta: 'In selected project', icon: 'fa-solid fa-database' },
+    { label: 'Processing Jobs', value: '0', meta: 'Running server tasks', icon: 'fa-solid fa-gear' },
+    { label: 'Reports', value: '0', meta: 'Downloadable files', icon: 'fa-solid fa-file-lines' },
+  ])
 
   const visibleNavItems = useMemo(
     () =>
@@ -124,6 +126,49 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   useEffect(() => {
     setSelectedProject((prev) => (prev ? projects.find((p) => p.id === prev.id) ?? null : null))
   }, [projects])
+
+  useEffect(() => {
+    let cancelled = false
+    const loadMetrics = async () => {
+      if (!selectedProject?.id) {
+        setDashboardMetrics([
+          { label: 'Projects', value: String(projects.length), meta: 'Available workspaces', icon: 'fa-solid fa-folder-tree' },
+          { label: 'Datasets', value: '-', meta: 'Select a project', icon: 'fa-solid fa-database' },
+          { label: 'Processing Jobs', value: '-', meta: 'Select a project', icon: 'fa-solid fa-gear' },
+          { label: 'Reports', value: '-', meta: 'Select a project', icon: 'fa-solid fa-file-lines' },
+        ])
+        return
+      }
+      try {
+        const [jobs, files] = await Promise.all([
+          getProjectJobs(selectedProject.id),
+          getProjectFiles(selectedProject.id),
+        ])
+        if (cancelled) return
+        const processing = jobs.filter((j) => j.status !== 'Completed' && j.status !== 'Failed').length
+        const reports = files.filter((f) => f.kind === 'Reports').length
+        setDashboardMetrics([
+          { label: 'Projects', value: String(projects.length), meta: 'Available workspaces', icon: 'fa-solid fa-folder-tree' },
+          { label: 'Datasets', value: String(files.length), meta: 'In selected project', icon: 'fa-solid fa-database' },
+          { label: 'Processing Jobs', value: String(processing), meta: 'Running server tasks', icon: 'fa-solid fa-gear' },
+          { label: 'Reports', value: String(reports), meta: 'Downloadable files', icon: 'fa-solid fa-file-lines' },
+        ])
+      } catch {
+        if (!cancelled) {
+          setDashboardMetrics([
+            { label: 'Projects', value: String(projects.length), meta: 'Available workspaces', icon: 'fa-solid fa-folder-tree' },
+            { label: 'Datasets', value: '0', meta: 'Unable to load', icon: 'fa-solid fa-database' },
+            { label: 'Processing Jobs', value: '0', meta: 'Unable to load', icon: 'fa-solid fa-gear' },
+            { label: 'Reports', value: '0', meta: 'Unable to load', icon: 'fa-solid fa-file-lines' },
+          ])
+        }
+      }
+    }
+    void loadMetrics()
+    return () => {
+      cancelled = true
+    }
+  }, [projects.length, selectedProject?.id])
 
   const createProject = async () => {
     try {
@@ -357,7 +402,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
               </article>
 
               <div className="ds-overview-metrics">
-                {DASHBOARD_METRICS.map((metric) => (
+                {dashboardMetrics.map((metric) => (
                   <article key={metric.label} className="ds-overview-metric">
                     <p className="ds-overview-metric__icon" aria-hidden>
                       <i className={metric.icon} />

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type FormEvent } from 'react'
 import { getCurrentUser, login, signup, type AuthUser } from '../../services/authService'
 import './AuthScreen.css'
 
@@ -39,9 +39,15 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     }
   }
 
+  const onSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (submitting) return
+    void submit()
+  }
+
   return (
     <div className="auth-root">
-      <div className="auth-card">
+      <form className="auth-card" onSubmit={onSubmit}>
         <div className="auth-header">
           <p className="auth-kicker">Droid Cloud</p>
           <h1>{title}</h1>
@@ -72,10 +78,10 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
           <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" />
         </label>
         {error ? <p className="auth-error">{error}</p> : null}
-        <button type="button" className="auth-submit" onClick={() => void submit()} disabled={submitting}>
+        <button type="submit" className="auth-submit" disabled={submitting}>
           {submitting ? 'Please wait...' : mode === 'login' ? 'Login' : 'Create Account'}
         </button>
-      </div>
+      </form>
     </div>
   )
 }

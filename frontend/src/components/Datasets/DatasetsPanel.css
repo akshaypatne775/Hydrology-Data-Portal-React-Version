@@ -44,6 +44,38 @@
   color: #64748b;
 }
 
+.dsp-dropzone input[type="file"] {
+  display: none;
+}
+
+.dsp-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.65rem;
+  border: 1px solid #dbe4ee;
+  border-radius: 12px;
+  background: #f8fafb;
+  padding: 0.8rem;
+}
+
+.dsp-form label {
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.7rem;
+  color: #334155;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.dsp-form input,
+.dsp-form select {
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  height: 2rem;
+  padding: 0 0.55rem;
+  font-size: 0.75rem;
+}
+
 .dsp-progress {
   display: grid;
   gap: 0.35rem;

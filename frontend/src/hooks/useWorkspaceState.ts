@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import type { Project } from '../services/projectService'
 
 export type WorkspaceTabId =
@@ -9,6 +9,14 @@ export type WorkspaceTabId =
   | 'globe'
   | 'compare'
   | 'downloads'
+
+export type ActiveLayerConfig = {
+  id: string
+  projectId: string
+  name: string
+  layerType: 'cog' | 'pointcloud'
+  url: string
+}
 
 export function useWorkspaceState() {
   const [activeId, setActiveId] = useState<WorkspaceTabId>('projects')
@@ -23,6 +31,17 @@ export function useWorkspaceState() {
     type: 'Drone Survey',
   })
   const [shareCopied, setShareCopied] = useState(false)
+  const [activeLayers, setActiveLayers] = useState<ActiveLayerConfig[]>([])
+
+  const toggleLayer = useCallback((layerConfig: ActiveLayerConfig) => {
+    setActiveLayers((prev) => {
+      const exists = prev.some((layer) => layer.id === layerConfig.id)
+      if (exists) {
+        return prev.filter((layer) => layer.id !== layerConfig.id)
+      }
+      return [layerConfig, ...prev]
+    })
+  }, [])
 
   return useMemo(
     () => ({
@@ -38,6 +57,8 @@ export function useWorkspaceState() {
       setCreateForm,
       shareCopied,
       setShareCopied,
+      activeLayers,
+      toggleLayer,
     }),
     [
       activeId,
@@ -46,6 +67,8 @@ export function useWorkspaceState() {
       showCreateProject,
       createForm,
       shareCopied,
+      activeLayers,
+      toggleLayer,
     ],
   )
 }

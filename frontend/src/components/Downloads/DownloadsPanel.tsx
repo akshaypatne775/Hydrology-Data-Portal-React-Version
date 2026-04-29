@@ -1,3 +1,5 @@
+import { useEffect, useMemo, useState } from 'react'
+import { getProjectFiles, type ProjectFile } from '../../services/datasetService'
 import './DownloadsPanel.css'
 
 type DownloadCategory = 'Raw Survey Data' | 'Web-Optimized Data' | 'Reports'
@@ -15,56 +17,65 @@ type DownloadsPanelProps = {
   projectId?: string
 }
 
-function buildMockItems(projectId: string): DownloadItem[] {
-  const pid = projectId.slice(0, 8).toUpperCase()
-  return [
-    {
-      id: 'raw-1',
-      name: `${pid}_master_survey_14gb.las`,
-      size: '14.0 GB',
-      format: 'LAS',
-      category: 'Raw Survey Data',
-      href: '#',
-    },
-    {
-      id: 'raw-2',
-      name: `${pid}_terrain_model_5gb.tif`,
-      size: '5.0 GB',
-      format: 'GeoTIFF',
-      category: 'Raw Survey Data',
-      href: '#',
-    },
-    {
-      id: 'web-1',
-      name: `${pid}_xyz_tiles_web_bundle.zip`,
-      size: '1.3 GB',
-      format: 'ZIP',
-      category: 'Web-Optimized Data',
-      href: '#',
-    },
-    {
-      id: 'report-1',
-      name: `${pid}_hydrology_summary_report.pdf`,
-      size: '6.8 MB',
-      format: 'PDF',
-      category: 'Reports',
-      href: '#',
-    },
-    {
-      id: 'report-2',
-      name: `${pid}_terrain_quality_assurance.pdf`,
-      size: '4.2 MB',
-      format: 'PDF',
-      category: 'Reports',
-      href: '#',
-    },
-  ]
-}
-
 const CATEGORY_ORDER: DownloadCategory[] = ['Raw Survey Data', 'Web-Optimized Data', 'Reports']
 
+function humanSize(sizeBytes: string): string {
+  const n = Number(sizeBytes)
+  if (!Number.isFinite(n) || n <= 0) return '--'
+  const gb = n / (1024 * 1024 * 1024)
+  if (gb >= 1) return `${gb.toFixed(2)} GB`
+  const mb = n / (1024 * 1024)
+  return `${mb.toFixed(1)} MB`
+}
+
 export function DownloadsPanel({ projectId }: DownloadsPanelProps) {
-  const items = buildMockItems(projectId || 'project')
+  const [items, setItems] = useState<DownloadItem[]>([])
+
+  const grouped = useMemo(
+    () =>
+      CATEGORY_ORDER.map((category) => ({
+        category,
+        items: items.filter((item) => item.category === category),
+      })),
+    [items],
+  )
+
+  useEffect(() => {
+    if (!projectId) {
+      setItems([])
+      return
+    }
+    let cancelled = false
+    const load = async () => {
+      try {
+        const files = await getProjectFiles(projectId)
+        if (cancelled) return
+        const mapped: DownloadItem[] = files.map((file: ProjectFile) => {
+          const category: DownloadCategory =
+            file.kind === 'Reports'
+              ? 'Reports'
+              : file.kind === 'Web-Optimized Data'
+                ? 'Web-Optimized Data'
+                : 'Raw Survey Data'
+          return {
+            id: `${file.name}-${file.type}`,
+            name: file.name,
+            size: humanSize(file.size_bytes),
+            format: file.type.toUpperCase(),
+            category,
+            href: file.file_url,
+          }
+        })
+        setItems(mapped)
+      } catch {
+        setItems([])
+      }
+    }
+    void load()
+    return () => {
+      cancelled = true
+    }
+  }, [projectId])
 
   return (
     <section className="dlp-root">
@@ -74,16 +85,14 @@ export function DownloadsPanel({ projectId }: DownloadsPanelProps) {
       </header>
 
       <div className="dlp-grid">
-        {CATEGORY_ORDER.map((category) => (
+        {grouped.map(({ category, items: categoryItems }) => (
           <article key={category} className="dlp-card">
             <header className="dlp-card__head">
               <h4>{category}</h4>
             </header>
 
             <ul className="dlp-list">
-              {items
-                .filter((item) => item.category === category)
-                .map((item) => (
+              {categoryItems.map((item) => (
                   <li key={item.id} className="dlp-item">
                     <div className="dlp-item__meta">
                       <p className="dlp-item__name">{item.name}</p>
@@ -92,10 +101,14 @@ export function DownloadsPanel({ projectId }: DownloadsPanelProps) {
                         <span>{item.size}</span>
                       </p>
                     </div>
-                    <a className="dlp-download" href={item.href} download>
+                    <button
+                      type="button"
+                      className="dlp-download"
+                      onClick={() => window.open(item.href, '_blank', 'noopener,noreferrer')}
+                    >
                       <i className="fa-solid fa-download" aria-hidden />
                       Download
-                    </a>
+                    </button>
                   </li>
                 ))}
             </ul>

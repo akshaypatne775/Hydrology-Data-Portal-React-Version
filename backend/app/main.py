@@ -7,10 +7,12 @@ import re
 import secrets
 import shutil
 import subprocess
+import time
 from pathlib import Path
 import sqlite3
 import json
 from datetime import datetime, timezone
+from importlib.util import find_spec
 from urllib.parse import quote
 
 from fastapi import (
@@ -47,17 +49,41 @@ DISK_HEADROOM_BYTES = int(os.getenv("UPLOAD_DISK_HEADROOM_MB", "512")) * 1024 * 
 MERGE_COPY_BUFFER_BYTES = 8 * 1024 * 1024  # streaming merge, avoid loading whole file in RAM
 POINTCLOUD_SRS_IN = os.getenv("POINTCLOUD_SRS_IN", "").strip()
 POINTCLOUD_SRS_OUT = os.getenv("POINTCLOUD_SRS_OUT", "4978").strip()
+PROJECT_FILES_CACHE_TTL_SECONDS = float(os.getenv("PROJECT_FILES_CACHE_TTL_SECONDS", "4"))
 SESSION_COOKIE_NAME = "droid_cloud_session"
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "604800"))
-SESSION_SIGNING_SECRET_RAW = os.getenv("SESSION_SIGNING_SECRET", "").strip()
-if not SESSION_SIGNING_SECRET_RAW:
-    # Safe development fallback only. In production, SESSION_SIGNING_SECRET must be configured.
-    SESSION_SIGNING_SECRET_RAW = secrets.token_urlsafe(48)
-    print(
-        "WARNING: SESSION_SIGNING_SECRET is not set. "
-        "Using ephemeral in-memory secret; sessions will reset on restart.",
-    )
+SESSION_SECRET_FILE = Path(LOCAL_DATA_PATH) / ".session_signing_secret"
+
+
+def _load_persistent_session_secret() -> str:
+    env_secret = os.getenv("SESSION_SIGNING_SECRET", "").strip()
+    if env_secret:
+        return env_secret
+    try:
+        if SESSION_SECRET_FILE.is_file():
+            saved = SESSION_SECRET_FILE.read_text(encoding="utf-8").strip()
+            if saved:
+                return saved
+        generated = secrets.token_urlsafe(48)
+        SESSION_SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SESSION_SECRET_FILE.write_text(generated, encoding="utf-8")
+        print(
+            "WARNING: SESSION_SIGNING_SECRET is not set. "
+            "Using a generated local secret persisted on disk.",
+        )
+        return generated
+    except OSError:
+        fallback = secrets.token_urlsafe(48)
+        print(
+            "WARNING: SESSION_SIGNING_SECRET is not set and local secret file could not be written. "
+            "Using ephemeral in-memory secret; sessions may reset on restart.",
+        )
+        return fallback
+
+
+SESSION_SIGNING_SECRET_RAW = _load_persistent_session_secret()
 SESSION_SIGNING_SECRET = SESSION_SIGNING_SECRET_RAW.encode("utf-8")
+_PROJECT_FILES_CACHE: dict[str, tuple[float, list[dict[str, str]]]] = {}
 FRONTEND_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
@@ -73,6 +99,11 @@ app = FastAPI(
     version="0.1.0",
 )
 cog_tiler = TilerFactory()
+if find_spec("multipart") is None:
+    print(
+        "WARNING: python-multipart is not installed. "
+        "Upload endpoints may fail with 422/validation errors.",
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -176,6 +207,10 @@ class ProcessDatasetOut(BaseModel):
     cog_tile_url_template: str
 
 
+class FileDeletePayload(BaseModel):
+    rel_path: str
+
+
 def _safe_pointcloud_basename(filename: str) -> str:
     """Reject path traversal; only allow simple .las / .laz names."""
     base = os.path.basename(filename.strip())
@@ -200,6 +235,18 @@ def _safe_tif_basename(filename: str) -> str:
     suffix = Path(base).suffix.lower()
     if suffix not in (".tif", ".tiff"):
         raise HTTPException(status_code=400, detail="Only .tif/.tiff files are supported")
+    return base
+
+
+def _safe_dataset_upload_basename(filename: str) -> str:
+    base = os.path.basename(filename.strip())
+    if not base or base in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if "/" in base or "\\" in base or ".." in base:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    suffix = Path(base).suffix.lower()
+    if suffix not in (".tif", ".tiff", ".las", ".laz"):
+        raise HTTPException(status_code=400, detail="Only .tif/.tiff/.las/.laz files are supported")
     return base
 
 
@@ -317,6 +364,7 @@ async def process_pointcloud_background(
                     "result_url": f"/tiles/pointclouds/{project_id}/{output_dir.name}/tileset.json",
                 },
             )
+            _invalidate_project_files_cache(project_id)
     except subprocess.CalledProcessError as exc:
         msg = exc.stderr or exc.stdout or str(exc)
         print("py3dtiles conversion failed:", msg)
@@ -336,6 +384,7 @@ async def process_pointcloud_background(
                     "updated_at": _now_iso(),
                 },
             )
+            _invalidate_project_files_cache(project_id)
     except FileNotFoundError:
         msg = (
             "py3dtiles executable not found on PATH. "
@@ -358,10 +407,13 @@ async def process_pointcloud_background(
                     "updated_at": _now_iso(),
                 },
             )
+            _invalidate_project_files_cache(project_id)
 
 
 async def convert_to_cog(input_tif: str, output_cog: str) -> None:
-    profile = dict(cog_profiles.get("deflate", {}))
+    input_tif = os.path.abspath(input_tif)
+    output_cog = os.path.abspath(output_cog)
+    profile = dict(cog_profiles.get("deflate"))
     profile["BIGTIFF"] = "IF_SAFER"
     await asyncio.to_thread(
         cog_translate,
@@ -404,6 +456,7 @@ async def process_dataset_background(
                 "result_url": output_cog,
             },
         )
+        _invalidate_project_files_cache(project_id)
         _write_dataset_status(
             project_id,
             dataset_id,
@@ -441,6 +494,7 @@ async def process_dataset_background(
                 "updated_at": _now_iso(),
             },
         )
+        _invalidate_project_files_cache(project_id)
 
 
 def _detect_input_srs(input_file: Path) -> str | None:
@@ -540,6 +594,25 @@ def _read_processing_jobs() -> dict[str, list[dict[str, str]]]:
     return {}
 
 
+def _invalidate_project_files_cache(project_id: str) -> None:
+    _PROJECT_FILES_CACHE.pop(project_id, None)
+
+
+def _get_cached_project_files(project_id: str) -> list[dict[str, str]] | None:
+    entry = _PROJECT_FILES_CACHE.get(project_id)
+    if not entry:
+        return None
+    ts, data = entry
+    if time.time() - ts > PROJECT_FILES_CACHE_TTL_SECONDS:
+        _PROJECT_FILES_CACHE.pop(project_id, None)
+        return None
+    return data
+
+
+def _set_cached_project_files(project_id: str, files: list[dict[str, str]]) -> None:
+    _PROJECT_FILES_CACHE[project_id] = (time.time(), files)
+
+
 def _write_processing_jobs(data: dict[str, list[dict[str, str]]]) -> None:
     jobs_path = _processing_jobs_file()
     jobs_path.parent.mkdir(parents=True, exist_ok=True)
@@ -576,6 +649,32 @@ def _read_dataset_status(project_id: str, dataset_id: str) -> dict[str, str] | N
         if isinstance(data, dict):
             return {str(k): str(v) for k, v in data.items()}
     except (OSError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def _detect_epsg_from_file(file_path: Path) -> str | None:
+    suffix = file_path.suffix.lower()
+    try:
+        if suffix in (".las", ".laz"):
+            with laspy.open(str(file_path)) as reader:
+                crs = reader.header.parse_crs()
+            if crs:
+                authority = crs.to_authority()
+                if authority and authority[0] and authority[1]:
+                    return f"{authority[0]}:{authority[1]}"
+        if suffix in (".tif", ".tiff"):
+            try:
+                import rasterio  # type: ignore
+            except Exception:
+                return None
+            with rasterio.open(str(file_path)) as src:
+                crs = src.crs
+            if crs:
+                authority = crs.to_authority()
+                if authority and authority[0] and authority[1]:
+                    return f"{authority[0]}:{authority[1]}"
+    except Exception:
         return None
     return None
 
@@ -1253,6 +1352,7 @@ async def complete_upload(
             "updated_at": _now_iso(),
         },
     )
+    _invalidate_project_files_cache(safe_project_id)
     background_tasks.add_task(
         process_pointcloud_background,
         final_path,
@@ -1326,6 +1426,7 @@ async def process_dataset(
             "updated_at": _now_iso(),
         },
     )
+    _invalidate_project_files_cache(safe_project_id)
 
     background_tasks.add_task(
         process_dataset_background,
@@ -1338,7 +1439,7 @@ async def process_dataset(
 
     encoded_cog_path = quote(str(output_cog).replace("\\", "/"), safe="")
     tile_template = (
-        f"{str(request.base_url).rstrip('/')}/api/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}"
+        f"{str(request.base_url).rstrip('/')}/api/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
         f"?url={encoded_cog_path}"
     )
     return ProcessDatasetOut(
@@ -1363,6 +1464,29 @@ async def upload_dataset(
     return {"status": "processing"}
 
 
+@app.post("/api/dataset-metadata")
+async def dataset_metadata(
+    request: Request,
+    file: UploadFile = File(...),
+    project_id: str = Form(...),
+) -> dict[str, str]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    safe_name = _safe_dataset_upload_basename(file.filename or "")
+    probe_dir = Path(LOCAL_DATA_PATH) / "uploads" / "metadata_probe" / safe_project_id
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    probe_path = probe_dir / f"{secrets.token_hex(8)}-{safe_name}"
+    try:
+        with open(probe_path, "wb") as out_f:
+            shutil.copyfileobj(file.file, out_f, length=MERGE_COPY_BUFFER_BYTES)
+    finally:
+        await file.close()
+    epsg = _detect_epsg_from_file(probe_path) or ""
+    probe_path.unlink(missing_ok=True)
+    return {"filename": safe_name, "epsg": epsg}
+
+
 @app.get("/api/dataset-status/{project_id}/{dataset_id}")
 def dataset_status(project_id: str, dataset_id: str, request: Request) -> dict[str, str]:
     user = _require_user(request)
@@ -1377,7 +1501,7 @@ def dataset_status(project_id: str, dataset_id: str, request: Request) -> dict[s
     if cog_path:
         encoded_cog_path = quote(cog_path.replace("\\", "/"), safe="")
         status["cog_tile_url_template"] = (
-            f"{str(request.base_url).rstrip('/')}/api/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}"
+            f"{str(request.base_url).rstrip('/')}/api/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
             f"?url={encoded_cog_path}"
         )
     return status
@@ -1390,6 +1514,122 @@ def project_jobs(project_id: str, request: Request) -> dict[str, list[dict[str, 
     _ensure_project_owner(int(user["id"]), safe_project_id)
     jobs = _read_processing_jobs()
     return {"jobs": jobs.get(safe_project_id, [])}
+
+
+@app.get("/api/projects/{project_id}/files")
+def project_files(project_id: str, request: Request) -> dict[str, list[dict[str, str]]]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    base_url = str(request.base_url).rstrip("/")
+    cached = _get_cached_project_files(safe_project_id)
+    if cached is not None:
+        return {"files": cached}
+
+    jobs_by_file = {
+        job.get("file_name", ""): job
+        for job in _read_processing_jobs().get(safe_project_id, [])
+        if isinstance(job, dict)
+    }
+    files: list[dict[str, str]] = []
+
+    raw_dir = Path(LOCAL_DATA_PATH) / "raw_uploads"
+    if raw_dir.is_dir():
+        for file_path in sorted(raw_dir.glob(f"{safe_project_id}__*"), key=lambda p: p.name.lower()):
+            if not file_path.is_file():
+                continue
+            display_name = file_path.name.replace(f"{safe_project_id}__", "", 1)
+            files.append(
+                {
+                    "name": display_name,
+                    "kind": "Raw Survey Data",
+                    "type": file_path.suffix.lower().lstrip(".") or "file",
+                    "size_bytes": str(file_path.stat().st_size),
+                    "status": jobs_by_file.get(display_name, {}).get("status", "Raw"),
+                    "file_url": f"{base_url}/tiles/raw_uploads/{file_path.name}",
+                    "layer_url": "",
+                    "rel_path": file_path.relative_to(Path(LOCAL_DATA_PATH)).as_posix(),
+                },
+            )
+
+    dataset_root = Path(LOCAL_DATA_PATH) / "datasets" / safe_project_id
+    if dataset_root.is_dir():
+        for cog_file in sorted(dataset_root.rglob("*.cog.tif"), key=lambda p: p.name.lower()):
+            encoded_cog_path = quote(str(cog_file.resolve()).replace("\\", "/"), safe="")
+            files.append(
+                {
+                    "name": cog_file.name,
+                    "kind": "Web-Optimized Data",
+                    "type": "cog",
+                    "size_bytes": str(cog_file.stat().st_size),
+                    "status": jobs_by_file.get(cog_file.name.replace(".cog", ""), {}).get("status", "Web-Ready"),
+                    "file_url": f"{base_url}/tiles/{cog_file.relative_to(Path(LOCAL_DATA_PATH)).as_posix()}",
+                    "layer_url": (
+                        f"{base_url}/api/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?url={encoded_cog_path}"
+                    ),
+                    "rel_path": cog_file.relative_to(Path(LOCAL_DATA_PATH)).as_posix(),
+                },
+            )
+
+    pointcloud_root = Path(LOCAL_DATA_PATH) / "pointclouds" / safe_project_id
+    if pointcloud_root.is_dir():
+        for tileset in sorted(pointcloud_root.rglob("tileset.json"), key=lambda p: p.parent.name.lower()):
+            rel = tileset.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            file_name = f"{tileset.parent.name}.las"
+            files.append(
+                {
+                    "name": file_name,
+                    "kind": "Web-Optimized Data",
+                    "type": "pointcloud",
+                    "size_bytes": str(tileset.stat().st_size),
+                    "status": jobs_by_file.get(file_name, {}).get("status", "Web-Ready"),
+                    "file_url": f"{base_url}/tiles/{rel}",
+                    "layer_url": f"{base_url}/tiles/{rel}",
+                    "rel_path": rel,
+                },
+            )
+
+    reports_dir = Path(LOCAL_DATA_PATH) / "reports" / safe_project_id
+    if reports_dir.is_dir():
+        for report in sorted(reports_dir.rglob("*.pdf"), key=lambda p: p.name.lower()):
+            rel = report.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            files.append(
+                {
+                    "name": report.name,
+                    "kind": "Reports",
+                    "type": "pdf",
+                    "size_bytes": str(report.stat().st_size),
+                    "status": "Completed",
+                    "file_url": f"{base_url}/tiles/{rel}",
+                    "layer_url": "",
+                    "rel_path": rel,
+                },
+            )
+
+    _set_cached_project_files(safe_project_id, files)
+    return {"files": files}
+
+
+@app.delete("/api/projects/{project_id}/files")
+def delete_project_file(project_id: str, payload: FileDeletePayload, request: Request) -> dict[str, str]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+
+    rel = (payload.rel_path or "").replace("\\", "/").lstrip("/")
+    if ".." in rel:
+        raise HTTPException(status_code=400, detail="Invalid rel_path")
+    target = (Path(LOCAL_DATA_PATH) / rel).resolve()
+    local_root = Path(LOCAL_DATA_PATH).resolve()
+    if local_root not in target.parents and target != local_root:
+        raise HTTPException(status_code=400, detail="Invalid target path")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    if target.is_dir():
+        raise HTTPException(status_code=400, detail="Only file deletion is supported")
+    target.unlink(missing_ok=True)
+    _invalidate_project_files_cache(safe_project_id)
+    return {"status": "success"}
 
 
 @app.get("/health")

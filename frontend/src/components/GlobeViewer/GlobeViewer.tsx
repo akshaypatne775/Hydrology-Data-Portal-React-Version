@@ -3,6 +3,7 @@ import * as Cesium from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 import { API_BASE } from '../../lib/apiBase'
 import { useUploadContext } from '../../context/UploadContext'
+import { useWorkspaceContext } from '../../context/WorkspaceContext'
 import { getPointCloudStatus } from '../../services/pointCloudService'
 import {
   buildXyzTemplate,
@@ -10,7 +11,6 @@ import {
   getTileExtension,
 } from '../MapViewer/tileSources'
 import './GlobeViewer.css'
-import PointCloudUploader from './PointCloudUploader'
 import {
   readUploadedTilesets,
   writeUploadedTilesets,
@@ -120,15 +120,14 @@ type GlobeViewerProps = {
 
 export function GlobeViewer({ projectId }: GlobeViewerProps) {
   const { tasks } = useUploadContext()
+  const { activeLayers } = useWorkspaceContext()
   const tileRoot = useMemo(() => (getTileBaseUrl() ?? `${API_BASE}/tiles`).replace(/\/+$/, ''), [])
   const containerRef = useRef<HTMLDivElement | null>(null)
   const viewerRef = useRef<Cesium.Viewer | null>(null)
   const pointCloudRef = useRef<Cesium.Cesium3DTileset | null>(null)
   const orthomosaicLayerRef = useRef<Cesium.ImageryLayer | null>(null)
-  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [pointSize, setPointSize] = useState(3)
   const [colorMode, setColorMode] = useState<ColorMode>('RGB')
-  const [uploadLabel, setUploadLabel] = useState('Upload LAS/LAZ')
   const [viewerError, setViewerError] = useState<string | null>(null)
   const [pipelineNotice, setPipelineNotice] = useState<string | null>(null)
   const [uploadedTilesets, setUploadedTilesets] = useState<UploadedTileset[]>([])
@@ -288,6 +287,25 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
   }, [projectId, tasks])
 
   useEffect(() => {
+    const pointCloudLayer = activeLayers.find(
+      (layer) => layer.projectId === projectId && layer.layerType === 'pointcloud',
+    )
+    if (pointCloudLayer?.url) {
+      setSelectedTilesetUrl(pointCloudLayer.url)
+      void loadPointCloudWhenReady(pointCloudLayer.url)
+    }
+  }, [activeLayers, loadPointCloudWhenReady, projectId])
+
+  useEffect(() => {
+    const cogLayer = activeLayers.find(
+      (layer) => layer.projectId === projectId && layer.layerType === 'cog',
+    )
+    if (cogLayer?.url) {
+      loadOrthomosaic(cogLayer.url)
+    }
+  }, [activeLayers, loadOrthomosaic, projectId])
+
+  useEffect(() => {
     const tileset = pointCloudRef.current
     if (!tileset) return
     tileset.style = buildPointCloudStyle(pointSize, colorMode)
@@ -432,27 +450,7 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
             <option value="Elevation">Elevation</option>
           </select>
         </label>
-
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".las,.laz"
-          className="gv-file-input"
-          onChange={(event) => {
-            const fileName = event.target.files?.[0]?.name
-            setUploadLabel(fileName ?? 'Upload LAS/LAZ')
-          }}
-        />
-        <button
-          type="button"
-          className="gv-upload"
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <i className="fa-solid fa-upload" aria-hidden />
-          {uploadLabel}
-        </button>
-
-        <PointCloudUploader projectId={projectId} />
+        <p className="gv-panel__hint">Upload LAS/LAZ/TIFF files from the Datasets panel only.</p>
       </section>
 
       <section className="d3d-layer-panel" aria-label="Data layer actions">
@@ -488,13 +486,6 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
           <p className="d3d-layer-panel__hint">Upload LAS/LAZ to see selectable point clouds.</p>
         )}
 
-        <button
-          type="button"
-          className="d3d-layer-panel__btn"
-          onClick={() => loadPointCloud(`${tileRoot}/pointclouds/${projectId}/tileset.json`)}
-        >
-          Load Sample LAS Data
-        </button>
         <button
           type="button"
           className="d3d-layer-panel__btn d3d-layer-panel__btn--ghost"

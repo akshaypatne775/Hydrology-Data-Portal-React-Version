@@ -57,6 +57,12 @@
   text-transform: uppercase;
 }
 
+.gv-panel__hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.74rem;
+  color: #64748b;
+}
+
 .gv-field {
   display: flex;
   flex-direction: column;
