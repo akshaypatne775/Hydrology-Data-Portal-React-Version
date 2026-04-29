@@ -26,6 +26,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 import laspy
 from PIL import Image
@@ -1516,6 +1517,30 @@ def project_jobs(project_id: str, request: Request) -> dict[str, list[dict[str, 
     return {"jobs": jobs.get(safe_project_id, [])}
 
 
+@app.get("/api/datasets/{project_id}/{dataset_id}/tiles/{z}/{x}/{y}.png")
+def dataset_tile_proxy(project_id: str, dataset_id: str, z: int, x: int, y: int):
+    safe_proj = _safe_project_id(project_id)
+    safe_data = _safe_dataset_id(dataset_id)
+    status = _read_dataset_status(safe_proj, safe_data)
+    if not status or not status.get("cog_path"):
+        raise HTTPException(404, "COG not ready")
+    encoded = quote(status["cog_path"].replace("\\", "/"), safe="")
+    return RedirectResponse(
+        f"/api/cog/tiles/WebMercatorQuad/{z}/{x}/{y}.png?url={encoded}"
+    )
+
+
+@app.get("/api/datasets/{project_id}/{dataset_id}/info")
+def dataset_info_proxy(project_id: str, dataset_id: str):
+    safe_proj = _safe_project_id(project_id)
+    safe_data = _safe_dataset_id(dataset_id)
+    status = _read_dataset_status(safe_proj, safe_data)
+    if not status or not status.get("cog_path"):
+        raise HTTPException(404, "COG not ready")
+    encoded = quote(status["cog_path"].replace("\\", "/"), safe="")
+    return RedirectResponse(f"/api/cog/info?url={encoded}")
+
+
 @app.get("/api/projects/{project_id}/files")
 def project_files(project_id: str, request: Request) -> dict[str, list[dict[str, str]]]:
     user = _require_user(request)
@@ -1556,7 +1581,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
     dataset_root = Path(LOCAL_DATA_PATH) / "datasets" / safe_project_id
     if dataset_root.is_dir():
         for cog_file in sorted(dataset_root.rglob("*.cog.tif"), key=lambda p: p.name.lower()):
-            encoded_cog_path = quote(str(cog_file.resolve()).replace("\\", "/"), safe="")
+            dataset_id = cog_file.parent.name
             files.append(
                 {
                     "name": cog_file.name,
@@ -1565,9 +1590,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "size_bytes": str(cog_file.stat().st_size),
                     "status": jobs_by_file.get(cog_file.name.replace(".cog", ""), {}).get("status", "Web-Ready"),
                     "file_url": f"{base_url}/tiles/{cog_file.relative_to(Path(LOCAL_DATA_PATH)).as_posix()}",
-                    "layer_url": (
-                        f"{base_url}/api/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?url={encoded_cog_path}"
-                    ),
+                    "layer_url": f"{base_url}/api/datasets/{safe_project_id}/{dataset_id}/tiles/{{z}}/{{x}}/{{y}}.png",
                     "file_path": str(cog_file.resolve()),
                     "rel_path": cog_file.relative_to(Path(LOCAL_DATA_PATH)).as_posix(),
                 },

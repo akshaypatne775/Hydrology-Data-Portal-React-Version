@@ -212,40 +212,39 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       if (orthomosaicLayerRef.current) {
         viewer.imageryLayers.remove(orthomosaicLayerRef.current, true)
       }
-      const layer = new Cesium.ImageryLayer(
-        new Cesium.UrlTemplateImageryProvider({ url: tileUrl }),
-      )
+      const imageryProvider = new Cesium.UrlTemplateImageryProvider({
+        url: tileUrl,
+        maximumLevel: 23,
+        hasAlphaChannel: true,
+      })
+      const layer = new Cesium.ImageryLayer(imageryProvider)
       viewer.imageryLayers.add(layer)
       orthomosaicLayerRef.current = layer
       setViewerError(null)
+
+      const infoUrl = tileUrl.replace('/tiles/{z}/{x}/{y}.png', '/info')
+      void (async () => {
+        try {
+          const res = await fetch(infoUrl, { credentials: 'include' })
+          const data = (await res.json()) as { bounds?: [number, number, number, number] }
+          if (data && data.bounds) {
+            const [minX, minY, maxX, maxY] = data.bounds
+            console.log('Zooming to COG Bounds:', [minX, minY, maxX, maxY])
+            viewer.camera.flyTo({
+              destination: Cesium.Rectangle.fromDegrees(minX, minY, maxX, maxY),
+              duration: 2.0,
+            })
+          }
+        } catch (e) {
+          console.error('Failed to fetch COG bounds for zoom', e)
+        }
+      })()
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Failed to load orthomosaic layer'
       setViewerError(message)
       console.error('Orthomosaic load failed:', error)
     }
-  }, [])
-
-  const zoomToCogBounds = useCallback((rawPath?: string) => {
-    if (!rawPath) return
-    void fetch(`${API_BASE}/api/cog/info?url=${encodeURIComponent(rawPath)}`, {
-      credentials: 'include',
-    })
-      .then((res) => res.json() as Promise<{ bounds?: [number, number, number, number] }>)
-      .then((data) => {
-        if (data?.bounds) {
-          const [minX, minY, maxX, maxY] = data.bounds
-          console.log('Zooming to COG Bounds:', [minX, minY, maxX, maxY])
-          viewerRef.current?.camera.flyTo({
-            destination: Cesium.Rectangle.fromDegrees(minX, minY, maxX, maxY),
-          })
-        } else {
-          console.error('TiTiler Info fetch failed', data)
-        }
-      })
-      .catch((error) => {
-        console.error('TiTiler Info fetch failed', error)
-      })
   }, [])
 
   // Example TiTiler COG XYZ layer (reference):
@@ -324,9 +323,8 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     )
     if (cogLayer?.url) {
       loadOrthomosaic(cogLayer.url)
-      zoomToCogBounds(cogLayer.rawPath)
     }
-  }, [activeLayers, loadOrthomosaic, projectId, zoomToCogBounds])
+  }, [activeLayers, loadOrthomosaic, projectId])
 
   useEffect(() => {
     const tileset = pointCloudRef.current
