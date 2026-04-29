@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
-import { API_BASE } from '../../lib/apiBase'
 import { useUploadContext } from '../../context/UploadContext'
 import { useWorkspaceContext } from '../../context/WorkspaceContext'
 import {
@@ -354,22 +353,13 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                       type="button"
                       className="dsp-action"
                       onClick={() => {
-                        if (!projectId || !row.layerType) return
-                        let layerUrl = row.layerUrl
-                        let rawPath: string | undefined
-                        if (row.layerType === 'cog' && row.filePath) {
-                          const safePath = row.filePath.replace(/\\/g, '/')
-                          layerUrl = `${API_BASE}/api/cog/tiles/WebMercatorQuad/{z}/{x}/{y}.png?url=${encodeURIComponent(safePath)}`
-                          rawPath = safePath
-                        }
-                        if (!layerUrl) return
+                        if (!projectId || !row.layerType || !row.layerUrl) return
                         toggleLayer({
                           id: `${projectId}:${row.fileName}:${row.layerType}`,
                           projectId,
                           name: row.fileName,
                           layerType: row.layerType,
-                          url: layerUrl,
-                          rawPath,
+                          url: row.layerUrl,
                         })
                         setActiveId(row.layerType === 'cog' ? 'map' : 'globe')
                       }}

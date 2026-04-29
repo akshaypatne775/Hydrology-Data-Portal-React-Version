@@ -235,13 +235,16 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       .then((data) => {
         if (data?.bounds) {
           const [minX, minY, maxX, maxY] = data.bounds
+          console.log('Zooming to COG Bounds:', [minX, minY, maxX, maxY])
           viewerRef.current?.camera.flyTo({
             destination: Cesium.Rectangle.fromDegrees(minX, minY, maxX, maxY),
           })
+        } else {
+          console.error('TiTiler Info fetch failed', data)
         }
       })
-      .catch(() => {
-        // Keep imagery visible even if bounds lookup fails.
+      .catch((error) => {
+        console.error('TiTiler Info fetch failed', error)
       })
   }, [])
 
