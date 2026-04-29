@@ -27,6 +27,7 @@ import {
 } from 'react-leaflet'
 import { createIssue, listIssues, type SavedIssue } from '../../services/issuesService'
 import { useWorkspaceContext } from '../../context/WorkspaceContext'
+import { API_BASE } from '../../lib/apiBase'
 import { getLatestCogLayer } from '../../utils/datasetLayerStorage'
 import HydrologyDataLayer, {
   type HydrologyPoint,
@@ -181,6 +182,48 @@ function IssueInteraction({
       onPickPoint(e.latlng)
     },
   })
+  return null
+}
+
+function MapController({
+  activeLayers,
+  projectId,
+}: {
+  activeLayers: ReturnType<typeof useWorkspaceContext>['activeLayers']
+  projectId?: string
+}) {
+  const map = useMap()
+  const lastRawPathRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    const activeCog = activeLayers.find(
+      (layer) => layer.projectId === projectId && layer.layerType === 'cog' && layer.rawPath,
+    )
+    const rawPath = activeCog?.rawPath ?? null
+    if (!rawPath || rawPath === lastRawPathRef.current) return
+    lastRawPathRef.current = rawPath
+
+    void fetch(`${API_BASE}/api/cog/info?url=${encodeURIComponent(rawPath)}`, {
+      credentials: 'include',
+    })
+      .then((res) => res.json() as Promise<{ bounds?: [number, number, number, number] }>)
+      .then((data) => {
+        if (data?.bounds) {
+          const [minX, minY, maxX, maxY] = data.bounds
+          map.fitBounds(
+            [
+              [minY, minX],
+              [maxY, maxX],
+            ],
+            { padding: [24, 24] },
+          )
+        }
+      })
+      .catch(() => {
+        // Ignore auto-zoom failure and keep the map usable.
+      })
+  }, [activeLayers, map, projectId])
+
   return null
 }
 
@@ -702,6 +745,7 @@ export function MapViewer({ floodSimulationLevel = 0, projectId }: MapViewerProp
           ) : null}
           <div className="mv-map-canvas">
             <MapContainer {...mapProps} style={{ height: '100%', width: '100%' }}>
+              <MapController activeLayers={activeLayers} projectId={projectId} />
               <MapPane
                 baseLayer={baseLayer}
                 floodEnabled={floodOn && customTilesReady}
@@ -820,6 +864,7 @@ export function MapViewer({ floodSimulationLevel = 0, projectId }: MapViewerProp
             </div>
             <div className="mv-map-canvas">
               <MapContainer {...mapProps} style={{ height: '100%', width: '100%' }}>
+                <MapController activeLayers={activeLayers} projectId={projectId} />
                 <MapPane
                   baseLayer={compareLayer}
                   floodEnabled={floodOn && customTilesReady}

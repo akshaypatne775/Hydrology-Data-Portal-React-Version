@@ -1548,6 +1548,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "status": jobs_by_file.get(display_name, {}).get("status", "Raw"),
                     "file_url": f"{base_url}/tiles/raw_uploads/{file_path.name}",
                     "layer_url": "",
+                    "file_path": str(file_path.resolve()),
                     "rel_path": file_path.relative_to(Path(LOCAL_DATA_PATH)).as_posix(),
                 },
             )
@@ -1567,6 +1568,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "layer_url": (
                         f"{base_url}/api/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?url={encoded_cog_path}"
                     ),
+                    "file_path": str(cog_file.resolve()),
                     "rel_path": cog_file.relative_to(Path(LOCAL_DATA_PATH)).as_posix(),
                 },
             )
@@ -1585,6 +1587,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "status": jobs_by_file.get(file_name, {}).get("status", "Web-Ready"),
                     "file_url": f"{base_url}/tiles/{rel}",
                     "layer_url": f"{base_url}/tiles/{rel}",
+                    "file_path": str(tileset.resolve()),
                     "rel_path": rel,
                 },
             )
@@ -1602,6 +1605,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "status": "Completed",
                     "file_url": f"{base_url}/tiles/{rel}",
                     "layer_url": "",
+                    "file_path": str(report.resolve()),
                     "rel_path": rel,
                 },
             )

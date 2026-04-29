@@ -226,6 +226,25 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     }
   }, [])
 
+  const zoomToCogBounds = useCallback((rawPath?: string) => {
+    if (!rawPath) return
+    void fetch(`${API_BASE}/api/cog/info?url=${encodeURIComponent(rawPath)}`, {
+      credentials: 'include',
+    })
+      .then((res) => res.json() as Promise<{ bounds?: [number, number, number, number] }>)
+      .then((data) => {
+        if (data?.bounds) {
+          const [minX, minY, maxX, maxY] = data.bounds
+          viewerRef.current?.camera.flyTo({
+            destination: Cesium.Rectangle.fromDegrees(minX, minY, maxX, maxY),
+          })
+        }
+      })
+      .catch(() => {
+        // Keep imagery visible even if bounds lookup fails.
+      })
+  }, [])
+
   // Example TiTiler COG XYZ layer (reference):
   // const cogLayer = new Cesium.UrlTemplateImageryProvider({
   //   url: 'http://localhost:8000/api/cog/tiles/WebMercatorQuad/{z}/{x}/{y}?url=D:/Data/output.tif',
@@ -302,8 +321,9 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     )
     if (cogLayer?.url) {
       loadOrthomosaic(cogLayer.url)
+      zoomToCogBounds(cogLayer.rawPath)
     }
-  }, [activeLayers, loadOrthomosaic, projectId])
+  }, [activeLayers, loadOrthomosaic, projectId, zoomToCogBounds])
 
   useEffect(() => {
     const tileset = pointCloudRef.current

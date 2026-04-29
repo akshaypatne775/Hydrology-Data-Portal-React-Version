@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
+import { API_BASE } from '../../lib/apiBase'
 import { useUploadContext } from '../../context/UploadContext'
 import { useWorkspaceContext } from '../../context/WorkspaceContext'
 import {
@@ -22,6 +23,7 @@ type DatasetRow = {
   type: DatasetType
   size: string
   status: DatasetStatus
+  filePath?: string
   relPath?: string
   layerType?: 'cog' | 'pointcloud'
   layerUrl?: string
@@ -68,6 +70,7 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
     type,
     size: formatSize(file.size_bytes),
     status: normalizeJobStatus(file.status),
+    filePath: file.file_path || undefined,
     relPath: file.rel_path,
     layerType,
     layerUrl: file.layer_url || undefined,
@@ -351,13 +354,22 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                       type="button"
                       className="dsp-action"
                       onClick={() => {
-                        if (!projectId || !row.layerType || !row.layerUrl) return
+                        if (!projectId || !row.layerType) return
+                        let layerUrl = row.layerUrl
+                        let rawPath: string | undefined
+                        if (row.layerType === 'cog' && row.filePath) {
+                          const safePath = row.filePath.replace(/\\/g, '/')
+                          layerUrl = `${API_BASE}/api/cog/tiles/WebMercatorQuad/{z}/{x}/{y}.png?url=${encodeURIComponent(safePath)}`
+                          rawPath = safePath
+                        }
+                        if (!layerUrl) return
                         toggleLayer({
                           id: `${projectId}:${row.fileName}:${row.layerType}`,
                           projectId,
                           name: row.fileName,
                           layerType: row.layerType,
-                          url: row.layerUrl,
+                          url: layerUrl,
+                          rawPath,
                         })
                         setActiveId(row.layerType === 'cog' ? 'map' : 'globe')
                       }}

@@ -16,6 +16,7 @@ export type ActiveLayerConfig = {
   name: string
   layerType: 'cog' | 'pointcloud'
   url: string
+  rawPath?: string
 }
 
 export function useWorkspaceState() {
