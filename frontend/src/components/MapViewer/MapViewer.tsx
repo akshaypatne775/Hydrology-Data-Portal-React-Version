@@ -185,6 +185,54 @@ function IssueInteraction({
   return null
 }
 
+function isStaticXyzTileTemplate(url: string): boolean {
+  return (
+    (url.includes('/tiles/') || url.includes('/data/')) &&
+    url.includes('{z}/{x}/{y}.png') &&
+    !url.includes('/api/cog/')
+  )
+}
+
+function tileTemplateToStaticBase(url: string): string | null {
+  const suffix = '{z}/{x}/{y}.png'
+  if (!url.endsWith(suffix)) return null
+  return url.slice(0, -suffix.length)
+}
+
+function parseKmlLatLonBounds(xml: string): [[number, number], [number, number]] | null {
+  const grab = (tag: string) => {
+    const m = xml.match(new RegExp(`<${tag}>\\s*([\\d.\\-+eE]+)\\s*</${tag}>`, 'i'))
+    return m ? Number(m[1]) : NaN
+  }
+  const n = grab('north')
+  const s = grab('south')
+  const e = grab('east')
+  const w = grab('west')
+  if ([n, s, e, w].some((v) => Number.isNaN(v))) return null
+  return [
+    [s, w],
+    [n, e],
+  ]
+}
+
+function parseTileMapResourceBounds(xml: string): [[number, number], [number, number]] | null {
+  const pick = (name: string) => {
+    const m = xml.match(new RegExp(`${name}\\s*=\\s*"([^"]+)"`, 'i'))
+    return m ? Number(m[1]) : NaN
+  }
+  const minx = pick('minx')
+  const miny = pick('miny')
+  const maxx = pick('maxx')
+  const maxy = pick('maxy')
+  if ([minx, miny, maxx, maxy].some((v) => Number.isNaN(v))) return null
+  const sw = L.CRS.EPSG3857.unproject(L.point(minx, miny))
+  const ne = L.CRS.EPSG3857.unproject(L.point(maxx, maxy))
+  return [
+    [sw.lat, sw.lng],
+    [ne.lat, ne.lng],
+  ]
+}
+
 function MapController({
   activeLayers,
   projectId,
@@ -193,35 +241,69 @@ function MapController({
   projectId?: string
 }) {
   const map = useMap()
-  const lastRawPathRef = useRef<string | null>(null)
+  const lastFitKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
+    if (!projectId) return
     const activeCog = activeLayers.find(
-      (layer) => layer.projectId === projectId && layer.layerType === 'cog' && layer.rawPath,
+      (layer) => layer.projectId === projectId && layer.layerType === 'cog',
     )
-    const rawPath = activeCog?.rawPath ?? null
-    if (!rawPath || rawPath === lastRawPathRef.current) return
-    lastRawPathRef.current = rawPath
+    if (!activeCog) return
 
-    void fetch(`${API_BASE}/api/cog/info?url=${encodeURIComponent(rawPath)}`, {
-      credentials: 'include',
-    })
-      .then((res) => res.json() as Promise<{ bounds?: [number, number, number, number] }>)
-      .then((data) => {
-        if (data?.bounds) {
-          const [minX, minY, maxX, maxY] = data.bounds
-          map.fitBounds(
-            [
-              [minY, minX],
-              [maxY, maxX],
-            ],
-            { padding: [24, 24] },
-          )
+    const rawPath = activeCog.rawPath ?? null
+    const tileUrl = activeCog.url
+    const fitKey = rawPath ?? (isStaticXyzTileTemplate(tileUrl) ? tileUrl : null)
+    if (!fitKey) return
+
+    const dedupeKey = `${projectId}:${fitKey}`
+    if (dedupeKey === lastFitKeyRef.current) return
+    lastFitKeyRef.current = dedupeKey
+
+    if (rawPath) {
+      void fetch(`${API_BASE}/api/cog/info?url=${encodeURIComponent(rawPath)}`, {
+        credentials: 'include',
+      })
+        .then((res) => res.json() as Promise<{ bounds?: [number, number, number, number] }>)
+        .then((data) => {
+          if (data?.bounds) {
+            const [minX, minY, maxX, maxY] = data.bounds
+            map.fitBounds(
+              [
+                [minY, minX],
+                [maxY, maxX],
+              ],
+              { padding: [24, 24] },
+            )
+          }
+        })
+        .catch(() => {
+          // Ignore auto-zoom failure and keep the map usable.
+        })
+      return
+    }
+
+    const base = tileTemplateToStaticBase(tileUrl)
+    if (!base) return
+
+    void (async () => {
+      try {
+        const kmlRes = await fetch(`${base}doc.kml`, { credentials: 'include' })
+        if (kmlRes.ok) {
+          const b = parseKmlLatLonBounds(await kmlRes.text())
+          if (b) {
+            map.fitBounds(b, { padding: [24, 24] })
+            return
+          }
         }
-      })
-      .catch(() => {
+        const tmrRes = await fetch(`${base}tilemapresource.xml`, { credentials: 'include' })
+        if (tmrRes.ok) {
+          const b = parseTileMapResourceBounds(await tmrRes.text())
+          if (b) map.fitBounds(b, { padding: [24, 24] })
+        }
+      } catch {
         // Ignore auto-zoom failure and keep the map usable.
-      })
+      }
+    })()
   }, [activeLayers, map, projectId])
 
   return null

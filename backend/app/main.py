@@ -3,6 +3,7 @@ import base64
 import hashlib
 import hmac
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -32,15 +33,15 @@ import laspy
 from PIL import Image
 from pydantic import BaseModel
 from titiler.core.factory import TilerFactory
-from rio_cogeo.cogeo import cog_translate
-from rio_cogeo.profiles import cog_profiles
 
-# Map tiles, ortho, DEM, terrain quantized-mesh, videos, etc. (served under /tiles).
-# Keep overridable so frontend viewers (Leaflet/Cesium) can fetch local datasets.
-LOCAL_DATA_PATH = os.getenv(
-    "LOCAL_DATA_PATH",
-    r"D:/Codings/Hydrology Data Portal React Version/Project_Data",
-)
+# Project_Data lives beside backend/ and frontend/ (repo root).
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+_DEFAULT_PROJECT_DATA = BASE_DIR / "Project_Data"
+LOCAL_DATA_PATH = os.getenv("LOCAL_DATA_PATH", str(_DEFAULT_PROJECT_DATA))
+
+# Map tiles, ortho, DEM, terrain quantized-mesh, videos, etc.
+# - `/data` — preferred URL prefix for files under Project_Data (see StaticFiles mount).
+# - `/tiles` — same directory, kept for flood/media and older clients.
 ISSUES_DB_PATH = Path(LOCAL_DATA_PATH) / "issues.db"
 
 Path(LOCAL_DATA_PATH).mkdir(parents=True, exist_ok=True)
@@ -50,6 +51,10 @@ DISK_HEADROOM_BYTES = int(os.getenv("UPLOAD_DISK_HEADROOM_MB", "512")) * 1024 * 
 MERGE_COPY_BUFFER_BYTES = 8 * 1024 * 1024  # streaming merge, avoid loading whole file in RAM
 POINTCLOUD_SRS_IN = os.getenv("POINTCLOUD_SRS_IN", "").strip()
 POINTCLOUD_SRS_OUT = os.getenv("POINTCLOUD_SRS_OUT", "4978").strip()
+OSGEO4W_BAT = os.getenv(
+    "OSGEO4W_BAT",
+    r"C:\Program Files\QGIS 3.44.8\OSGeo4W.bat",
+).strip()
 PROJECT_FILES_CACHE_TTL_SECONDS = float(os.getenv("PROJECT_FILES_CACHE_TTL_SECONDS", "4"))
 SESSION_COOKIE_NAME = "droid_cloud_session"
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "604800"))
@@ -124,8 +129,14 @@ app.mount(
     StaticFiles(directory=LOCAL_DATA_PATH),
     name="local-tiles",
 )
-# The /tiles static mount also serves generated Cesium point cloud artifacts:
-# /tiles/pointclouds/{project_id}/tileset.json (+ child .pnts files).
+app.mount(
+    "/data",
+    StaticFiles(directory=str(LOCAL_DATA_PATH)),
+    name="project-data",
+)
+# Static files under Project_Data, e.g.:
+# /data/projects/{project_id}/processed/{tile_folder}/{z}/{x}/{y}.png
+# /data/pointclouds/{project_id}/{tileset_id}/tileset.json
 
 # Study metrics (mirrors frontend HydrologyStats placeholders; PDF scope 964 Acres).
 CATCHMENT_STATS: list[dict[str, str]] = [
@@ -278,7 +289,7 @@ def _ensure_disk_space_for_bytes(path_on_volume: Path, required_extra: int) -> N
 def _normalize_tileset_into_output_root(output_dir: Path) -> None:
     """
     Ensure tileset.json lives at output_dir root so static URL
-    /tiles/pointclouds/<project_id>/tileset.json resolves correctly.
+    /data/pointclouds/<project_id>/<tileset_id>/tileset.json resolves correctly.
     py3dtiles sometimes writes a nested folder under --out.
     """
     root_tileset = output_dir / "tileset.json"
@@ -362,7 +373,7 @@ async def process_pointcloud_background(
                     "file_name": file_name or final_path.name,
                     "status": "Completed",
                     "updated_at": _now_iso(),
-                    "result_url": f"/tiles/pointclouds/{project_id}/{output_dir.name}/tileset.json",
+                    "result_url": f"/data/pointclouds/{project_id}/{output_dir.name}/tileset.json",
                 },
             )
             _invalidate_project_files_cache(project_id)
@@ -411,41 +422,73 @@ async def process_pointcloud_background(
             _invalidate_project_files_cache(project_id)
 
 
-async def convert_to_cog(input_tif: str, output_cog: str) -> None:
-    input_tif = os.path.abspath(input_tif)
-    output_cog = os.path.abspath(output_cog)
-    profile = dict(cog_profiles.get("deflate"))
-    profile["BIGTIFF"] = "IF_SAFER"
-    await asyncio.to_thread(
-        cog_translate,
-        input_tif,
-        output_cog,
-        profile,
-        in_memory=False,
-        quiet=True,
-    )
+def _run_gdal2tiles_subprocess(input_tif: str, output_dir: str) -> None:
+    """Run gdal2tiles via QGIS OSGeo4W shell (blocking; call from asyncio.to_thread)."""
+    in_abs = os.path.abspath(input_tif)
+    out_abs = os.path.abspath(output_dir)
+    os.makedirs(out_abs, exist_ok=True)
+    bat = OSGEO4W_BAT
+    command = [
+        bat,
+        "gdal2tiles",
+        "-z",
+        "1-22",
+        "-w",
+        "none",
+        in_abs,
+        out_abs,
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode == 0:
+        return
+    if platform.system() == "Windows":
+        inner = f'gdal2tiles -z 1-22 -w none "{in_abs}" "{out_abs}"'
+        cmdline = f'call "{bat}" {inner}'
+        result2 = subprocess.run(
+            cmdline,
+            shell=True,
+            capture_output=True,
+            text=True,
+            executable=os.environ.get("COMSPEC", "cmd.exe"),
+        )
+        if result2.returncode == 0:
+            return
+        msg2 = (result2.stderr or result2.stdout or "").strip()
+        msg1 = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(msg2 or msg1 or "gdal2tiles failed")
+    msg = (result.stderr or result.stdout or "").strip()
+    raise RuntimeError(msg or "gdal2tiles failed")
+
+
+async def process_tif_to_tiles(input_tif: str, output_dir: str) -> None:
+    await asyncio.to_thread(_run_gdal2tiles_subprocess, input_tif, output_dir)
 
 
 async def process_dataset_background(
     project_id: str,
     dataset_id: str,
     input_tif: str,
-    output_cog: str,
-    file_name: str | None = None,
+    file_name: str | None,
+    tile_output_dir: str,
+    tile_folder: str,
 ) -> None:
+    tiles_dir = str(Path(tile_output_dir).resolve())
     _write_dataset_status(
         project_id,
         dataset_id,
         {
-            "status": "Converting to COG",
+            "status": "Generating XYZ tiles",
             "updated_at": _now_iso(),
             "dataset_id": dataset_id,
+            "dataset_name": file_name or Path(input_tif).name,
+            "tile_folder": tile_folder,
         },
     )
     err_path = _dataset_dir(project_id, dataset_id) / ".conversion_error.txt"
     err_path.unlink(missing_ok=True)
     try:
-        await convert_to_cog(input_tif, output_cog)
+        await process_tif_to_tiles(input_tif, tiles_dir)
+        tiles_rel = Path(tiles_dir).resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
         _upsert_processing_job(
             project_id,
             {
@@ -454,7 +497,7 @@ async def process_dataset_background(
                 "file_name": file_name or Path(input_tif).name,
                 "status": "Completed",
                 "updated_at": _now_iso(),
-                "result_url": output_cog,
+                "result_url": f"/data/{tiles_rel}",
             },
         )
         _invalidate_project_files_cache(project_id)
@@ -465,11 +508,13 @@ async def process_dataset_background(
                 "status": "Web-Ready",
                 "updated_at": _now_iso(),
                 "dataset_id": dataset_id,
-                "cog_path": output_cog,
+                "dataset_name": file_name or Path(input_tif).name,
+                "tile_folder": tile_folder,
+                "tiles_rel_path": tiles_rel,
             },
         )
     except Exception as exc:  # noqa: BLE001
-        msg = str(exc) or "COG conversion failed."
+        msg = str(exc) or "Tile generation failed."
         try:
             err_path.write_text(msg, encoding="utf-8")
         except OSError:
@@ -482,6 +527,8 @@ async def process_dataset_background(
                 "error": msg[:8000],
                 "updated_at": _now_iso(),
                 "dataset_id": dataset_id,
+                "dataset_name": file_name or Path(input_tif).name,
+                "tile_folder": tile_folder,
             },
         )
         _upsert_processing_job(
@@ -549,6 +596,17 @@ def _safe_project_id(project_id: str) -> str:
     return project_id
 
 
+def get_project_dirs(project_id: str) -> tuple[Path, Path]:
+    """Per-project raw uploads and gdal2tiles output under Project_Data/projects."""
+    safe = _safe_project_id(project_id)
+    project_dir = Path(LOCAL_DATA_PATH) / "projects" / safe
+    raw_dir = project_dir / "raw"
+    processed_dir = project_dir / "processed"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    return raw_dir, processed_dir
+
+
 def _safe_tileset_id(tileset_id: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,240}", tileset_id or ""):
         raise HTTPException(status_code=400, detail="Invalid tileset_id")
@@ -562,7 +620,8 @@ def _safe_dataset_id(dataset_id: str) -> str:
 
 
 def _dataset_dir(project_id: str, dataset_id: str) -> Path:
-    return Path(LOCAL_DATA_PATH) / "datasets" / project_id / dataset_id
+    """Job metadata (.status.json) for a raster upload; tiles live under projects/.../processed/."""
+    return Path(LOCAL_DATA_PATH) / "projects" / project_id / "_dataset_jobs" / dataset_id
 
 
 def _dataset_status_file(project_id: str, dataset_id: str) -> Path:
@@ -817,7 +876,7 @@ def pointcloud_status(
                 "ready": False,
                 "failed": True,
                 "error": msg[:8000],
-                "tileset_url": f"{base_url}/tiles/pointclouds/{safe_id}{suffix}/tileset.json",
+                "tileset_url": f"{base_url}/data/pointclouds/{safe_id}{suffix}/tileset.json",
             }
         if tileset.is_file():
             suffix = (
@@ -826,14 +885,14 @@ def pointcloud_status(
             return {
                 "ready": True,
                 "failed": False,
-                "tileset_url": f"{base_url}/tiles/pointclouds/{safe_id}{suffix}/tileset.json",
+                "tileset_url": f"{base_url}/data/pointclouds/{safe_id}{suffix}/tileset.json",
             }
 
     pending_suffix = f"/{_safe_tileset_id(tileset_id)}" if tileset_id else ""
     return {
         "ready": False,
         "failed": False,
-        "tileset_url": f"{base_url}/tiles/pointclouds/{safe_id}{pending_suffix}/tileset.json",
+        "tileset_url": f"{base_url}/data/pointclouds/{safe_id}{pending_suffix}/tileset.json",
     }
 
 
@@ -1165,7 +1224,7 @@ async def process_pointcloud(payload: PointCloudProcessPayload, request: Request
         tileset_path.write_text('{"asset":{"version":"1.0"}}', encoding="utf-8")
 
     tileset_url = (
-        f"{str(request.base_url).rstrip('/')}/tiles/pointclouds/"
+        f"{str(request.base_url).rstrip('/')}/data/pointclouds/"
         f"{payload.project_id}/tileset.json"
     )
 
@@ -1230,7 +1289,7 @@ async def complete_upload(
     background_tasks: BackgroundTasks,
 ) -> dict[str, str]:
     """
-    Merge chunk files in order into a single LAS/LAZ under raw_uploads/.
+    Merge chunk files in order into a single LAS/LAZ under projects/<id>/raw/.
     Uses streaming copy + per-chunk delete to limit peak disk and avoid RAM spikes.
     """
     user = _require_user(request)
@@ -1258,8 +1317,7 @@ async def complete_upload(
         total_bytes += part.stat().st_size
         part_paths.append(part)
 
-    raw_dir = Path(LOCAL_DATA_PATH) / "raw_uploads"
-    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir, _ = get_project_dirs(safe_project_id)
     out_path = raw_dir / f"{safe_project_id}__{safe_name}"
 
     # Large-file safety: ensure enough free space for merged output (+ headroom).
@@ -1318,7 +1376,7 @@ async def complete_upload(
                 "file_name": safe_name,
                 "status": "Completed",
                 "updated_at": _now_iso(),
-                "result_url": f"/tiles/pointclouds/{safe_project_id}/{reused_tileset_id}/tileset.json",
+                "result_url": f"/data/pointclouds/{safe_project_id}/{reused_tileset_id}/tileset.json",
             },
         )
         return {
@@ -1330,7 +1388,7 @@ async def complete_upload(
             "tileset_url": "PENDING",
             "project_id": safe_project_id,
             "target_tileset_url": (
-                f"{str(request.base_url).rstrip('/')}/tiles/pointclouds/"
+                f"{str(request.base_url).rstrip('/')}/data/pointclouds/"
                 f"{safe_project_id}/{reused_tileset_id}/tileset.json"
             ),
             "tileset_id": reused_tileset_id,
@@ -1369,7 +1427,7 @@ async def complete_upload(
         "tileset_url": "PENDING",
         "project_id": safe_project_id,
         "target_tileset_url": (
-            f"{str(request.base_url).rstrip('/')}/tiles/pointclouds/"
+            f"{str(request.base_url).rstrip('/')}/data/pointclouds/"
             f"{safe_project_id}/{reused_tileset_id}/tileset.json"
         ),
         "tileset_id": reused_tileset_id,
@@ -1390,14 +1448,23 @@ async def process_dataset(
 
     dataset_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(safe_name).stem).strip("-") or "dataset"
     dataset_id = _safe_dataset_id(f"{dataset_stem[:40]}-{secrets.token_hex(6)}")
-    dataset_dir = _dataset_dir(safe_project_id, dataset_id)
-    dataset_dir.mkdir(parents=True, exist_ok=True)
-    input_tif = dataset_dir / safe_name
-    output_cog = dataset_dir / f"{Path(safe_name).stem}.cog.tif"
+    tile_output_folder = _safe_dataset_id(f"{dataset_stem[:56]}-{secrets.token_hex(4)}")
+
+    raw_dir, processed_dir = get_project_dirs(safe_project_id)
+    meta_dir = _dataset_dir(safe_project_id, dataset_id)
+    meta_dir.mkdir(parents=True, exist_ok=True)
+
+    ext = Path(safe_name).suffix.lower()
+    if ext not in (".tif", ".tiff"):
+        ext = ".tif"
+    input_tif = raw_dir / f"{tile_output_folder}{ext}"
 
     content_length = request.headers.get("content-length")
     expected_bytes = int(content_length) if content_length and content_length.isdigit() else 0
-    _ensure_disk_space_for_bytes(dataset_dir, max(expected_bytes * 2, 512 * 1024 * 1024))
+    _ensure_disk_space_for_bytes(raw_dir, max(expected_bytes * 2, 512 * 1024 * 1024))
+
+    output_tile_dir = processed_dir / tile_output_folder
+    output_tile_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         with open(input_tif, "wb") as out_f:
@@ -1415,6 +1482,7 @@ async def process_dataset(
             "updated_at": _now_iso(),
             "dataset_id": dataset_id,
             "dataset_name": safe_name,
+            "tile_folder": tile_output_folder,
         },
     )
     _upsert_processing_job(
@@ -1434,22 +1502,22 @@ async def process_dataset(
         safe_project_id,
         dataset_id,
         str(input_tif),
-        str(output_cog),
         safe_name,
+        str(output_tile_dir),
+        tile_output_folder,
     )
 
-    encoded_cog_path = quote(str(output_cog).replace("\\", "/"), safe="")
+    tiles_rel = output_tile_dir.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
     tile_template = (
-        f"{str(request.base_url).rstrip('/')}/api/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
-        f"?url={encoded_cog_path}"
+        f"{str(request.base_url).rstrip('/')}/data/{tiles_rel}/{{z}}/{{x}}/{{y}}.png"
     )
     return ProcessDatasetOut(
         status="success",
-        message="Dataset uploaded. COG conversion started in background.",
+        message="Dataset uploaded. gdal2tiles XYZ generation started in background.",
         project_id=safe_project_id,
         dataset_id=dataset_id,
         dataset_name=safe_name,
-        cog_path=str(output_cog),
+        cog_path="",
         cog_tile_url_template=tile_template,
     )
 
@@ -1498,13 +1566,18 @@ def dataset_status(project_id: str, dataset_id: str, request: Request) -> dict[s
     if not status:
         raise HTTPException(status_code=404, detail="Dataset status not found")
 
-    cog_path = status.get("cog_path", "")
-    if cog_path:
-        encoded_cog_path = quote(cog_path.replace("\\", "/"), safe="")
-        status["cog_tile_url_template"] = (
-            f"{str(request.base_url).rstrip('/')}/api/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
-            f"?url={encoded_cog_path}"
-        )
+    base = str(request.base_url).rstrip("/")
+    tiles_rel = status.get("tiles_rel_path", "").strip()
+    if tiles_rel:
+        status["cog_tile_url_template"] = f"{base}/data/{tiles_rel}/{{z}}/{{x}}/{{y}}.png"
+    else:
+        cog_path = status.get("cog_path", "")
+        if cog_path:
+            encoded_cog_path = quote(cog_path.replace("\\", "/"), safe="")
+            status["cog_tile_url_template"] = (
+                f"{base}/api/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
+                f"?url={encoded_cog_path}"
+            )
     return status
 
 
@@ -1517,28 +1590,20 @@ def project_jobs(project_id: str, request: Request) -> dict[str, list[dict[str, 
     return {"jobs": jobs.get(safe_project_id, [])}
 
 
-@app.get("/api/datasets/{project_id}/{dataset_id}/tiles/{z}/{x}/{y}.png")
-def dataset_tile_proxy(project_id: str, dataset_id: str, z: int, x: int, y: int):
-    safe_proj = _safe_project_id(project_id)
-    safe_data = _safe_dataset_id(dataset_id)
-    status = _read_dataset_status(safe_proj, safe_data)
-    if not status or not status.get("cog_path"):
-        raise HTTPException(404, "COG not ready")
-    encoded = quote(status["cog_path"].replace("\\", "/"), safe="")
+@app.get("/api/proxy/tiles/{z}/{x}/{y}.png")
+def proxy_tiles(z: int, x: int, y: int, path: str):
+    full_path = (Path(LOCAL_DATA_PATH) / path).resolve().as_posix()
+    encoded_url = quote(full_path, safe="")
     return RedirectResponse(
-        f"/api/cog/tiles/WebMercatorQuad/{z}/{x}/{y}.png?url={encoded}"
+        f"/api/cog/tiles/WebMercatorQuad/{z}/{x}/{y}.png?url={encoded_url}"
     )
 
 
-@app.get("/api/datasets/{project_id}/{dataset_id}/info")
-def dataset_info_proxy(project_id: str, dataset_id: str):
-    safe_proj = _safe_project_id(project_id)
-    safe_data = _safe_dataset_id(dataset_id)
-    status = _read_dataset_status(safe_proj, safe_data)
-    if not status or not status.get("cog_path"):
-        raise HTTPException(404, "COG not ready")
-    encoded = quote(status["cog_path"].replace("\\", "/"), safe="")
-    return RedirectResponse(f"/api/cog/info?url={encoded}")
+@app.get("/api/proxy/info")
+def proxy_info(path: str):
+    full_path = (Path(LOCAL_DATA_PATH) / path).resolve().as_posix()
+    encoded_url = quote(full_path, safe="")
+    return RedirectResponse(f"/api/cog/info?url={encoded_url}")
 
 
 @app.get("/api/projects/{project_id}/files")
@@ -1558,12 +1623,16 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
     }
     files: list[dict[str, str]] = []
 
-    raw_dir = Path(LOCAL_DATA_PATH) / "raw_uploads"
-    if raw_dir.is_dir():
+    raw_dir_proj, processed_root = get_project_dirs(safe_project_id)
+    legacy_raw = Path(LOCAL_DATA_PATH) / "raw_uploads"
+    for raw_dir in (raw_dir_proj, legacy_raw):
+        if not raw_dir.is_dir():
+            continue
         for file_path in sorted(raw_dir.glob(f"{safe_project_id}__*"), key=lambda p: p.name.lower()):
             if not file_path.is_file():
                 continue
             display_name = file_path.name.replace(f"{safe_project_id}__", "", 1)
+            rel_path = file_path.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
             files.append(
                 {
                     "name": display_name,
@@ -1571,28 +1640,77 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "type": file_path.suffix.lower().lstrip(".") or "file",
                     "size_bytes": str(file_path.stat().st_size),
                     "status": jobs_by_file.get(display_name, {}).get("status", "Raw"),
-                    "file_url": f"{base_url}/tiles/raw_uploads/{file_path.name}",
+                    "file_url": f"{base_url}/data/{rel_path}",
                     "layer_url": "",
                     "file_path": str(file_path.resolve()),
-                    "rel_path": file_path.relative_to(Path(LOCAL_DATA_PATH)).as_posix(),
+                    "rel_path": rel_path,
+                },
+            )
+
+    jobs_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "_dataset_jobs"
+    if jobs_root.is_dir():
+        for job_dir in sorted([p for p in jobs_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
+            st = _read_dataset_status(safe_project_id, job_dir.name)
+            if not st:
+                continue
+            tile_folder = (st.get("tile_folder") or "").strip()
+            if not tile_folder:
+                continue
+            tile_root = processed_root / tile_folder
+            if not tile_root.is_dir():
+                continue
+            if not any(d.is_dir() and d.name.isdigit() for d in tile_root.iterdir()):
+                continue
+            display_name = str(st.get("dataset_name") or f"{tile_folder}.tif")
+            total_bytes = sum(p.stat().st_size for p in tile_root.rglob("*") if p.is_file())
+            rel_base = tile_root.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            layer_url = f"{base_url}/data/{rel_base}/{{z}}/{{x}}/{{y}}.png"
+            files.append(
+                {
+                    "name": display_name,
+                    "kind": "Web-Optimized Data",
+                    "type": "cog",
+                    "size_bytes": str(total_bytes or 1),
+                    "status": jobs_by_file.get(display_name, {}).get("status", "Web-Ready"),
+                    "file_url": f"{base_url}/data/{rel_base}",
+                    "layer_url": layer_url,
+                    "file_path": str(tile_root.resolve()),
+                    "rel_path": rel_base,
                 },
             )
 
     dataset_root = Path(LOCAL_DATA_PATH) / "datasets" / safe_project_id
     if dataset_root.is_dir():
-        for cog_file in sorted(dataset_root.rglob("*.cog.tif"), key=lambda p: p.name.lower()):
-            dataset_id = cog_file.parent.name
+        for ds_dir in sorted([p for p in dataset_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
+            webtiles = ds_dir / "webtiles"
+            if not webtiles.is_dir():
+                continue
+            if not any(d.is_dir() and d.name.isdigit() for d in webtiles.iterdir()):
+                continue
+            st: dict[str, str] = {}
+            legacy_st = ds_dir / ".status.json"
+            if legacy_st.is_file():
+                try:
+                    loaded = json.loads(legacy_st.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        st = {str(k): str(v) for k, v in loaded.items()}
+                except (OSError, json.JSONDecodeError, TypeError):
+                    st = {}
+            display_name = str(st.get("dataset_name") or f"{ds_dir.name}.tif")
+            total_bytes = sum(p.stat().st_size for p in webtiles.rglob("*") if p.is_file())
+            rel_base = webtiles.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            layer_url = f"{base_url}/data/{rel_base}/{{z}}/{{x}}/{{y}}.png"
             files.append(
                 {
-                    "name": cog_file.name,
+                    "name": display_name,
                     "kind": "Web-Optimized Data",
                     "type": "cog",
-                    "size_bytes": str(cog_file.stat().st_size),
-                    "status": jobs_by_file.get(cog_file.name.replace(".cog", ""), {}).get("status", "Web-Ready"),
-                    "file_url": f"{base_url}/tiles/{cog_file.relative_to(Path(LOCAL_DATA_PATH)).as_posix()}",
-                    "layer_url": f"{base_url}/api/datasets/{safe_project_id}/{dataset_id}/tiles/{{z}}/{{x}}/{{y}}.png",
-                    "file_path": str(cog_file.resolve()),
-                    "rel_path": cog_file.relative_to(Path(LOCAL_DATA_PATH)).as_posix(),
+                    "size_bytes": str(total_bytes or 1),
+                    "status": jobs_by_file.get(display_name, {}).get("status", "Web-Ready"),
+                    "file_url": f"{base_url}/data/{rel_base}",
+                    "layer_url": layer_url,
+                    "file_path": str(webtiles.resolve()),
+                    "rel_path": rel_base,
                 },
             )
 
@@ -1608,8 +1726,8 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "type": "pointcloud",
                     "size_bytes": str(tileset.stat().st_size),
                     "status": jobs_by_file.get(file_name, {}).get("status", "Web-Ready"),
-                    "file_url": f"{base_url}/tiles/{rel}",
-                    "layer_url": f"{base_url}/tiles/{rel}",
+                    "file_url": f"{base_url}/data/{rel}",
+                    "layer_url": f"{base_url}/data/{rel}",
                     "file_path": str(tileset.resolve()),
                     "rel_path": rel,
                 },
@@ -1626,7 +1744,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "type": "pdf",
                     "size_bytes": str(report.stat().st_size),
                     "status": "Completed",
-                    "file_url": f"{base_url}/tiles/{rel}",
+                    "file_url": f"{base_url}/data/{rel}",
                     "layer_url": "",
                     "file_path": str(report.resolve()),
                     "rel_path": rel,

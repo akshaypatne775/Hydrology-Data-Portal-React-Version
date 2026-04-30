@@ -110,7 +110,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
           completeData.target_tileset_url ||
           (completeData.tileset_url && completeData.tileset_url !== 'PENDING'
             ? completeData.tileset_url
-            : `${API_BASE}/tiles/pointclouds/${encodeURIComponent(resolvedProjectId)}/tileset.json`)
+            : `${API_BASE}/data/pointclouds/${encodeURIComponent(resolvedProjectId)}/tileset.json`)
 
         upsertTask(id, {
           state: 'processing',

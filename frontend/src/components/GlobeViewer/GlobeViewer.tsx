@@ -214,7 +214,7 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       }
       const imageryProvider = new Cesium.UrlTemplateImageryProvider({
         url: tileUrl,
-        maximumLevel: 23,
+        maximumLevel: 22,
         hasAlphaChannel: true,
       })
       const layer = new Cesium.ImageryLayer(imageryProvider)
@@ -222,23 +222,25 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       orthomosaicLayerRef.current = layer
       setViewerError(null)
 
-      const infoUrl = tileUrl.replace('/tiles/{z}/{x}/{y}.png', '/info')
-      void (async () => {
-        try {
-          const res = await fetch(infoUrl, { credentials: 'include' })
-          const data = (await res.json()) as { bounds?: [number, number, number, number] }
-          if (data && data.bounds) {
-            const [minX, minY, maxX, maxY] = data.bounds
-            console.log('Zooming to COG Bounds:', [minX, minY, maxX, maxY])
-            viewer.camera.flyTo({
-              destination: Cesium.Rectangle.fromDegrees(minX, minY, maxX, maxY),
-              duration: 2.0,
-            })
+      if (tileUrl.includes('/api/cog/tiles/')) {
+        const infoUrl = tileUrl.replace('/tiles/{z}/{x}/{y}.png', '/info')
+        void (async () => {
+          try {
+            const res = await fetch(infoUrl)
+            const data = (await res.json()) as { bounds?: [number, number, number, number] }
+            if (data && data.bounds) {
+              const [minX, minY, maxX, maxY] = data.bounds
+              console.log('Zooming to COG Bounds:', [minX, minY, maxX, maxY])
+              viewer.camera.flyTo({
+                destination: Cesium.Rectangle.fromDegrees(minX, minY, maxX, maxY),
+                duration: 2.0,
+              })
+            }
+          } catch (e) {
+            console.error('Failed to fetch COG bounds for zoom', e)
           }
-        } catch (e) {
-          console.error('Failed to fetch COG bounds for zoom', e)
-        }
-      })()
+        })()
+      }
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Failed to load orthomosaic layer'
