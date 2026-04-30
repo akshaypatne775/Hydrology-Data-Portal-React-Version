@@ -6,9 +6,6 @@ import { getProjectFiles, getProjectJobs } from '../services/datasetService'
 import { useWorkspaceContext } from '../context/WorkspaceContext'
 import './Dashboard.css'
 
-const HydrologyStats = lazy(() =>
-  import('./HydrologyStats/HydrologyStats').then((m) => ({ default: m.HydrologyStats })),
-)
 const MapViewer = lazy(() =>
   import('./MapViewer/MapViewer').then((m) => ({ default: m.MapViewer })),
 )
@@ -22,11 +19,11 @@ const DROID_CLOUD_LOGO_URL =
 const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: 'fa-solid fa-house' },
   { id: 'projects', label: 'Projects', icon: 'fa-solid fa-folder-tree' },
-  { id: 'datasets', label: 'Datasets', icon: 'fa-solid fa-database' },
-  { id: 'map', label: 'Map View', icon: 'fa-solid fa-map' },
-  { id: 'globe', label: 'Globe View', icon: 'fa-solid fa-earth-americas' },
+  { id: 'datasets', label: 'Data Catalog', icon: 'fa-solid fa-database' },
+  { id: 'map', label: 'Viewer (2D)', icon: 'fa-solid fa-map' },
+  { id: 'globe', label: 'Viewer (3D)', icon: 'fa-solid fa-earth-americas' },
   { id: 'compare', label: 'Compare', icon: 'fa-solid fa-code-compare' },
-  { id: 'downloads', label: 'Downloads', icon: 'fa-solid fa-download' },
+  { id: 'downloads', label: 'Data Downloads', icon: 'fa-solid fa-download' },
 ] as const
 
 type DashboardMetric = { label: string; value: string; meta: string; icon: string }
@@ -34,11 +31,11 @@ type DashboardMetric = { label: string; value: string; meta: string; icon: strin
 const DASHBOARD_MODULES = [
   {
     id: 'map',
-    title: 'Hydrology Analysis & Modeling',
-    icon: 'fa-solid fa-droplet',
+    title: '2D Workspace Viewer',
+    icon: 'fa-solid fa-map',
     description:
-      'Run rainfall scenarios, inspect return-period behavior, and align outputs with map overlays.',
-    action: 'Open analysis workspace',
+      'Inspect processed rasters and annotations in a clean 2D workspace viewer.',
+    action: 'Open 2D viewer',
   },
   {
     id: 'datasets',
@@ -50,7 +47,7 @@ const DASHBOARD_MODULES = [
   },
   {
     id: 'compare',
-    title: 'Compare Scenarios',
+    title: 'Compare Data Views',
     icon: 'fa-solid fa-code-compare',
     description:
       'Compare outcomes across different model configurations and project versions.',
@@ -58,11 +55,11 @@ const DASHBOARD_MODULES = [
   },
   {
     id: 'downloads',
-    title: 'Download Management Center',
+    title: 'Data Download Center',
     icon: 'fa-solid fa-file-arrow-down',
     description:
-      'Prepare polished output bundles for technical review, delivery, and archival.',
-    action: 'Access delivery packages',
+      'Prepare polished output bundles for review, delivery, and archival.',
+    action: 'Open download center',
   },
 ] as const
 
@@ -77,8 +74,6 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     setActiveId,
     selectedProject,
     setSelectedProject,
-    floodSimulationLevel,
-    setFloodSimulationLevel,
     showCreateProject,
     setShowCreateProject,
     createForm,
@@ -256,10 +251,10 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
 
   return (
     <div className="ds-dashboard">
-      <aside className="ds-sidebar" aria-label="Droid Cloud navigation">
+      <aside className="ds-sidebar" aria-label="Droid Survair navigation">
         <div className="ds-sidebar__brand">
           <div className="ds-sidebar__brand-mark">
-            <img src={DROID_CLOUD_LOGO_URL} alt="Droid Cloud" className="ds-sidebar__logo-img" />
+            <img src={DROID_CLOUD_LOGO_URL} alt="Droid Survair" className="ds-sidebar__logo-img" />
           </div>
         </div>
 
@@ -287,13 +282,13 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
           ))}
         </nav>
 
-        <div className="ds-sidebar__footer">Droid Cloud · v1</div>
+        <div className="ds-sidebar__footer">Droid Survair Workspace · v1</div>
       </aside>
 
       <div className="ds-main">
         <header className="ds-topbar">
           <div className="ds-topbar__brand-logo-wrap">
-            <img src={DROID_CLOUD_LOGO_URL} alt="Droid Cloud" className="ds-topbar__brand-logo" />
+            <img src={DROID_CLOUD_LOGO_URL} alt="Droid Survair" className="ds-topbar__brand-logo" />
           </div>
           <div className="ds-topbar__project">
             <span className="ds-topbar__label">Project</span>
@@ -323,7 +318,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
               </div>
               <div className="ds-profile__meta">
                 <span className="ds-profile__name">{user.email}</span>
-                <span className="ds-profile__role">Droid Cloud User</span>
+                <span className="ds-profile__role">Droid Survair User</span>
               </div>
             </div>
             <button type="button" className="ds-share" onClick={() => void handleLogout()}>
@@ -387,7 +382,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                 <div>
                   <p className="ds-overview-hero__kicker">Operations Command</p>
                   <h2 className="ds-overview-hero__title">
-                    Hydrology Intelligence Workspace
+                    Droid Survair Workspace
                   </h2>
                   <p className="ds-overview-hero__text">
                     Coordinate analysis, media evidence, issue logs, and delivery
@@ -444,18 +439,18 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
               <div className="ds-map-toolbar">
                 <h2 className="ds-map-toolbar__title">
                   {activeId === 'map'
-                    ? 'Map View · Hydrology Analysis'
+                    ? 'WORKSPACE - 2D/3D VIEWER'
                     : activeId === 'globe'
-                      ? '3D Globe Workspace'
+                      ? 'WORKSPACE - 2D/3D VIEWER'
                     : activeId === 'datasets'
-                      ? 'Project Datasets'
+                      ? 'Data Catalog'
                     : activeId === 'compare'
-                      ? 'Model Comparison'
-                      : 'Downloads'}
+                      ? 'Data Comparison'
+                      : 'Data Downloads'}
                 </h2>
                 <span className="ds-map-toolbar__badge">
                   {activeId === 'map'
-                    ? 'Stats · Map'
+                    ? 'Leaflet · 2D'
                     : activeId === 'globe'
                       ? 'CesiumJS · 3D'
                     : activeId === 'datasets'
@@ -466,25 +461,14 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                 </span>
               </div>
               {activeId === 'map' ? (
-                <div className="ds-analysis-split">
-                  <Suspense fallback={<div className="ds-panel-loading">Loading analytics…</div>}>
-                    <HydrologyStats
-                      floodSimulationLevel={floodSimulationLevel}
-                      onFloodSimulationChange={setFloodSimulationLevel}
-                    />
+                <div
+                  className="ds-map-body"
+                  role="region"
+                  aria-label="Map viewer"
+                >
+                  <Suspense fallback={<div className="ds-panel-loading">Loading map…</div>}>
+                    <MapViewer projectId={selectedProject!.id} />
                   </Suspense>
-                  <div
-                    className="ds-map-body"
-                    role="region"
-                    aria-label="Map viewer"
-                  >
-                    <Suspense fallback={<div className="ds-panel-loading">Loading map…</div>}>
-                      <MapViewer
-                        floodSimulationLevel={floodSimulationLevel}
-                        projectId={selectedProject!.id}
-                      />
-                    </Suspense>
-                  </div>
                 </div>
               ) : activeId === 'globe' ? (
                 <div

@@ -80,7 +80,7 @@ export function DownloadsPanel({ projectId }: DownloadsPanelProps) {
   return (
     <section className="dlp-root">
       <header className="dlp-head">
-        <h3>Client Downloads</h3>
+        <h3>Data Downloads</h3>
         <p>Download processed reports and project datasets prepared for client delivery.</p>
       </header>
 

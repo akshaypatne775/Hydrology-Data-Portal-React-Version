@@ -55,7 +55,7 @@ POINTCLOUD_SRS_IN = os.getenv("POINTCLOUD_SRS_IN", "").strip()
 POINTCLOUD_SRS_OUT = os.getenv("POINTCLOUD_SRS_OUT", "4978").strip()
 OSGEO4W_BAT = os.getenv(
     "OSGEO4W_BAT",
-    r"C:\Program Files\QGIS 3.44.8\bin\gdal2tiles.bat",
+    r"C:\Program Files\QGIS 3.44.8\OSGeo4W.bat",
 ).strip()
 PROJECT_FILES_CACHE_TTL_SECONDS = float(os.getenv("PROJECT_FILES_CACHE_TTL_SECONDS", "4"))
 SESSION_COOKIE_NAME = "droid_cloud_session"
@@ -444,21 +444,14 @@ def _run_gdal2tiles_subprocess(
     project_id: str,
     dataset_name: str,
 ) -> None:
-    """Run gdal2tiles via Windows batch script with verbose logs."""
+    """Run gdal2tiles via QGIS OSGeo4W shell with verbose logs."""
     in_abs = os.path.abspath(input_tif)
     out_abs = os.path.abspath(output_dir)
     os.makedirs(out_abs, exist_ok=True)
-    gdal2tiles_bat = OSGEO4W_BAT
-    command = [
-        gdal2tiles_bat,
-        "--xyz",
-        "-z",
-        "1-22",
-        "-w",
-        "none",
-        in_abs,
-        out_abs,
-    ]
+    command = (
+        f'"{OSGEO4W_BAT}" gdal2tiles --xyz -z 1-22 -w none '
+        f'"{in_abs}" "{out_abs}"'
+    )
     print(f"🚀 Starting GDAL processing for {dataset_name} in project {project_id}...")
     print(f"🧱 GDAL command: {command}")
     result = subprocess.run(command, capture_output=True, text=True, shell=True)
@@ -466,7 +459,7 @@ def _run_gdal2tiles_subprocess(
         print(f"✅ GDAL Success! Tiles generated at {out_abs}")
         return
     print(f"❌ GDAL FAILED with Error Code: {result.returncode}")
-    print(f"🛑 GDAL ERROR LOG:\n{result.stderr}")
+    print(f"🛑 ERROR LOG:\n{result.stderr}")
     print(f"📄 GDAL OUTPUT LOG:\n{result.stdout}")
     msg = (result.stderr or result.stdout or "").strip()
     raise RuntimeError(msg or f"gdal2tiles failed for {dataset_name} ({project_id})")
