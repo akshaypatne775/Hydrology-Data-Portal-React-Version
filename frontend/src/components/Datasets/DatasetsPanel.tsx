@@ -355,7 +355,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                       onClick={() => {
                         if (!projectId || !row.layerType || !row.layerUrl) return
                         toggleLayer({
-                          id: `${projectId}:${row.fileName}:${row.layerType}`,
+                          id: `${projectId}:${row.fileName}`,
                           projectId,
                           name: row.fileName,
                           layerType: row.layerType,

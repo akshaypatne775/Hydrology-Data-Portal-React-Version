@@ -5,11 +5,6 @@ import { API_BASE } from '../../lib/apiBase'
 import { useUploadContext } from '../../context/UploadContext'
 import { useWorkspaceContext } from '../../context/WorkspaceContext'
 import { getPointCloudStatus } from '../../services/pointCloudService'
-import {
-  buildXyzTemplate,
-  getTileBaseUrl,
-  getTileExtension,
-} from '../MapViewer/tileSources'
 import './GlobeViewer.css'
 import {
   readUploadedTilesets,
@@ -121,7 +116,6 @@ type GlobeViewerProps = {
 export function GlobeViewer({ projectId }: GlobeViewerProps) {
   const { tasks } = useUploadContext()
   const { activeLayers } = useWorkspaceContext()
-  const tileRoot = useMemo(() => (getTileBaseUrl() ?? `${API_BASE}/tiles`).replace(/\/+$/, ''), [])
   const containerRef = useRef<HTMLDivElement | null>(null)
   const viewerRef = useRef<Cesium.Viewer | null>(null)
   const pointCloudRef = useRef<Cesium.Cesium3DTileset | null>(null)
@@ -201,14 +195,16 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     [loadPointCloud],
   )
 
-  const loadOrthomosaic = useCallback((tileUrl: string) => {
+  const loadOrthomosaic = useCallback((layerConfig: { url: string; projectId: string; name: string }) => {
     const viewer = viewerRef.current
     if (!viewer) {
       setViewerError('Viewer not ready. Please wait and try again.')
       return
     }
+    const tileUrl = layerConfig.url
 
     try {
+      console.log('🗺️ [MAP DEBUG] Requesting Tile URL:', layerConfig.url)
       if (orthomosaicLayerRef.current) {
         viewer.imageryLayers.remove(orthomosaicLayerRef.current, true)
       }
@@ -222,25 +218,22 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       orthomosaicLayerRef.current = layer
       setViewerError(null)
 
-      if (tileUrl.includes('/api/cog/tiles/')) {
-        const infoUrl = tileUrl.replace('/tiles/{z}/{x}/{y}.png', '/info')
-        void (async () => {
-          try {
-            const res = await fetch(infoUrl)
-            const data = (await res.json()) as { bounds?: [number, number, number, number] }
-            if (data && data.bounds) {
-              const [minX, minY, maxX, maxY] = data.bounds
-              console.log('Zooming to COG Bounds:', [minX, minY, maxX, maxY])
-              viewer.camera.flyTo({
-                destination: Cesium.Rectangle.fromDegrees(minX, minY, maxX, maxY),
-                duration: 2.0,
-              })
-            }
-          } catch (e) {
-            console.error('Failed to fetch COG bounds for zoom', e)
+      void (async () => {
+        try {
+          const boundsUrl = `${API_BASE}/api/datasets/${encodeURIComponent(layerConfig.projectId)}/${encodeURIComponent(layerConfig.name.replace(/\.tiff?$/i, ''))}/bounds`
+          const res = await fetch(boundsUrl, { credentials: 'include' })
+          const data = (await res.json()) as { bounds?: [number, number, number, number] | null }
+          if (data && data.bounds) {
+            const [minX, minY, maxX, maxY] = data.bounds
+            viewer.camera.flyTo({
+              destination: Cesium.Rectangle.fromDegrees(minX, minY, maxX, maxY),
+              duration: 2.0,
+            })
           }
-        })()
-      }
+        } catch (e) {
+          console.error('Failed to fetch static bounds for zoom', e)
+        }
+      })()
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Failed to load orthomosaic layer'
@@ -324,9 +317,17 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       (layer) => layer.projectId === projectId && layer.layerType === 'cog',
     )
     if (cogLayer?.url) {
-      loadOrthomosaic(cogLayer.url)
+      loadOrthomosaic(cogLayer)
     }
   }, [activeLayers, loadOrthomosaic, projectId])
+
+  const activeCogLayers = useMemo(
+    () =>
+      activeLayers.filter(
+        (layer) => layer.projectId === projectId && layer.layerType === 'cog' && Boolean(layer.url),
+      ),
+    [activeLayers, projectId],
+  )
 
   useEffect(() => {
     const tileset = pointCloudRef.current
@@ -509,36 +510,20 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
           <p className="d3d-layer-panel__hint">Upload LAS/LAZ to see selectable point clouds.</p>
         )}
 
-        <button
-          type="button"
-          className="d3d-layer-panel__btn d3d-layer-panel__btn--ghost"
-          onClick={() =>
-            loadOrthomosaic(
-              buildXyzTemplate(
-                tileRoot,
-                import.meta.env.VITE_S3_ORTHO_PREFIX?.trim() || 'orthomosaic',
-                getTileExtension(),
-              ),
-            )
-          }
-        >
-          Load Orthomosaic
-        </button>
-        <button
-          type="button"
-          className="d3d-layer-panel__btn d3d-layer-panel__btn--ghost"
-          onClick={() =>
-            loadOrthomosaic(
-              buildXyzTemplate(
-                tileRoot,
-                import.meta.env.VITE_S3_DTM_PREFIX?.trim() || 'dtm',
-                getTileExtension(),
-              ),
-            )
-          }
-        >
-          Load DTM
-        </button>
+        {activeCogLayers.length > 0 ? (
+          activeCogLayers.map((layer) => (
+            <button
+              key={layer.id}
+              type="button"
+              className="d3d-layer-panel__btn d3d-layer-panel__btn--ghost"
+              onClick={() => loadOrthomosaic(layer)}
+            >
+              Load {layer.name}
+            </button>
+          ))
+        ) : (
+          <p className="d3d-layer-panel__hint">Select a Web-Ready TIFF from Datasets first.</p>
+        )}
       </section>
 
       <div className="gv-nav-readout" aria-live="polite">

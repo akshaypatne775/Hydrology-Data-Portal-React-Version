@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 import sqlite3
 import json
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from importlib.util import find_spec
 from urllib.parse import quote
@@ -29,6 +30,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 import laspy
 from PIL import Image
 from pydantic import BaseModel
@@ -53,7 +55,7 @@ POINTCLOUD_SRS_IN = os.getenv("POINTCLOUD_SRS_IN", "").strip()
 POINTCLOUD_SRS_OUT = os.getenv("POINTCLOUD_SRS_OUT", "4978").strip()
 OSGEO4W_BAT = os.getenv(
     "OSGEO4W_BAT",
-    r"C:\Program Files\QGIS 3.44.8\OSGeo4W.bat",
+    r"C:\Program Files\QGIS 3.44.8\bin\gdal2tiles.bat",
 ).strip()
 PROJECT_FILES_CACHE_TTL_SECONDS = float(os.getenv("PROJECT_FILES_CACHE_TTL_SECONDS", "4"))
 SESSION_COOKIE_NAME = "droid_cloud_session"
@@ -111,6 +113,20 @@ if find_spec("multipart") is None:
         "Upload endpoints may fail with 422/validation errors.",
     )
 
+
+class Debug404Middleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        if response.status_code == 404 and request.url.path.startswith("/data/"):
+            rel = request.url.path.replace("/data/", "", 1).lstrip("/")
+            expected_path = Path(LOCAL_DATA_PATH) / rel
+            print(f"❌ [DEBUG 404] Frontend requested: {request.url.path}")
+            print(f"🔍 [DEBUG 404] Backend looked for file at: {expected_path.resolve()}")
+            print(f"📂 [DEBUG 404] Does this file exist? {expected_path.exists()}")
+        return response
+
+
+app.add_middleware(Debug404Middleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONTEND_ORIGINS,
@@ -132,7 +148,7 @@ app.mount(
 app.mount(
     "/data",
     StaticFiles(directory=str(LOCAL_DATA_PATH)),
-    name="project-data",
+    name="data",
 )
 # Static files under Project_Data, e.g.:
 # /data/projects/{project_id}/processed/{tile_folder}/{z}/{x}/{y}.png
@@ -422,15 +438,20 @@ async def process_pointcloud_background(
             _invalidate_project_files_cache(project_id)
 
 
-def _run_gdal2tiles_subprocess(input_tif: str, output_dir: str) -> None:
-    """Run gdal2tiles via QGIS OSGeo4W shell (blocking; call from asyncio.to_thread)."""
+def _run_gdal2tiles_subprocess(
+    input_tif: str,
+    output_dir: str,
+    project_id: str,
+    dataset_name: str,
+) -> None:
+    """Run gdal2tiles via Windows batch script with verbose logs."""
     in_abs = os.path.abspath(input_tif)
     out_abs = os.path.abspath(output_dir)
     os.makedirs(out_abs, exist_ok=True)
-    bat = OSGEO4W_BAT
+    gdal2tiles_bat = OSGEO4W_BAT
     command = [
-        bat,
-        "gdal2tiles",
+        gdal2tiles_bat,
+        "--xyz",
         "-z",
         "1-22",
         "-w",
@@ -438,30 +459,32 @@ def _run_gdal2tiles_subprocess(input_tif: str, output_dir: str) -> None:
         in_abs,
         out_abs,
     ]
-    result = subprocess.run(command, capture_output=True, text=True)
+    print(f"🚀 Starting GDAL processing for {dataset_name} in project {project_id}...")
+    print(f"🧱 GDAL command: {command}")
+    result = subprocess.run(command, capture_output=True, text=True, shell=True)
     if result.returncode == 0:
+        print(f"✅ GDAL Success! Tiles generated at {out_abs}")
         return
-    if platform.system() == "Windows":
-        inner = f'gdal2tiles -z 1-22 -w none "{in_abs}" "{out_abs}"'
-        cmdline = f'call "{bat}" {inner}'
-        result2 = subprocess.run(
-            cmdline,
-            shell=True,
-            capture_output=True,
-            text=True,
-            executable=os.environ.get("COMSPEC", "cmd.exe"),
-        )
-        if result2.returncode == 0:
-            return
-        msg2 = (result2.stderr or result2.stdout or "").strip()
-        msg1 = (result.stderr or result.stdout or "").strip()
-        raise RuntimeError(msg2 or msg1 or "gdal2tiles failed")
+    print(f"❌ GDAL FAILED with Error Code: {result.returncode}")
+    print(f"🛑 GDAL ERROR LOG:\n{result.stderr}")
+    print(f"📄 GDAL OUTPUT LOG:\n{result.stdout}")
     msg = (result.stderr or result.stdout or "").strip()
-    raise RuntimeError(msg or "gdal2tiles failed")
+    raise RuntimeError(msg or f"gdal2tiles failed for {dataset_name} ({project_id})")
 
 
-async def process_tif_to_tiles(input_tif: str, output_dir: str) -> None:
-    await asyncio.to_thread(_run_gdal2tiles_subprocess, input_tif, output_dir)
+async def process_tif_to_tiles(
+    input_tif: str,
+    output_dir: str,
+    project_id: str,
+    dataset_name: str,
+) -> None:
+    await asyncio.to_thread(
+        _run_gdal2tiles_subprocess,
+        input_tif,
+        output_dir,
+        project_id,
+        dataset_name,
+    )
 
 
 async def process_dataset_background(
@@ -487,7 +510,12 @@ async def process_dataset_background(
     err_path = _dataset_dir(project_id, dataset_id) / ".conversion_error.txt"
     err_path.unlink(missing_ok=True)
     try:
-        await process_tif_to_tiles(input_tif, tiles_dir)
+        await process_tif_to_tiles(
+            input_tif,
+            tiles_dir,
+            project_id,
+            file_name or Path(input_tif).name,
+        )
         tiles_rel = Path(tiles_dir).resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
         _upsert_processing_job(
             project_id,
@@ -1579,6 +1607,77 @@ def dataset_status(project_id: str, dataset_id: str, request: Request) -> dict[s
                 f"?url={encoded_cog_path}"
             )
     return status
+
+
+def _resolve_dataset_tiles_dir(project_id: str, dataset_name: str) -> Path | None:
+    processed_root = Path(LOCAL_DATA_PATH) / "projects" / project_id / "processed"
+    direct = processed_root / dataset_name
+    if direct.is_dir():
+        return direct
+
+    jobs_root = Path(LOCAL_DATA_PATH) / "projects" / project_id / "_dataset_jobs"
+    if not jobs_root.is_dir():
+        return None
+
+    target_variants = {
+        dataset_name.strip(),
+        f"{dataset_name.strip()}.tif",
+        f"{dataset_name.strip()}.tiff",
+    }
+    for job_dir in jobs_root.iterdir():
+        if not job_dir.is_dir():
+            continue
+        status_path = job_dir / ".status.json"
+        if not status_path.is_file():
+            continue
+        try:
+            loaded = json.loads(status_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                continue
+        except (OSError, json.JSONDecodeError, TypeError):
+            continue
+        name = str(loaded.get("dataset_name", "")).strip()
+        tile_folder = str(loaded.get("tile_folder", "")).strip()
+        if name in target_variants and tile_folder:
+            resolved = processed_root / tile_folder
+            if resolved.is_dir():
+                return resolved
+    return None
+
+
+@app.get("/api/datasets/{project_id}/{dataset_name}/bounds")
+def get_dataset_bounds(project_id: str, dataset_name: str, request: Request) -> dict[str, list[float] | None]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    safe_dataset_name = dataset_name.strip()
+    if not safe_dataset_name or "/" in safe_dataset_name or "\\" in safe_dataset_name or ".." in safe_dataset_name:
+        raise HTTPException(status_code=400, detail="Invalid dataset_name")
+    tiles_dir = _resolve_dataset_tiles_dir(safe_project_id, safe_dataset_name)
+    if not tiles_dir:
+        return {"bounds": None}
+    xml_path = tiles_dir / "tilemapresource.xml"
+    if not xml_path.exists():
+        return {"bounds": None}
+    try:
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+        bbox = root.find(".//BoundingBox")
+        if bbox is None:
+            for node in root.iter():
+                if node.tag.endswith("BoundingBox"):
+                    bbox = node
+                    break
+        if bbox is not None:
+            minx = bbox.get("minx")
+            miny = bbox.get("miny")
+            maxx = bbox.get("maxx")
+            maxy = bbox.get("maxy")
+            if minx and miny and maxx and maxy:
+                return {"bounds": [float(minx), float(miny), float(maxx), float(maxy)]}
+    except Exception as exc:  # noqa: BLE001
+        print(f"Error reading bounds: {exc}")
+    return {"bounds": None}
 
 
 @app.get("/api/jobs/{project_id}")

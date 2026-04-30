@@ -35,16 +35,15 @@ import HydrologyDataLayer, {
 } from './HydrologyDataLayer'
 
 import {
-  type BaseLayerId,
   type FloodReturnPeriod,
-  getBaseLayerUrlOrFallback,
   getDefaultMapCenter,
   getDefaultZoom,
   getFloodOverlayTileUrlWithBust,
   hasCustomTileBase,
+  OSM_FALLBACK_URL,
 } from './tileSources'
 
-export type { BaseLayerId, FloodReturnPeriod } from './tileSources'
+export type { FloodReturnPeriod } from './tileSources'
 
 type MeasureMode = 'none' | 'distance' | 'area'
 type IssueDraft = {
@@ -52,12 +51,6 @@ type IssueDraft = {
   lng: number
   title: string
   description: string
-}
-
-const BASE_LABELS: Record<BaseLayerId, string> = {
-  orthomosaic: 'Orthomosaic (drone)',
-  dem: 'DEM',
-  dtm: 'DTM',
 }
 
 const FLOOD_LABELS: Record<FloodReturnPeriod, string> = {
@@ -310,7 +303,6 @@ function MapController({
 }
 
 interface MapPaneProps {
-  baseLayer: BaseLayerId
   floodEnabled: boolean
   floodPeriod: FloodReturnPeriod
   /** 0–100: boosts flood tile opacity + drives parent veil (placeholder hydraulics). */
@@ -339,7 +331,6 @@ function floodTileOpacity(
 }
 
 function MapPane({
-  baseLayer,
   floodEnabled,
   floodPeriod,
   floodSimulationLevel,
@@ -356,7 +347,7 @@ function MapPane({
   cogTileUrl,
   sync,
 }: MapPaneProps) {
-  const baseUrl = useMemo(() => getBaseLayerUrlOrFallback(baseLayer), [baseLayer])
+  const baseUrl = useMemo(() => OSM_FALLBACK_URL, [])
   const floodUrl = useMemo(
     () =>
       floodEnabled || floodSimulationLevel > 0
@@ -487,8 +478,6 @@ export function MapViewer({ floodSimulationLevel = 0, projectId }: MapViewerProp
   const zoom = useMemo(() => getDefaultZoom(), [])
   const customTilesReady = hasCustomTileBase()
 
-  const [baseLayer, setBaseLayer] = useState<BaseLayerId>('orthomosaic')
-  const [compareLayer, setCompareLayer] = useState<BaseLayerId>('dtm')
   const [floodOn, setFloodOn] = useState(false)
   const [floodPeriod, setFloodPeriod] = useState<FloodReturnPeriod>('1in25')
   const [splitView, setSplitView] = useState(false)
@@ -652,12 +641,21 @@ export function MapViewer({ floodSimulationLevel = 0, projectId }: MapViewerProp
       (item) => item.projectId === projectId && item.layerType === 'cog',
     )
     if (layer?.url) {
+      console.log('🗺️ [MAP DEBUG] Requesting Tile URL:', layer.url)
       setCogTileUrl(layer.url)
       return
     }
     const latest = getLatestCogLayer(projectId)
     setCogTileUrl(latest?.tileUrl ?? null)
   }, [activeLayers, projectId])
+
+  const activeCogLayers = useMemo(
+    () =>
+      activeLayers.filter(
+        (item) => item.projectId === projectId && item.layerType === 'cog' && Boolean(item.url),
+      ),
+    [activeLayers, projectId],
+  )
 
   return (
     <div className="mv-root">
@@ -667,9 +665,8 @@ export function MapViewer({ floodSimulationLevel = 0, projectId }: MapViewerProp
           <span>
             Set <code className="mv-banner__code">VITE_TILE_BASE_URL</code> or{' '}
             <code className="mv-banner__code">VITE_S3_TILE_BASE_URL</code>{' '}
-            (e.g. FastAPI <code className="mv-banner__code">/tiles</code>) to load
-            ortho, DEM, DTM, and flood layers. Showing OSM fallback for base
-            layers.
+            (e.g. FastAPI <code className="mv-banner__code">/data</code>) to load
+            processed raster and flood layers. Showing OSM fallback for base map.
           </span>
         </div>
       ) : null}
@@ -678,18 +675,21 @@ export function MapViewer({ floodSimulationLevel = 0, projectId }: MapViewerProp
         <div className="mv-panel mv-panel--layers">
           <p className="mv-panel__title">Layers</p>
           <fieldset className="mv-fieldset">
-            <legend className="mv-legend">Base</legend>
-            {(Object.keys(BASE_LABELS) as BaseLayerId[]).map((id) => (
-              <label key={id} className="mv-radio">
-                <input
-                  type="radio"
-                  name="mv-base-layer"
-                  checked={baseLayer === id}
-                  onChange={() => setBaseLayer(id)}
-                />
-                <span>{BASE_LABELS[id]}</span>
-              </label>
-            ))}
+            <legend className="mv-legend">Processed Raster Layers</legend>
+            {activeCogLayers.length > 0 ? (
+              activeCogLayers.map((layer) => (
+                <button
+                  key={layer.id}
+                  type="button"
+                  className={layer.url === cogTileUrl ? 'mv-tool mv-tool--active' : 'mv-tool'}
+                  onClick={() => setCogTileUrl(layer.url)}
+                >
+                  {layer.name}
+                </button>
+              ))
+            ) : (
+              <p className="mv-hud__hint">Select a Web-Ready TIFF in Datasets panel first.</p>
+            )}
           </fieldset>
 
           <fieldset className="mv-fieldset">
@@ -820,16 +820,11 @@ export function MapViewer({ floodSimulationLevel = 0, projectId }: MapViewerProp
 
       <div className={splitView ? 'mv-maps mv-maps--split' : 'mv-maps'}>
         <div className="mv-map-wrap">
-          {splitView ? (
-            <span className="mv-map-label">
-              Primary · {BASE_LABELS[baseLayer]}
-            </span>
-          ) : null}
+          {splitView ? <span className="mv-map-label">Primary</span> : null}
           <div className="mv-map-canvas">
             <MapContainer {...mapProps} style={{ height: '100%', width: '100%' }}>
               <MapController activeLayers={activeLayers} projectId={projectId} />
               <MapPane
-                baseLayer={baseLayer}
                 floodEnabled={floodOn && customTilesReady}
                 floodPeriod={floodPeriod}
                 floodSimulationLevel={floodSimulationLevel}
@@ -931,15 +926,14 @@ export function MapViewer({ floodSimulationLevel = 0, projectId }: MapViewerProp
               <span className="mv-map-label">Compare</span>
               <select
                 className="mv-select"
-                value={compareLayer}
-                onChange={(e) =>
-                  setCompareLayer(e.target.value as BaseLayerId)
-                }
+                value={cogTileUrl ?? ''}
+                onChange={(e) => setCogTileUrl(e.target.value || null)}
                 aria-label="Comparison base layer"
               >
-                {(Object.keys(BASE_LABELS) as BaseLayerId[]).map((id) => (
-                  <option key={id} value={id}>
-                    {BASE_LABELS[id]}
+                <option value="">No overlay selected</option>
+                {activeCogLayers.map((layer) => (
+                  <option key={layer.id} value={layer.url}>
+                    {layer.name}
                   </option>
                 ))}
               </select>
@@ -948,7 +942,6 @@ export function MapViewer({ floodSimulationLevel = 0, projectId }: MapViewerProp
               <MapContainer {...mapProps} style={{ height: '100%', width: '100%' }}>
                 <MapController activeLayers={activeLayers} projectId={projectId} />
                 <MapPane
-                  baseLayer={compareLayer}
                   floodEnabled={floodOn && customTilesReady}
                   floodPeriod={floodPeriod}
                   floodSimulationLevel={floodSimulationLevel}
