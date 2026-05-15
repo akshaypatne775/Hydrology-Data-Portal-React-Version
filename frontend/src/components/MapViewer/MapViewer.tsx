@@ -13,11 +13,14 @@ import {
   useState,
   type FormEvent,
   type MutableRefObject,
+  type RefObject,
 } from 'react'
 import {
   CircleMarker,
+  Circle,
   MapContainer,
   Marker,
+  Pane,
   Polygon,
   Popup,
   Polyline,
@@ -28,15 +31,39 @@ import {
 import { createIssue, listIssues, type SavedIssue } from '../../services/issuesService'
 import { useWorkspaceContext } from '../../context/WorkspaceContext'
 import { API_BASE } from '../../lib/apiBase'
-import { getLatestCogLayer } from '../../utils/datasetLayerStorage'
+import {
+  getProjectFiles,
+  getDatasetCropMask,
+  saveDatasetCropMaskDraw,
+  saveDatasetCropMaskKml,
+  type ProjectFile,
+} from '../../services/datasetService'
+import {
+  getDtmVolume,
+  getElevation,
+  getProfile,
+  type DtmVolumeResponse,
+  type ElevationResponse,
+  type ProfileResponse,
+} from '../../services/analysisService'
 
 import {
   getDefaultMapCenter,
   getDefaultZoom,
-  OSM_FALLBACK_URL,
+  SATELLITE_FALLBACK_URL,
 } from './tileSources'
 
-type MeasureMode = 'none' | 'distance' | 'area'
+type MeasureMode = 'none' | 'distance' | 'area' | 'profile' | 'volume-area' | 'volume-circle'
+type ViewerLayer = {
+  id: string
+  projectId: string
+  name: string
+  url: string
+  rawPath?: string
+  datasetId?: string
+  datasetType?: string
+  month?: string
+}
 type IssueDraft = {
   lat: number
   lng: number
@@ -53,6 +80,11 @@ function formatAreaM2(m2: number): string {
   if (m2 >= 1_000_000) return `${(m2 / 1_000_000).toFixed(2)} km²`
   if (m2 >= 10_000) return `${(m2 / 10_000).toFixed(2)} ha`
   return `${m2.toFixed(0)} m²`
+}
+
+function formatProfileValue(value?: number | null, suffix = 'm'): string {
+  if (value == null || !Number.isFinite(value)) return '--'
+  return `${value.toFixed(2)} ${suffix}`
 }
 
 function ringAreaM2(points: LatLng[]): number {
@@ -77,12 +109,43 @@ type SyncRefs = {
   mapBRef: MutableRefObject<L.Map | null>
 }
 
+function applyTileClip(
+  map: L.Map,
+  container: HTMLElement | null,
+  footprint: LatLng[] | null,
+): () => void {
+  if (!container || !footprint || footprint.length < 3) {
+    if (container) {
+      container.style.clipPath = ''
+      ;(container.style as CSSStyleDeclaration & { webkitClipPath?: string }).webkitClipPath = ''
+    }
+    return () => {}
+  }
+
+  const repaint = () => {
+    const pts = footprint.map((ll) => map.latLngToLayerPoint(ll))
+    const polygon = pts.map((p) => `${p.x}px ${p.y}px`).join(', ')
+    const clipValue = `polygon(${polygon})`
+    container.style.clipPath = clipValue
+    ;(container.style as CSSStyleDeclaration & { webkitClipPath?: string }).webkitClipPath = clipValue
+  }
+  repaint()
+  map.on('move zoom zoomend viewreset resize', repaint)
+  return () => {
+    map.off('move zoom zoomend viewreset resize', repaint)
+    container.style.clipPath = ''
+    ;(container.style as CSSStyleDeclaration & { webkitClipPath?: string }).webkitClipPath = ''
+  }
+}
+
 function MapSyncBridge({ isA, lockRef, mapARef, mapBRef }: SyncRefs & { isA: boolean }) {
   const map = useMap()
   const selfRef = isA ? mapARef : mapBRef
   const peerRef = isA ? mapBRef : mapARef
 
   useEffect(() => {
+    // Leaflet map instances are intentionally stored in refs for split-view syncing.
+    // eslint-disable-next-line react-hooks/immutability
     selfRef.current = map
     return () => {
       selfRef.current = null
@@ -122,7 +185,7 @@ function MeasureInteraction({
   const map = useMap()
 
   useEffect(() => {
-    if (mode === 'area' && !areaFrozen) map.doubleClickZoom.disable()
+    if ((mode === 'area' || mode === 'volume-area') && !areaFrozen) map.doubleClickZoom.disable()
     else map.doubleClickZoom.enable()
     return () => {
       map.doubleClickZoom.enable()
@@ -132,13 +195,14 @@ function MeasureInteraction({
   useMapEvents({
     click(e) {
       if (!enabled || mode === 'none') return
-      if (mode === 'area' && areaFrozen) return
-      if (mode === 'distance' || mode === 'area') onAddPoint(e.latlng)
+      if ((mode === 'area' || mode === 'volume-area') && areaFrozen) return
+      if (mode === 'volume-circle' && points.length >= 2) return
+      if (mode === 'distance' || mode === 'area' || mode === 'profile' || mode === 'volume-area' || mode === 'volume-circle') onAddPoint(e.latlng)
     },
     dblclick(e) {
-      if (!enabled || mode !== 'area' || areaFrozen) return
+      if (!enabled || (mode !== 'area' && mode !== 'profile' && mode !== 'volume-area') || areaFrozen) return
       e.originalEvent.preventDefault()
-      if (points.length >= 3) onCloseRing()
+      if (((mode === 'area' || mode === 'volume-area') && points.length >= 3) || (mode === 'profile' && points.length >= 2)) onCloseRing()
     },
   })
   return null
@@ -172,6 +236,42 @@ function tileTemplateToStaticBase(url: string): string | null {
   const suffix = '{z}/{x}/{y}.png'
   if (!url.endsWith(suffix)) return null
   return url.slice(0, -suffix.length)
+}
+
+function tileFolderFromTemplate(url: string): string | null {
+  const path = (() => {
+    try {
+      return new URL(url).pathname
+    } catch {
+      return url.split('?')[0] ?? url
+    }
+  })()
+  const segments = path.split('/').filter(Boolean)
+  const processedIndex = segments.findIndex((segment) => segment === 'processed')
+  const folderParts = processedIndex >= 0 ? segments.slice(processedIndex + 1, -3) : []
+  if (folderParts.length === 0) return null
+  const folder = folderParts.join('/')
+  try {
+    return decodeURIComponent(folder)
+  } catch {
+    return folder
+  }
+}
+
+function ElevationInteraction({
+  active,
+  onPickPoint,
+}: {
+  active: boolean
+  onPickPoint: (ll: LatLng) => void
+}) {
+  useMapEvents({
+    click(e) {
+      if (!active) return
+      onPickPoint(e.latlng)
+    },
+  })
+  return null
 }
 
 function parseKmlLatLonBounds(xml: string): [[number, number], [number, number]] | null {
@@ -209,20 +309,20 @@ function parseTileMapResourceBounds(xml: string): [[number, number], [number, nu
 }
 
 function MapController({
-  activeLayers,
+  layers,
   projectId,
+  selectedUrl,
 }: {
-  activeLayers: ReturnType<typeof useWorkspaceContext>['activeLayers']
+  layers: ViewerLayer[]
   projectId?: string
+  selectedUrl?: string | null
 }) {
   const map = useMap()
   const lastFitKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (!projectId) return
-    const activeCog = activeLayers.find(
-      (layer) => layer.projectId === projectId && layer.layerType === 'cog',
-    )
+    const activeCog = layers.find((layer) => layer.projectId === projectId && layer.url === selectedUrl) ?? layers[0]
     if (!activeCog) return
 
     const rawPath = activeCog.rawPath ?? null
@@ -262,6 +362,23 @@ function MapController({
 
     void (async () => {
       try {
+        const datasetName = activeCog.name.replace(/\.tiff?$/i, '')
+        const boundsUrl = `${API_BASE}/api/datasets/${encodeURIComponent(projectId)}/${encodeURIComponent(datasetName)}/bounds`
+        const boundsRes = await fetch(boundsUrl, { credentials: 'include' })
+        if (boundsRes.ok) {
+          const data = (await boundsRes.json()) as { bounds?: [number, number, number, number] | null }
+          if (data?.bounds) {
+            const [minX, minY, maxX, maxY] = data.bounds
+            map.fitBounds(
+              [
+                [minY, minX],
+                [maxY, maxX],
+              ],
+              { padding: [24, 24] },
+            )
+            return
+          }
+        }
         const kmlRes = await fetch(`${base}doc.kml`, { credentials: 'include' })
         if (kmlRes.ok) {
           const b = parseKmlLatLonBounds(await kmlRes.text())
@@ -279,7 +396,7 @@ function MapController({
         // Ignore auto-zoom failure and keep the map usable.
       }
     })()
-  }, [activeLayers, map, projectId])
+  }, [layers, map, projectId, selectedUrl])
 
   return null
 }
@@ -288,12 +405,18 @@ interface MapPaneProps {
   measureMode: MeasureMode
   measureActive: boolean
   measurePoints: LatLng[]
+  circleRadiusM: number
   areaFrozen: boolean
   onMeasureAdd: (ll: LatLng) => void
   onMeasureCloseRing: () => void
   issueMode: boolean
   onIssuePick: (ll: LatLng) => void
+  elevationMode: boolean
+  onElevationPick: (ll: LatLng) => void
   issues: SavedIssue[]
+  cropEnabled: boolean
+  cropFootprint?: LatLng[] | null
+  cogBounds?: [[number, number], [number, number]] | null
   cogTileUrl: string | null
   sync?: SyncRefs & { isA: boolean }
 }
@@ -302,16 +425,22 @@ function MapPane({
   measureMode,
   measureActive,
   measurePoints,
+  circleRadiusM,
   areaFrozen,
   onMeasureAdd,
   onMeasureCloseRing,
   issueMode,
   onIssuePick,
+  elevationMode,
+  onElevationPick,
   issues,
+  cropEnabled,
+  cropFootprint,
+  cogBounds,
   cogTileUrl,
   sync,
 }: MapPaneProps) {
-  const baseUrl = useMemo(() => OSM_FALLBACK_URL, [])
+  const baseUrl = useMemo(() => SATELLITE_FALLBACK_URL, [])
 
   return (
     <>
@@ -321,18 +450,32 @@ function MapPane({
       */}
       <TileLayer
         key={baseUrl}
-        attribution="&copy; OpenStreetMap"
+        attribution="&copy; Esri"
         url={baseUrl}
         maxZoom={22}
         maxNativeZoom={20}
+        updateWhenIdle
+        updateWhenZooming={false}
+        keepBuffer={1}
       />
       {cogTileUrl ? (
-        <TileLayer
-          key={`cog-${cogTileUrl}`}
-          url={cogTileUrl}
-          opacity={0.82}
-          maxZoom={22}
-          maxNativeZoom={22}
+        <OrthomosaicTileLayerWithOptions
+          tileUrl={cogTileUrl}
+          cropEnabled={cropEnabled}
+          cropFootprint={cropFootprint}
+          bounds={cogBounds ?? undefined}
+        />
+      ) : null}
+      {cropFootprint && cropFootprint.length >= 3 ? (
+        <Polygon
+          positions={cropFootprint}
+          pathOptions={{
+            color: cropEnabled ? '#22c55e' : '#f59e0b',
+            weight: 3,
+            opacity: 0.95,
+            fillColor: cropEnabled ? '#22c55e' : '#f59e0b',
+            fillOpacity: 0.08,
+          }}
         />
       ) : null}
       {measureActive ? (
@@ -345,13 +488,13 @@ function MapPane({
             onAddPoint={onMeasureAdd}
             onCloseRing={onMeasureCloseRing}
           />
-          {measureMode === 'distance' && measurePoints.length > 0 ? (
+          {(measureMode === 'distance' || measureMode === 'profile') && measurePoints.length > 0 ? (
             <Polyline
               positions={measurePoints}
-              pathOptions={{ color: '#0e3e49', weight: 3, dashArray: '6 4' }}
+              pathOptions={{ color: measureMode === 'profile' ? '#be123c' : '#0e3e49', weight: 3, dashArray: '6 4' }}
             />
           ) : null}
-          {measureMode === 'area' && measurePoints.length > 0 ? (
+          {(measureMode === 'area' || measureMode === 'volume-area') && measurePoints.length > 0 ? (
             <Polygon
               positions={measurePoints}
               pathOptions={{
@@ -359,6 +502,18 @@ function MapPane({
                 weight: 2,
                 fillColor: '#14b8a6',
                 fillOpacity: 0.25,
+              }}
+            />
+          ) : null}
+          {measureMode === 'volume-circle' && measurePoints.length > 0 ? (
+            <Circle
+              center={measurePoints[0]!}
+              radius={circleRadiusM || 1}
+              pathOptions={{
+                color: '#7c3aed',
+                weight: 2,
+                fillColor: '#8b5cf6',
+                fillOpacity: 0.18,
               }}
             />
           ) : null}
@@ -378,6 +533,7 @@ function MapPane({
         </>
       ) : null}
       <IssueInteraction active={issueMode} onPickPoint={onIssuePick} />
+      <ElevationInteraction active={elevationMode} onPickPoint={onElevationPick} />
       {issues.map((issue) => (
         <Marker key={issue.id} position={[issue.lat, issue.lng]}>
           <Popup>
@@ -401,6 +557,83 @@ function MapPane({
   )
 }
 
+function OrthomosaicTileLayerWithOptions({
+  tileUrl,
+  cropEnabled,
+  cropFootprint,
+  bounds,
+}: {
+  tileUrl: string
+  cropEnabled: boolean
+  cropFootprint?: LatLng[] | null
+  bounds?: [[number, number], [number, number]]
+}) {
+  const map = useMap()
+  const paneName = 'orthomosaic-crop-pane'
+  useEffect(
+    () => applyTileClip(map, map.getPane(paneName) ?? null, cropEnabled ? cropFootprint ?? null : null),
+    [cropEnabled, cropFootprint, map],
+  )
+
+  return (
+    <Pane name={paneName} style={{ zIndex: 220 }}>
+      <TileLayer
+        key={`cog-${tileUrl}-${cropEnabled ? 'crop' : 'full'}`}
+        url={tileUrl}
+        opacity={0.9}
+        maxZoom={22}
+        maxNativeZoom={22}
+        bounds={bounds}
+        noWrap
+        updateWhenIdle
+        updateWhenZooming={false}
+        keepBuffer={1}
+      />
+    </Pane>
+  )
+}
+
+function ProfileChart({
+  result,
+  svgRef,
+}: {
+  result: ProfileResponse
+  svgRef: RefObject<SVGSVGElement | null>
+}) {
+  const values = result.points.filter((p) => p.elevation != null)
+  if (values.length === 0) {
+    return (
+      <div className="mv-profile-empty">
+        No valid DTM elevation samples found on this line.
+      </div>
+    )
+  }
+  const maxDist = Math.max(...values.map((p) => p.distance_m), 1)
+  const elevations = values.map((p) => Number(p.elevation))
+  const minElev = Math.min(...elevations)
+  const maxElev = Math.max(...elevations)
+  const span = Math.max(maxElev - minElev, 1)
+  const points = values
+    .map((p) => {
+      const x = 44 + (p.distance_m / maxDist) * 680
+      const y = 218 - ((Number(p.elevation) - minElev) / span) * 170
+      return `${x},${y}`
+    })
+    .join(' ')
+  return (
+    <svg ref={svgRef} className="mv-profile-chart" viewBox="0 0 760 260" role="img" aria-label="Elevation profile graph">
+      <rect x="0" y="0" width="760" height="260" fill="#ffffff" />
+      <line x1="44" y1="218" x2="724" y2="218" stroke="#cbd5e1" />
+      <line x1="44" y1="48" x2="44" y2="218" stroke="#cbd5e1" />
+      <text x="44" y="238" fill="#475569" fontSize="12">0 m</text>
+      <text x="660" y="238" fill="#475569" fontSize="12">{maxDist.toFixed(0)} m</text>
+      <text x="8" y="54" fill="#475569" fontSize="12">{maxElev.toFixed(2)} m</text>
+      <text x="8" y="218" fill="#475569" fontSize="12">{minElev.toFixed(2)} m</text>
+      <polyline points={points} fill="none" stroke="#be123c" strokeWidth="3" />
+    </svg>
+  )
+}
+
 export type MapViewerProps = {
   projectId?: string
 }
@@ -415,12 +648,29 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const [points, setPoints] = useState<LatLng[]>([])
   const [areaFrozen, setAreaFrozen] = useState(false)
   const [issueMode, setIssueMode] = useState(false)
+  const [elevationMode, setElevationMode] = useState(false)
+  const [cropMode, setCropMode] = useState<'off' | 'kml' | 'draw'>('off')
+  const [cropEnabled, setCropEnabled] = useState(false)
   const [cogTileUrl, setCogTileUrl] = useState<string | null>(null)
+  const [compareCogTileUrl, setCompareCogTileUrl] = useState<string | null>(null)
+  const [projectFiles, setProjectFiles] = useState<ProjectFile[]>([])
+  const [projectLayersLoading, setProjectLayersLoading] = useState(false)
+  const [cropMaskPoints, setCropMaskPoints] = useState<LatLng[] | null>(null)
+  const [cropBusy, setCropBusy] = useState(false)
+  const kmlInputRef = useRef<HTMLInputElement | null>(null)
+  const [cogBounds, setCogBounds] = useState<[[number, number], [number, number]] | null>(null)
   const [issueDraft, setIssueDraft] = useState<IssueDraft | null>(null)
   const [issueSubmitting, setIssueSubmitting] = useState(false)
   const [issueError, setIssueError] = useState<string | null>(null)
   const [issues, setIssues] = useState<SavedIssue[]>([])
   const [issuesRefreshTick, setIssuesRefreshTick] = useState(0)
+  const [analysisDatasetId, setAnalysisDatasetId] = useState('')
+  const [elevationResult, setElevationResult] = useState<ElevationResponse | null>(null)
+  const [analysisError, setAnalysisError] = useState<string | null>(null)
+  const [profileResult, setProfileResult] = useState<ProfileResponse | null>(null)
+  const [volumeResult, setVolumeResult] = useState<DtmVolumeResponse | null>(null)
+  const [analysisBusy, setAnalysisBusy] = useState(false)
+  const profileChartRef = useRef<SVGSVGElement | null>(null)
 
   const syncLockRef = useRef(false)
   const mapARef = useRef<L.Map | null>(null)
@@ -435,11 +685,15 @@ export function MapViewer({ projectId }: MapViewerProps) {
   )
 
   const distanceM = useMemo(
-    () => (measureMode === 'distance' ? totalPathLengthM(points) : 0),
+    () => (measureMode === 'distance' || measureMode === 'profile' ? totalPathLengthM(points) : 0),
     [measureMode, points],
   )
   const areaM2 = useMemo(
-    () => (measureMode === 'area' ? ringAreaM2(points) : 0),
+    () => (measureMode === 'area' || measureMode === 'volume-area' ? ringAreaM2(points) : 0),
+    [measureMode, points],
+  )
+  const circleRadiusM = useMemo(
+    () => (measureMode === 'volume-circle' && points.length >= 2 ? points[0]!.distanceTo(points[1]!) : 0),
     [measureMode, points],
   )
 
@@ -455,20 +709,30 @@ export function MapViewer({ projectId }: MapViewerProps) {
     setIssueSubmitting(false)
   }, [])
 
+  const clearAnalysisResults = useCallback(() => {
+    setElevationResult(null)
+    setProfileResult(null)
+    setVolumeResult(null)
+    setAnalysisError(null)
+  }, [])
+
   const setTool = useCallback((mode: MeasureMode) => {
     setIssueMode(false)
+    setElevationMode(false)
     setIssueDraft(null)
     setIssueError(null)
+    clearAnalysisResults()
     setMeasureMode((prev) => {
       const next = prev === mode ? 'none' : mode
       return next
     })
     setPoints([])
     setAreaFrozen(false)
-  }, [])
+  }, [clearAnalysisResults])
 
   const toggleIssueMode = useCallback(() => {
     setMeasureMode('none')
+    setElevationMode(false)
     setPoints([])
     setAreaFrozen(false)
     setIssueError(null)
@@ -476,12 +740,46 @@ export function MapViewer({ projectId }: MapViewerProps) {
     setIssueMode((prev) => !prev)
   }, [])
 
+  const toggleElevationMode = useCallback(() => {
+    setMeasureMode('none')
+    setPoints([])
+    setAreaFrozen(false)
+    setIssueMode(false)
+    setIssueDraft(null)
+    setAnalysisError(null)
+    clearAnalysisResults()
+    setElevationMode((prev) => !prev)
+  }, [clearAnalysisResults])
+
   useEffect(() => {
     if (measureMode === 'none') {
       setPoints([])
       setAreaFrozen(false)
     }
   }, [measureMode])
+
+  useEffect(() => {
+    if (!projectId) {
+      setProjectFiles([])
+      setProjectLayersLoading(false)
+      return
+    }
+    let cancelled = false
+    setProjectLayersLoading(true)
+    void getProjectFiles(projectId)
+      .then((files) => {
+        if (!cancelled) setProjectFiles(files)
+      })
+      .catch(() => {
+        if (!cancelled) setProjectFiles([])
+      })
+      .finally(() => {
+        if (!cancelled) setProjectLayersLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [projectId])
 
   useEffect(() => {
     let cancelled = false
@@ -526,6 +824,210 @@ export function MapViewer({ projectId }: MapViewerProps) {
     setIssueError(null)
   }, [])
 
+  const projectCogLayers = useMemo<ViewerLayer[]>(() => {
+    const fromFiles = projectFiles
+      .filter((file) => file.layer_url && file.status === 'Web-Ready' && file.type === 'cog')
+      .map((file) => ({
+        id: file.dataset_id || file.rel_path || file.name,
+        projectId: projectId || '',
+        name: file.name,
+        url: file.layer_url,
+        rawPath: file.raw_rel_path ? file.file_path : undefined,
+        datasetId: file.dataset_id,
+        datasetType: file.dataset_type,
+        month: file.month,
+      }))
+    const fromContext = activeLayers
+      .filter((item) => item.projectId === projectId && item.layerType === 'cog' && Boolean(item.url))
+      .map((item) => ({
+        id: item.id,
+        projectId: item.projectId,
+        name: item.name,
+        url: item.url,
+        rawPath: item.rawPath,
+        datasetId: item.datasetId,
+        datasetType: item.datasetType,
+        month: item.month,
+      }))
+    const seen = new Set<string>()
+    return [...fromFiles, ...fromContext].filter((layer) => {
+      const key = layer.datasetId || layer.url || layer.id
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }, [activeLayers, projectFiles, projectId])
+
+  const activeAnalysisLayer = useMemo(
+    () =>
+      projectCogLayers.find(
+        (item) =>
+          item.datasetId === analysisDatasetId &&
+          (item.datasetType === 'dtm' || item.datasetType === 'dsm'),
+      ) ?? null,
+    [analysisDatasetId, projectCogLayers],
+  )
+
+  const analysisLayers = useMemo(
+    () =>
+      projectCogLayers.filter(
+        (item) =>
+          (item.datasetType === 'dtm' || item.datasetType === 'dsm') &&
+          item.datasetId,
+      ),
+    [projectCogLayers],
+  )
+
+  useEffect(() => {
+    if (!analysisDatasetId && analysisLayers[0]?.datasetId) {
+      setAnalysisDatasetId(analysisLayers[0].datasetId)
+    }
+  }, [analysisDatasetId, analysisLayers])
+
+  const onElevationPick = useCallback(
+    async (ll: LatLng) => {
+      if (!projectId || !activeAnalysisLayer?.datasetId || analysisBusy) return
+      setAnalysisBusy(true)
+      setAnalysisError(null)
+      try {
+        const res = await getElevation(projectId, activeAnalysisLayer.datasetId, ll.lat, ll.lng)
+        setElevationResult(res)
+      } catch (error) {
+        setAnalysisError(error instanceof Error ? error.message : 'Elevation check failed')
+      } finally {
+        setAnalysisBusy(false)
+      }
+    },
+    [activeAnalysisLayer?.datasetId, analysisBusy, projectId],
+  )
+
+  const runProfile = useCallback(async () => {
+    if (!projectId || !activeAnalysisLayer?.datasetId || points.length < 2 || analysisBusy) return
+    setAnalysisBusy(true)
+    setAnalysisError(null)
+    try {
+      const payload = points.map((p) => [p.lat, p.lng] as [number, number])
+      const res = await getProfile(projectId, activeAnalysisLayer.datasetId, payload)
+      setProfileResult(res)
+    } catch (error) {
+      setAnalysisError(error instanceof Error ? error.message : 'Profile generation failed')
+    } finally {
+      setAnalysisBusy(false)
+    }
+  }, [activeAnalysisLayer?.datasetId, analysisBusy, points, projectId])
+
+  const runVolume = useCallback(
+    async (scope: 'overall' | 'area' | 'circle') => {
+      if (!projectId || !activeAnalysisLayer?.datasetId || analysisBusy) return
+      if (scope === 'area' && points.length < 3) return
+      if (scope === 'circle' && (points.length < 2 || circleRadiusM <= 0)) return
+      setAnalysisBusy(true)
+      setAnalysisError(null)
+      try {
+        const payload =
+          scope === 'area'
+            ? { points: points.map((p) => [p.lat, p.lng] as [number, number]) }
+            : scope === 'circle'
+              ? { circle_center: [points[0]!.lat, points[0]!.lng] as [number, number], circle_radius_m: circleRadiusM }
+              : {}
+        const res = await getDtmVolume(projectId, activeAnalysisLayer.datasetId, payload)
+        setVolumeResult(res)
+      } catch (error) {
+        setAnalysisError(error instanceof Error ? error.message : 'Volume calculation failed')
+      } finally {
+        setAnalysisBusy(false)
+      }
+    },
+    [activeAnalysisLayer?.datasetId, analysisBusy, circleRadiusM, points, projectId],
+  )
+
+  useEffect(() => {
+    if (measureMode !== 'profile' || points.length < 2 || !activeAnalysisLayer?.datasetId) return
+    const timer = window.setTimeout(() => {
+      void runProfile()
+    }, 700)
+    return () => window.clearTimeout(timer)
+  }, [activeAnalysisLayer?.datasetId, measureMode, points, runProfile])
+
+  const exportProfileCsv = useCallback(() => {
+    if (!profileResult) return
+    const header = 'distance_m,lat,lng,elevation_m\n'
+    const rows = profileResult.points
+      .map((p) => `${p.distance_m.toFixed(3)},${p.lat},${p.lng},${p.elevation ?? ''}`)
+      .join('\n')
+    const url = URL.createObjectURL(new Blob([header + rows], { type: 'text/csv' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'dtm-profile.csv'
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [profileResult])
+
+  const exportProfilePng = useCallback(() => {
+    const svg = profileChartRef.current
+    if (!svg) return
+    const data = new XMLSerializer().serializeToString(svg)
+    const img = new Image()
+    const url = URL.createObjectURL(new Blob([data], { type: 'image/svg+xml;charset=utf-8' }))
+    img.onload = () => {
+      const canvas = document.createElement('canvas')
+      canvas.width = 760
+      canvas.height = 260
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+      ctx.drawImage(img, 0, 0)
+      URL.revokeObjectURL(url)
+      const a = document.createElement('a')
+      a.href = canvas.toDataURL('image/png')
+      a.download = 'dtm-profile.png'
+      a.click()
+    }
+    img.src = url
+  }, [])
+
+  const saveDrawCrop = useCallback(async () => {
+    if (!projectId || !cogTileUrl || points.length < 3 || cropBusy) return
+    const tileFolder = tileFolderFromTemplate(cogTileUrl)
+    if (!tileFolder) return
+    setCropBusy(true)
+    try {
+      const payload = points.map((p) => [p.lat, p.lng] as [number, number])
+      const res = await saveDatasetCropMaskDraw(projectId, tileFolder, payload)
+      const ll = res.points.map((p) => L.latLng(Number(p[0]), Number(p[1])))
+      setCropMaskPoints(ll.length >= 3 ? ll : null)
+      setCropEnabled(true)
+      window.alert('Crop shape saved to database.')
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : 'Failed to save drawn crop.')
+    } finally {
+      setCropBusy(false)
+    }
+  }, [cogTileUrl, cropBusy, points, projectId])
+
+  const importKmlCrop = useCallback(
+    async (file: File) => {
+      if (!projectId || !cogTileUrl || cropBusy) return
+      const tileFolder = tileFolderFromTemplate(cogTileUrl)
+      if (!tileFolder) return
+      setCropBusy(true)
+      try {
+        const res = await saveDatasetCropMaskKml(projectId, tileFolder, file)
+        const ll = res.points.map((p) => L.latLng(Number(p[0]), Number(p[1])))
+        setCropMaskPoints(ll.length >= 3 ? ll : null)
+        setCropEnabled(true)
+        setCropMode('off')
+        window.alert('KML crop shape saved to database.')
+      } catch (e) {
+        window.alert(e instanceof Error ? e.message : 'KML import failed.')
+      } finally {
+        setCropBusy(false)
+      }
+    },
+    [cogTileUrl, cropBusy, projectId],
+  )
+
   const onIssueSubmit = useCallback(
     async (e: FormEvent<HTMLFormElement>) => {
       e.preventDefault()
@@ -552,7 +1054,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
     [clearIssueMode, issueDraft, issueSubmitting],
   )
 
-  const measureActive = measureMode !== 'none' && !splitView && !issueMode
+  const measureActive = measureMode !== 'none' && !splitView && !issueMode && !elevationMode
 
   const mapProps = {
     center,
@@ -561,30 +1063,99 @@ export function MapViewer({ projectId }: MapViewerProps) {
     className: 'mv-leaflet',
   } as const
 
+  const selectPrimaryLayer = useCallback(
+    (url: string | null) => {
+      setCogTileUrl(url)
+      clearAnalysisResults()
+    },
+    [clearAnalysisResults],
+  )
+
   useEffect(() => {
     if (!projectId) {
       setCogTileUrl(null)
+      setCompareCogTileUrl(null)
+      setCogBounds(null)
       return
     }
-    const layer = activeLayers.find(
-      (item) => item.projectId === projectId && item.layerType === 'cog',
-    )
-    if (layer?.url) {
-      console.log('🗺️ [MAP DEBUG] Requesting Tile URL:', layer.url)
-      setCogTileUrl(layer.url)
-      return
+    if (!cogTileUrl && projectCogLayers[0]?.url) {
+      setCogTileUrl(projectCogLayers[0].url)
     }
-    const latest = getLatestCogLayer(projectId)
-    setCogTileUrl(latest?.tileUrl ?? null)
-  }, [activeLayers, projectId])
+    if (!compareCogTileUrl) {
+      const compareLayer =
+        projectCogLayers.find((layer) => layer.url !== (cogTileUrl || projectCogLayers[0]?.url) && (layer.datasetType === 'dtm' || layer.datasetType === 'dsm')) ??
+        projectCogLayers.find((layer) => layer.url !== (cogTileUrl || projectCogLayers[0]?.url))
+      if (compareLayer?.url) setCompareCogTileUrl(compareLayer.url)
+    }
+    if (projectCogLayers.length === 0) {
+      setCogTileUrl(null)
+      setCompareCogTileUrl(null)
+      setCogBounds(null)
+    }
+  }, [cogTileUrl, compareCogTileUrl, projectCogLayers, projectId])
 
-  const activeCogLayers = useMemo(
-    () =>
-      activeLayers.filter(
-        (item) => item.projectId === projectId && item.layerType === 'cog' && Boolean(item.url),
-      ),
-    [activeLayers, projectId],
-  )
+  useEffect(() => {
+    if (!projectId || !cogTileUrl) {
+      setCogBounds(null)
+      return
+    }
+    const layer = projectCogLayers.find((item) => item.url === cogTileUrl)
+    const datasetName = layer?.name?.replace(/\.tiff?$/i, '')
+    if (!datasetName) {
+      setCogBounds(null)
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      try {
+        const boundsUrl = `${API_BASE}/api/datasets/${encodeURIComponent(projectId)}/${encodeURIComponent(datasetName)}/bounds`
+        const res = await fetch(boundsUrl, { credentials: 'include' })
+        if (!res.ok) return
+        const data = (await res.json()) as { bounds?: [number, number, number, number] | null }
+        if (cancelled || !data?.bounds) return
+        const [minX, minY, maxX, maxY] = data.bounds
+        setCogBounds([[minY, minX], [maxY, maxX]])
+      } catch {
+        if (!cancelled) setCogBounds(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [cogTileUrl, projectCogLayers, projectId])
+
+  useEffect(() => {
+    if (!projectId || !cogTileUrl) {
+      setCropMaskPoints(null)
+      return
+    }
+    const tileFolder = tileFolderFromTemplate(cogTileUrl)
+    if (!tileFolder) {
+      setCropMaskPoints(null)
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await getDatasetCropMask(projectId, tileFolder)
+        if (cancelled || !res.points?.length) {
+          if (!cancelled) setCropMaskPoints(null)
+          return
+        }
+        const ll = res.points
+          .map((p) => L.latLng(Number(p[0]), Number(p[1])))
+          .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng))
+        setCropMaskPoints(ll.length >= 3 ? ll : null)
+      } catch {
+        if (!cancelled) setCropMaskPoints(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [cogTileUrl, projectId])
+
+  const activeCogLayers = projectCogLayers
 
   return (
     <div className="mv-root">
@@ -592,20 +1163,24 @@ export function MapViewer({ projectId }: MapViewerProps) {
         <div className="mv-panel mv-panel--layers">
           <p className="mv-panel__title">Data Highlights</p>
           <fieldset className="mv-fieldset">
-            <legend className="mv-legend">Active Layers</legend>
+            <legend className="mv-legend">Project 2D Layers</legend>
             {activeCogLayers.length > 0 ? (
               activeCogLayers.map((layer) => (
                 <button
                   key={layer.id}
                   type="button"
                   className={layer.url === cogTileUrl ? 'mv-tool mv-tool--active' : 'mv-tool'}
-                  onClick={() => setCogTileUrl(layer.url)}
+                  onClick={() => selectPrimaryLayer(layer.url)}
+                  title={`${layer.datasetType?.toUpperCase() || 'LAYER'}${layer.month ? ` · ${layer.month}` : ''}`}
                 >
+                  <span className="mv-layer-type">{layer.datasetType || 'layer'}</span>
                   {layer.name}
                 </button>
               ))
+            ) : projectLayersLoading ? (
+              <p className="mv-hud__hint">Loading project layers...</p>
             ) : (
-              <p className="mv-hud__hint">Select a Web-Ready TIFF in Datasets panel first.</p>
+              <p className="mv-hud__hint">No Web-Ready Ortho/DTM/DSM layers found in this project.</p>
             )}
           </fieldset>
         </div>
@@ -641,6 +1216,70 @@ export function MapViewer({ projectId }: MapViewerProps) {
           </button>
           <button
             type="button"
+            className={elevationMode && !splitView ? 'mv-tool mv-tool--active' : 'mv-tool'}
+            disabled={splitView || !activeAnalysisLayer}
+            onClick={toggleElevationMode}
+            title="Click DTM/DSM to read elevation."
+          >
+            <i className="fa-solid fa-mountain" aria-hidden />
+            Elevation
+          </button>
+          <button
+            type="button"
+            className={measureMode === 'profile' && !splitView ? 'mv-tool mv-tool--active' : 'mv-tool'}
+            disabled={splitView || !activeAnalysisLayer}
+            onClick={() => setTool('profile')}
+            title="Draw a line on DTM/DSM to generate elevation profile."
+          >
+            <i className="fa-solid fa-chart-line" aria-hidden />
+            Profile
+          </button>
+          <button
+            type="button"
+            className="mv-tool"
+            disabled={splitView || !activeAnalysisLayer || analysisBusy}
+            onClick={() => void runVolume('overall')}
+            title="Calculate total loaded DTM/DSM volume above minimum elevation."
+          >
+            <i className="fa-solid fa-cubes-stacked" aria-hidden />
+            Overall Volume
+          </button>
+          <button
+            type="button"
+            className={measureMode === 'volume-area' && !splitView ? 'mv-tool mv-tool--active' : 'mv-tool'}
+            disabled={splitView || !activeAnalysisLayer}
+            onClick={() => setTool('volume-area')}
+            title="Draw polygon area for DTM/DSM volume."
+          >
+            <i className="fa-solid fa-vector-square" aria-hidden />
+            Area Volume
+          </button>
+          <button
+            type="button"
+            className={measureMode === 'volume-circle' && !splitView ? 'mv-tool mv-tool--active' : 'mv-tool'}
+            disabled={splitView || !activeAnalysisLayer}
+            onClick={() => setTool('volume-circle')}
+            title="Click center and edge to calculate circular DTM/DSM volume."
+          >
+            <i className="fa-regular fa-circle" aria-hidden />
+            Circle Volume
+          </button>
+          {analysisLayers.length > 0 ? (
+            <select
+              className="mv-select"
+              value={analysisDatasetId}
+              onChange={(e) => setAnalysisDatasetId(e.target.value)}
+              aria-label="DTM or DSM analysis layer"
+            >
+              {analysisLayers.map((layer) => (
+                <option key={layer.id} value={layer.datasetId}>
+                  {layer.name}
+                </option>
+              ))}
+            </select>
+          ) : null}
+          <button
+            type="button"
             className={issueMode && !splitView ? 'mv-tool mv-tool--active' : 'mv-tool'}
             disabled={splitView}
             onClick={toggleIssueMode}
@@ -665,23 +1304,118 @@ export function MapViewer({ projectId }: MapViewerProps) {
             <i className="fa-solid fa-columns" aria-hidden />
             Split view
           </button>
-          {measureMode !== 'none' && !splitView ? (
+          <button
+            type="button"
+            className={cropEnabled ? 'mv-tool mv-tool--active' : 'mv-tool'}
+            onClick={() => setCropEnabled((v) => !v)}
+            disabled={!cogTileUrl || !cropMaskPoints}
+            title="Saved crop mask apply/remove karein."
+          >
+            <i className="fa-solid fa-crop-simple" aria-hidden />
+            {cropEnabled ? 'Crop ON' : 'Apply Crop'}
+          </button>
+          <select
+            className="mv-select"
+            value={cropMode}
+            onChange={(e) => {
+              const mode = e.target.value as 'off' | 'kml' | 'draw'
+              setCropMode(mode)
+              if (mode === 'draw') {
+                setTool('area')
+              }
+            }}
+            aria-label="Crop source mode"
+          >
+            <option value="off">Crop Source: Off</option>
+            <option value="kml">KML Border Import</option>
+            <option value="draw">Draw Border</option>
+          </select>
+          {cropMode === 'kml' ? (
+            <>
+              <input
+                ref={kmlInputRef}
+                type="file"
+                accept=".kml,.xml"
+                style={{ display: 'none' }}
+                onChange={(event) => {
+                  const f = event.target.files?.[0]
+                  if (f) void importKmlCrop(f)
+                  event.currentTarget.value = ''
+                }}
+              />
+              <button
+                type="button"
+                className="mv-tool"
+                disabled={!cogTileUrl || cropBusy}
+                onClick={() => kmlInputRef.current?.click()}
+              >
+                {cropBusy ? 'Saving KML...' : 'Import KML'}
+              </button>
+            </>
+          ) : null}
+          {cropMode === 'draw' ? (
+            <button
+              type="button"
+              className="mv-tool"
+              disabled={!cogTileUrl || points.length < 3 || cropBusy}
+              onClick={() => void saveDrawCrop()}
+            >
+              {cropBusy ? 'Saving Shape...' : 'Save Drawn Shape'}
+            </button>
+          ) : null}
+          <div className="mv-toolbar__context" aria-live="polite">
+            {measureMode === 'profile' ? (
+              <button
+                type="button"
+                className="mv-tool"
+                disabled={!activeAnalysisLayer || points.length < 2 || analysisBusy}
+                onClick={() => void runProfile()}
+              >
+                {analysisBusy ? 'Generating...' : 'Generate Profile'}
+              </button>
+            ) : measureMode === 'volume-area' ? (
+              <button
+                type="button"
+                className="mv-tool"
+                disabled={!activeAnalysisLayer || points.length < 3 || analysisBusy}
+                onClick={() => void runVolume('area')}
+              >
+                {analysisBusy ? 'Calculating...' : 'Calculate Area Volume'}
+              </button>
+            ) : measureMode === 'volume-circle' ? (
+              <button
+                type="button"
+                className="mv-tool"
+                disabled={!activeAnalysisLayer || points.length < 2 || analysisBusy}
+                onClick={() => void runVolume('circle')}
+              >
+                {analysisBusy ? 'Calculating...' : 'Calculate Circle Volume'}
+              </button>
+            ) : (
+              <span className="mv-toolbar__placeholder" aria-hidden />
+            )}
             <button
               type="button"
               className="mv-tool mv-tool--ghost"
               onClick={clearMeasure}
+              disabled={measureMode === 'none' || splitView}
             >
               Clear drawing
             </button>
-          ) : null}
+          </div>
         </div>
       </div>
 
       {measureMode !== 'none' && !splitView ? (
         <div className="mv-hud" aria-live="polite">
-          {measureMode === 'distance' ? (
+          {measureMode === 'distance' || measureMode === 'profile' ? (
             <span>
-              Distance: <strong>{formatLengthM(distanceM)}</strong>
+              {measureMode === 'profile' ? 'Profile length' : 'Distance'}: <strong>{formatLengthM(distanceM)}</strong>
+            </span>
+          ) : measureMode === 'volume-circle' ? (
+            <span>
+              Circle radius: <strong>{formatLengthM(circleRadiusM)}</strong>
+              <span className="mv-hud__hint"> · Click center then edge</span>
             </span>
           ) : (
             <span>
@@ -695,23 +1429,130 @@ export function MapViewer({ projectId }: MapViewerProps) {
           )}
         </div>
       ) : null}
+      {elevationResult || analysisError || profileResult || volumeResult ? (
+        <div className="mv-analysis-card">
+          <button
+            type="button"
+            className="mv-analysis-card__close"
+            onClick={clearAnalysisResults}
+            aria-label="Close analysis results"
+            title="Close"
+          >
+            <i className="fa-solid fa-xmark" aria-hidden />
+          </button>
+          {analysisError ? <p className="mv-analysis-card__error">{analysisError}</p> : null}
+          {elevationResult ? (
+            <p>
+              Elevation: <strong>{elevationResult.elevation.toFixed(3)} {elevationResult.unit}</strong>
+              <span> Lat {elevationResult.lat.toFixed(6)}, Lng {elevationResult.lng.toFixed(6)}</span>
+            </p>
+          ) : null}
+          {profileResult ? (
+            <>
+              <div className="mv-profile-summary">
+                <article>
+                  <span>Length</span>
+                  <strong>{formatLengthM(profileResult.length_m ?? distanceM)}</strong>
+                </article>
+                <article>
+                  <span>Min / Max</span>
+                  <strong>
+                    {formatProfileValue(profileResult.min_elevation)} / {formatProfileValue(profileResult.max_elevation)}
+                  </strong>
+                </article>
+                <article>
+                  <span>Average</span>
+                  <strong>{formatProfileValue(profileResult.avg_elevation)}</strong>
+                </article>
+                <article>
+                  <span>Change</span>
+                  <strong>{formatProfileValue(profileResult.elevation_change)}</strong>
+                </article>
+                <article>
+                  <span>Gain / Loss</span>
+                  <strong>
+                    {formatProfileValue(profileResult.elevation_gain)} / {formatProfileValue(profileResult.elevation_loss)}
+                  </strong>
+                </article>
+                <article>
+                  <span>Volume est.</span>
+                  <strong>{formatProfileValue(profileResult.volume_above_min_m3, 'm3')}</strong>
+                </article>
+              </div>
+              <ProfileChart result={profileResult} svgRef={profileChartRef} />
+              <div className="mv-analysis-card__actions">
+                <button type="button" className="mv-tool" onClick={exportProfileCsv}>Export CSV</button>
+                <button type="button" className="mv-tool" onClick={exportProfilePng}>Export PNG</button>
+              </div>
+            </>
+          ) : null}
+          {volumeResult ? (
+            <>
+              <div className="mv-profile-summary">
+                <article><span>Volume</span><strong>{formatProfileValue(volumeResult.fill_volume_m3, 'm3')}</strong></article>
+                <article><span>Area</span><strong>{formatAreaM2(volumeResult.area_m2)}</strong></article>
+                <article><span>Base</span><strong>{formatProfileValue(volumeResult.base_elevation)}</strong></article>
+                <article><span>Min / Max</span><strong>{formatProfileValue(volumeResult.min_elevation)} / {formatProfileValue(volumeResult.max_elevation)}</strong></article>
+                <article><span>Average</span><strong>{formatProfileValue(volumeResult.avg_elevation)}</strong></article>
+                <article><span>Cells</span><strong>{volumeResult.cell_count}</strong></article>
+              </div>
+              {volumeResult.bins.length > 0 ? (
+                <div className="mv-volume-chart" aria-label="DTM volume graph">
+                  {volumeResult.bins.map((bin) => {
+                    const max = Math.max(...volumeResult.bins.map((b) => b.volume), 1)
+                    return (
+                      <div key={bin.label} className="mv-volume-bar">
+                        <span style={{ height: Math.max(6, (bin.volume / max) * 92) }} title={`${bin.label}: ${bin.volume.toFixed(2)} m3`} />
+                        <small>{bin.label}</small>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : null}
+            </>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className={splitView ? 'mv-maps mv-maps--split' : 'mv-maps'}>
         <div className="mv-map-wrap">
-          {splitView ? <span className="mv-map-label">Primary</span> : null}
+          {splitView ? (
+            <div className="mv-compare-head">
+              <span className="mv-map-label">Primary Layer</span>
+              <select
+                className="mv-select"
+                value={cogTileUrl ?? ''}
+                onChange={(e) => selectPrimaryLayer(e.target.value || null)}
+                aria-label="Primary layer"
+              >
+                <option value="">No overlay selected</option>
+                {activeCogLayers.map((layer) => (
+                  <option key={layer.id} value={layer.url}>
+                    {layer.datasetType ? `${layer.datasetType.toUpperCase()} - ` : ''}{layer.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
           <div className="mv-map-canvas">
             <MapContainer {...mapProps} style={{ height: '100%', width: '100%' }}>
-              <MapController activeLayers={activeLayers} projectId={projectId} />
+              <MapController layers={activeCogLayers} projectId={projectId} selectedUrl={cogTileUrl} />
               <MapPane
                 measureMode={measureMode}
                 measureActive={measureActive}
                 measurePoints={points}
+                circleRadiusM={circleRadiusM}
                 areaFrozen={areaFrozen}
                 onMeasureAdd={onMeasureAdd}
                 onMeasureCloseRing={onMeasureCloseRing}
                 issueMode={issueMode && !splitView}
                 onIssuePick={onIssuePick}
+                elevationMode={elevationMode && !splitView}
+                onElevationPick={onElevationPick}
                 issues={issues}
+                cropEnabled={cropEnabled}
+                cropFootprint={cropMaskPoints}
+                cogBounds={cogBounds}
                 cogTileUrl={cogTileUrl}
                 sync={splitView ? { ...syncRefs, isA: true } : undefined}
               />
@@ -797,35 +1638,40 @@ export function MapViewer({ projectId }: MapViewerProps) {
         {splitView ? (
           <div className="mv-map-wrap mv-map-wrap--compare">
             <div className="mv-compare-head">
-              <span className="mv-map-label">Compare</span>
+              <span className="mv-map-label">Compare Layer</span>
               <select
                 className="mv-select"
-                value={cogTileUrl ?? ''}
-                onChange={(e) => setCogTileUrl(e.target.value || null)}
+                value={compareCogTileUrl ?? ''}
+                onChange={(e) => setCompareCogTileUrl(e.target.value || null)}
                 aria-label="Comparison base layer"
               >
                 <option value="">No overlay selected</option>
                 {activeCogLayers.map((layer) => (
                   <option key={layer.id} value={layer.url}>
-                    {layer.name}
+                    {layer.datasetType ? `${layer.datasetType.toUpperCase()} - ` : ''}{layer.name}
                   </option>
                 ))}
               </select>
             </div>
             <div className="mv-map-canvas">
               <MapContainer {...mapProps} style={{ height: '100%', width: '100%' }}>
-                <MapController activeLayers={activeLayers} projectId={projectId} />
                 <MapPane
                   measureMode="none"
                   measureActive={false}
                   measurePoints={[]}
+                  circleRadiusM={0}
                   areaFrozen={false}
                   onMeasureAdd={() => {}}
                   onMeasureCloseRing={() => {}}
                   issueMode={false}
                   onIssuePick={() => {}}
+                  elevationMode={false}
+                  onElevationPick={() => {}}
                   issues={issues}
-                  cogTileUrl={cogTileUrl}
+                  cropEnabled={false}
+                  cropFootprint={null}
+                  cogBounds={undefined}
+                  cogTileUrl={compareCogTileUrl}
                   sync={{ ...syncRefs, isA: false }}
                 />
               </MapContainer>

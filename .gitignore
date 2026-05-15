@@ -16,6 +16,16 @@ build/
 # Frontend build
 frontend/dist/
 
+# Local runtime data and generated geospatial outputs
+Project_Data/.session_signing_secret
+Project_Data/uploads/
+Project_Data/pointclouds/
+Project_Data/projects/*/raw/
+Project_Data/projects/*/processed/
+Project_Data/projects/*/_dataset_jobs/
+Project_Data/processing_jobs.json
+Project_Data/*.db
+
 # Environment & IDE
 .env
 .env.*

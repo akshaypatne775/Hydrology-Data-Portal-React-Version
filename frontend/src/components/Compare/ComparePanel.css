@@ -1,0 +1,158 @@
+.cmp-root {
+  display: grid;
+  gap: 1rem;
+  width: 100%;
+  min-height: 100%;
+  padding: 1rem;
+  box-sizing: border-box;
+  background: #f8fafc;
+}
+
+.cmp-head,
+.cmp-actions,
+.cmp-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.cmp-head h3 {
+  margin: 0;
+  color: #0e3e49;
+}
+
+.cmp-head p,
+.cmp-message,
+.cmp-empty {
+  margin: 0.25rem 0 0;
+  color: #64748b;
+  font-size: 0.82rem;
+}
+
+.cmp-actions button {
+  border: 1px solid #0e3e49;
+  background: #0e3e49;
+  color: #fff;
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.cmp-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cmp-layout {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.9fr) minmax(420px, 1.1fr);
+  gap: 1rem;
+  min-height: 0;
+}
+
+.cmp-table-wrap,
+.cmp-results {
+  border: 1px solid #dbe4ee;
+  border-radius: 10px;
+  background: #fff;
+  overflow: auto;
+}
+
+.cmp-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.cmp-table th,
+.cmp-table td {
+  padding: 0.65rem;
+  border-bottom: 1px solid #e2e8f0;
+  text-align: left;
+  font-size: 0.78rem;
+}
+
+.cmp-table th {
+  background: #0e3e49;
+  color: #fff;
+}
+
+.cmp-table input[type='month'] {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 0.3rem;
+  font: inherit;
+}
+
+.cmp-results {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.cmp-summary article {
+  min-width: 120px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 0.65rem;
+  background: #f8fafc;
+}
+
+.cmp-summary span {
+  display: block;
+  color: #64748b;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+}
+
+.cmp-summary strong {
+  display: block;
+  margin-top: 0.25rem;
+  color: #0e3e49;
+}
+
+.cmp-chart {
+  min-height: 260px;
+  display: flex;
+  align-items: end;
+  gap: 0.75rem;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 1rem;
+}
+
+.cmp-bar {
+  flex: 1;
+  min-width: 48px;
+  display: grid;
+  justify-items: center;
+  align-items: end;
+  gap: 0.45rem;
+}
+
+.cmp-bar__fill {
+  width: 100%;
+  max-width: 54px;
+  border-radius: 8px 8px 0 0;
+}
+
+.cmp-bar__fill--pos {
+  background: #14b8a6;
+}
+
+.cmp-bar__fill--neg {
+  background: #ef4444;
+}
+
+.cmp-bar span {
+  font-size: 0.68rem;
+  color: #475569;
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .cmp-layout {
+    grid-template-columns: 1fr;
+  }
+}

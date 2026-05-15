@@ -1,7 +1,8 @@
 {
-  "status": "Generating XYZ tiles",
-  "updated_at": "2026-04-30T05:36:48.667434+00:00",
+  "status": "Web-Ready",
+  "updated_at": "2026-04-30T06:22:15.110953+00:00",
   "dataset_id": "AuroTrimmed-effbc6e6e46c",
   "dataset_name": "AuroTrimmed.tif",
-  "tile_folder": "AuroTrimmed-d5da99c9"
+  "tile_folder": "AuroTrimmed-d5da99c9",
+  "tiles_rel_path": "projects/proj_9b8098d17046469b/processed/AuroTrimmed-d5da99c9"
 }

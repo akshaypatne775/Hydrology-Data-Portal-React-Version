@@ -110,6 +110,10 @@ export function getFloodOverlayTileUrl(period: FloodReturnPeriod): string | null
 export const OSM_FALLBACK_URL =
   'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
 
+/** Satellite fallback (used as clean visual basemap behind orthomosaic). */
+export const SATELLITE_FALLBACK_URL =
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+
 export function getBaseLayerUrlOrFallback(layer: BaseLayerId): string {
   const raw = getBaseLayerTileUrl(layer) ?? OSM_FALLBACK_URL
   return withTileCacheBust(raw)

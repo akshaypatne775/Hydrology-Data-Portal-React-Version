@@ -30,21 +30,19 @@ function humanSize(sizeBytes: string): string {
 
 export function DownloadsPanel({ projectId }: DownloadsPanelProps) {
   const [items, setItems] = useState<DownloadItem[]>([])
+  const visibleItems = useMemo(() => (projectId ? items : []), [items, projectId])
 
   const grouped = useMemo(
     () =>
       CATEGORY_ORDER.map((category) => ({
         category,
-        items: items.filter((item) => item.category === category),
+        items: visibleItems.filter((item) => item.category === category),
       })),
-    [items],
+    [visibleItems],
   )
 
   useEffect(() => {
-    if (!projectId) {
-      setItems([])
-      return
-    }
+    if (!projectId) return
     let cancelled = false
     const load = async () => {
       try {

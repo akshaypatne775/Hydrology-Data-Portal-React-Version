@@ -12,6 +12,7 @@ const MapViewer = lazy(() =>
 const GlobeViewer = lazy(() => import('./GlobeViewer/GlobeViewer'))
 const DatasetsPanel = lazy(() => import('./Datasets/DatasetsPanel'))
 const DownloadsPanel = lazy(() => import('./Downloads/DownloadsPanel'))
+const ComparePanel = lazy(() => import('./Compare/ComparePanel'))
 
 const DROID_CLOUD_LOGO_URL =
   'https://www.droidminingsolutions.com/wp-content/uploads/2026/04/ChatGPT-Image-Apr-25-2026-04_33_45-PM.png'
@@ -82,6 +83,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     setShareCopied,
   } = useWorkspaceContext()
   const { projects, loading: projectsLoading, error: projectsError, addProject } = useProjects()
+  const [createProjectError, setCreateProjectError] = useState<string | null>(null)
   const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetric[]>([
     { label: 'Projects', value: '0', meta: 'Available workspaces', icon: 'fa-solid fa-folder-tree' },
     { label: 'Datasets', value: '0', meta: 'In selected project', icon: 'fa-solid fa-database' },
@@ -108,7 +110,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     } else {
       window.prompt('Copy white-label link:', url)
     }
-  }, [])
+  }, [setShareCopied])
 
   const openProject = useCallback(
     (project: Project) => {
@@ -120,7 +122,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
 
   useEffect(() => {
     setSelectedProject((prev) => (prev ? projects.find((p) => p.id === prev.id) ?? null : null))
-  }, [projects])
+  }, [projects, setSelectedProject])
 
   useEffect(() => {
     let cancelled = false
@@ -165,7 +167,8 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     }
   }, [projects.length, selectedProject?.id])
 
-  const createProject = async () => {
+  const createProject = useCallback(async () => {
+    setCreateProjectError(null)
     try {
       const project = await addProject(createForm)
       setSelectedProject(project)
@@ -178,8 +181,17 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
         status: 'Active',
         type: 'Drone Survey',
       })
-    } catch {}
-  }
+    } catch (error) {
+      setCreateProjectError(error instanceof Error ? error.message : 'Failed to create project')
+    }
+  }, [
+    addProject,
+    createForm,
+    setActiveId,
+    setCreateForm,
+    setSelectedProject,
+    setShowCreateProject,
+  ])
 
   const handleLogout = async () => {
     await logout()
@@ -243,18 +255,21 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
               Cancel
             </button>
           </div>
+          {createProjectError ? (
+            <p className="ds-projects__error">{createProjectError}</p>
+          ) : null}
         </div>
       </div>
     ),
-    [createForm, createProject, setCreateForm, setShowCreateProject],
+    [createForm, createProject, createProjectError, setCreateForm, setShowCreateProject],
   )
 
   return (
     <div className="ds-dashboard">
-      <aside className="ds-sidebar" aria-label="Droid Survair navigation">
+      <aside className="ds-sidebar" aria-label="Droid Cloud navigation">
         <div className="ds-sidebar__brand">
           <div className="ds-sidebar__brand-mark">
-            <img src={DROID_CLOUD_LOGO_URL} alt="Droid Survair" className="ds-sidebar__logo-img" />
+            <img src={DROID_CLOUD_LOGO_URL} alt="Droid Cloud" className="ds-sidebar__logo-img" />
           </div>
         </div>
 
@@ -282,13 +297,13 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
           ))}
         </nav>
 
-        <div className="ds-sidebar__footer">Droid Survair Workspace · v1</div>
+        <div className="ds-sidebar__footer">Droid Cloud Workspace · v1</div>
       </aside>
 
       <div className="ds-main">
         <header className="ds-topbar">
           <div className="ds-topbar__brand-logo-wrap">
-            <img src={DROID_CLOUD_LOGO_URL} alt="Droid Survair" className="ds-topbar__brand-logo" />
+            <img src={DROID_CLOUD_LOGO_URL} alt="Droid Cloud" className="ds-topbar__brand-logo" />
           </div>
           <div className="ds-topbar__project">
             <span className="ds-topbar__label">Project</span>
@@ -311,14 +326,13 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
               <i className="fa-solid fa-link" aria-hidden />
               {shareCopied ? 'Copied' : 'Share'}
             </button>
-
             <div className="ds-profile" role="group" aria-label="User profile">
               <div className="ds-profile__avatar" aria-hidden>
                 DC
               </div>
               <div className="ds-profile__meta">
                 <span className="ds-profile__name">{user.email}</span>
-                <span className="ds-profile__role">Droid Survair User</span>
+                <span className="ds-profile__role">Droid Cloud User</span>
               </div>
             </div>
             <button type="button" className="ds-share" onClick={() => void handleLogout()}>
@@ -382,7 +396,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                 <div>
                   <p className="ds-overview-hero__kicker">Operations Command</p>
                   <h2 className="ds-overview-hero__title">
-                    Droid Survair Workspace
+                    Droid Cloud Workspace
                   </h2>
                   <p className="ds-overview-hero__text">
                     Coordinate analysis, media evidence, issue logs, and delivery
@@ -490,6 +504,16 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                     <DatasetsPanel projectId={selectedProject?.id} />
                   </Suspense>
                 </div>
+              ) : activeId === 'compare' ? (
+                <div
+                  className="ds-map-body"
+                  role="region"
+                  aria-label="Project compare panel"
+                >
+                  <Suspense fallback={<div className="ds-panel-loading">Loading compare panel...</div>}>
+                    <ComparePanel projectId={selectedProject?.id} />
+                  </Suspense>
+                </div>
               ) : activeId === 'downloads' ? (
                 <div
                   className="ds-map-body"
@@ -509,18 +533,10 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                   <div className="ds-map-placeholder">
                     <div className="ds-map-placeholder__inner">
                       <div className="ds-map-placeholder__icon" aria-hidden>
-                        <i
-                          className={
-                            activeId === 'compare'
-                                ? 'fa-solid fa-code-compare'
-                                : 'fa-solid fa-download'
-                          }
-                        />
+                        <i className="fa-solid fa-layer-group" />
                       </div>
                       <h3 className="ds-map-placeholder__title">
-                        {activeId === 'compare'
-                            ? 'Compare panel coming next'
-                            : 'Downloads panel coming next'}
+                        Workspace panel coming next
                       </h3>
                       <p className="ds-map-placeholder__text">
                         This workspace is ready and scoped to the selected project.

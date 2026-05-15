@@ -204,7 +204,6 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     const tileUrl = layerConfig.url
 
     try {
-      console.log('🗺️ [MAP DEBUG] Requesting Tile URL:', layerConfig.url)
       if (orthomosaicLayerRef.current) {
         viewer.imageryLayers.remove(orthomosaicLayerRef.current, true)
       }
@@ -345,7 +344,6 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     const host = containerRef.current
     if (!host) return
     if (viewerRef.current) return
-    console.log('Cesium Viewer Initializing...')
     let handler: Cesium.ScreenSpaceEventHandler | null = null
     let viewer: Cesium.Viewer | null = null
 

@@ -28,7 +28,7 @@ export type UploadTask = {
 
 type UploadContextValue = {
   tasks: UploadTask[]
-  startDatasetUpload: (file: File, projectId: string) => Promise<void>
+  startDatasetUpload: (file: File, projectId: string, metadata?: { datasetType?: string; month?: string }) => Promise<void>
   startPointCloudUpload: (file: File, projectId: string) => Promise<void>
   dismissTask: (taskId: string) => void
 }
@@ -150,7 +150,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
   )
 
   const startDatasetUpload = useCallback(
-    async (file: File, projectId: string) => {
+    async (file: File, projectId: string, metadata?: { datasetType?: string; month?: string }) => {
       const id = taskId('dataset', projectId, file.name)
       createTask({
         id,
@@ -166,13 +166,25 @@ export function UploadProvider({ children }: PropsWithChildren) {
         const form = new FormData()
         form.append('project_id', projectId)
         form.append('file', file)
+        if (metadata?.datasetType) form.append('dataset_type', metadata.datasetType)
+        if (metadata?.month) form.append('month', metadata.month)
         const created = await processDatasetTif(form)
         upsertTask(id, {
           datasetId: created.dataset_id,
           progressPercent: 45,
           state: 'processing',
-          statusText: `Converting ${file.name} to COG...`,
+          statusText: file.name.toLowerCase().endsWith('.csv')
+            ? `Preparing ${file.name} for compare...`
+            : `Converting ${file.name} to COG...`,
         })
+        if (file.name.toLowerCase().endsWith('.csv')) {
+          upsertTask(id, {
+            state: 'success',
+            progressPercent: 100,
+            statusText: `${file.name} is ready for comparison.`,
+          })
+          return
+        }
 
         const start = Date.now()
         while (Date.now() - start < 2 * 60 * 60 * 1000) {

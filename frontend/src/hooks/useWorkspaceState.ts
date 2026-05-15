@@ -17,6 +17,9 @@ export type ActiveLayerConfig = {
   layerType: 'cog' | 'pointcloud'
   url: string
   rawPath?: string
+  datasetId?: string
+  datasetType?: string
+  month?: string
 }
 
 export function useWorkspaceState() {

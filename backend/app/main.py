@@ -1,7 +1,9 @@
-import asyncio
+﻿import asyncio
 import base64
+import csv
 import hashlib
 import hmac
+import math
 import os
 import platform
 import re
@@ -36,17 +38,20 @@ from PIL import Image
 from pydantic import BaseModel
 from titiler.core.factory import TilerFactory
 
+from app.core.database import configure_database, ensure_tables, get_db_connection
+
 # Project_Data lives beside backend/ and frontend/ (repo root).
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 _DEFAULT_PROJECT_DATA = BASE_DIR / "Project_Data"
 LOCAL_DATA_PATH = os.getenv("LOCAL_DATA_PATH", str(_DEFAULT_PROJECT_DATA))
 
 # Map tiles, ortho, DEM, terrain quantized-mesh, videos, etc.
-# - `/data` — preferred URL prefix for files under Project_Data (see StaticFiles mount).
-# - `/tiles` — same directory, kept for flood/media and older clients.
+# - `/data` â€” preferred URL prefix for files under Project_Data (see StaticFiles mount).
+# - `/tiles` â€” same directory, kept for flood/media and older clients.
 ISSUES_DB_PATH = Path(LOCAL_DATA_PATH) / "issues.db"
 
 Path(LOCAL_DATA_PATH).mkdir(parents=True, exist_ok=True)
+configure_database(ISSUES_DB_PATH)
 
 # Large uploads: headroom above merged file size (e.g. 14GB LAS + merge buffer).
 DISK_HEADROOM_BYTES = int(os.getenv("UPLOAD_DISK_HEADROOM_MB", "512")) * 1024 * 1024
@@ -120,9 +125,9 @@ class Debug404Middleware(BaseHTTPMiddleware):
         if response.status_code == 404 and request.url.path.startswith("/data/"):
             rel = request.url.path.replace("/data/", "", 1).lstrip("/")
             expected_path = Path(LOCAL_DATA_PATH) / rel
-            print(f"❌ [DEBUG 404] Frontend requested: {request.url.path}")
-            print(f"🔍 [DEBUG 404] Backend looked for file at: {expected_path.resolve()}")
-            print(f"📂 [DEBUG 404] Does this file exist? {expected_path.exists()}")
+            print(f"âŒ [DEBUG 404] Frontend requested: {request.url.path}")
+            print(f"ðŸ” [DEBUG 404] Backend looked for file at: {expected_path.resolve()}")
+            print(f"ðŸ“‚ [DEBUG 404] Does this file exist? {expected_path.exists()}")
         return response
 
 
@@ -239,6 +244,35 @@ class FileDeletePayload(BaseModel):
     rel_path: str
 
 
+class CropMaskPayload(BaseModel):
+    points: list[list[float]]
+
+
+class ProfilePayload(BaseModel):
+    dataset_id: str
+    points: list[list[float]]
+    samples: int = 120
+    corridor_width_m: float = 1.0
+
+
+class VolumePayload(BaseModel):
+    dataset_id: str
+    points: list[list[float]] = []
+    circle_center: list[float] = []
+    circle_radius_m: float = 0.0
+    base_elevation: float | None = None
+
+
+class CompareVolumePayload(BaseModel):
+    dataset_ids: list[str] = []
+
+
+class DatasetMetaPayload(BaseModel):
+    dataset_id: str
+    month: str = ""
+    dataset_type: str = ""
+
+
 def _safe_pointcloud_basename(filename: str) -> str:
     """Reject path traversal; only allow simple .las / .laz names."""
     base = os.path.basename(filename.strip())
@@ -273,9 +307,52 @@ def _safe_dataset_upload_basename(filename: str) -> str:
     if "/" in base or "\\" in base or ".." in base:
         raise HTTPException(status_code=400, detail="Invalid filename")
     suffix = Path(base).suffix.lower()
-    if suffix not in (".tif", ".tiff", ".las", ".laz"):
-        raise HTTPException(status_code=400, detail="Only .tif/.tiff/.las/.laz files are supported")
+    if suffix not in (".tif", ".tiff", ".las", ".laz", ".csv"):
+        raise HTTPException(status_code=400, detail="Only .tif/.tiff/.las/.laz/.csv files are supported")
     return base
+
+
+def _infer_dataset_type(name: str) -> str:
+    lowered = name.lower()
+    suffix = Path(lowered).suffix
+    if suffix == ".csv":
+        return "csv"
+    if "dtm" in lowered:
+        return "dtm"
+    if "dsm" in lowered:
+        return "dsm"
+    if "ortho" in lowered or suffix in (".tif", ".tiff"):
+        return "ortho"
+    if suffix in (".las", ".laz"):
+        return "pointcloud"
+    return "dataset"
+
+
+def _normalize_dataset_type(value: str, fallback_name: str = "") -> str:
+    normalized = (value or "").strip().lower().replace(" ", "")
+    aliases = {
+        "orthomosaic": "ortho",
+        "ortho": "ortho",
+        "dtm": "dtm",
+        "dem": "dtm",
+        "dsm": "dsm",
+        "pointcloud": "pointcloud",
+        "las": "pointcloud",
+        "laz": "pointcloud",
+        "csv": "csv",
+    }
+    return aliases.get(normalized) or _infer_dataset_type(fallback_name)
+
+
+def _normalize_month(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    if re.fullmatch(r"\d{4}-\d{2}", raw):
+        return raw
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        return raw[:7]
+    return raw[:40]
 
 
 def _upload_session_dir(filename: str, total_chunks: int, project_id: str) -> Path:
@@ -444,24 +521,69 @@ def _run_gdal2tiles_subprocess(
     project_id: str,
     dataset_name: str,
 ) -> None:
-    """Run gdal2tiles via QGIS OSGeo4W shell with verbose logs."""
+    """Run gdal2tiles via QGIS OSGeo4W shell with an 8-bit fallback for DTM/DSM rasters."""
     in_abs = os.path.abspath(input_tif)
     out_abs = os.path.abspath(output_dir)
     os.makedirs(out_abs, exist_ok=True)
-    command = (
-        f'"{OSGEO4W_BAT}" gdal2tiles --xyz -z 1-22 -w none '
-        f'"{in_abs}" "{out_abs}"'
-    )
-    print(f"🚀 Starting GDAL processing for {dataset_name} in project {project_id}...")
-    print(f"🧱 GDAL command: {command}")
-    result = subprocess.run(command, capture_output=True, text=True, shell=True)
+
+    def run_osgeo(command_body: str) -> subprocess.CompletedProcess[str]:
+        command = f'call "{OSGEO4W_BAT}" {command_body}'
+        print(f"GDAL command: {command}")
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            shell=True,
+            executable=os.environ.get("COMSPEC", "cmd.exe"),
+        )
+
+    def has_usable_tiles() -> bool:
+        png_count = sum(1 for _ in Path(out_abs).rglob("*.png"))
+        has_zoom_dirs = any(child.is_dir() and child.name.isdigit() for child in Path(out_abs).iterdir())
+        if has_zoom_dirs and png_count > 0:
+            print(f"GDAL Success! Tiles generated at {out_abs}")
+            print(f"Tile stats: zoom_dirs={has_zoom_dirs}, png_count={png_count}")
+            return True
+        print(f"GDAL output invalid for {dataset_name}: no usable XYZ tiles found")
+        print(f"Output folder checked: {out_abs}")
+        print(f"Tile stats: zoom_dirs={has_zoom_dirs}, png_count={png_count}")
+        return False
+
+    print(f"Starting GDAL processing for {dataset_name} in project {project_id}...")
+    result = run_osgeo(f'gdal2tiles --xyz -z 1-22 -w none "{in_abs}" "{out_abs}"')
     if result.returncode == 0:
-        print(f"✅ GDAL Success! Tiles generated at {out_abs}")
-        return
-    print(f"❌ GDAL FAILED with Error Code: {result.returncode}")
-    print(f"🛑 ERROR LOG:\n{result.stderr}")
-    print(f"📄 GDAL OUTPUT LOG:\n{result.stdout}")
+        if has_usable_tiles():
+            return
+        raise RuntimeError("gdal2tiles completed but produced no usable XYZ tiles.")
+
     msg = (result.stderr or result.stdout or "").strip()
+    if "convert this file to 8-bit" in msg.lower():
+        print("GDAL requested 8-bit input. Creating scaled visual VRT for tile generation only.")
+        vrt_path = Path(out_abs).parent / f"{Path(out_abs).name}_visual_byte.vrt"
+        translate = run_osgeo(f'gdal_translate -of VRT -ot Byte -scale "{in_abs}" "{vrt_path}"')
+        if translate.returncode != 0:
+            translate_msg = (translate.stderr or translate.stdout or "").strip()
+            raise RuntimeError(translate_msg or f"gdal_translate failed for {dataset_name} ({project_id})")
+
+        out_path = Path(out_abs).resolve()
+        local_root = Path(LOCAL_DATA_PATH).resolve()
+        if out_path.is_relative_to(local_root) and out_path.is_dir():
+            shutil.rmtree(out_path)
+            out_path.mkdir(parents=True, exist_ok=True)
+
+        retry = run_osgeo(f'gdal2tiles --xyz -z 1-22 -w none "{vrt_path}" "{out_abs}"')
+        try:
+            vrt_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if retry.returncode == 0 and has_usable_tiles():
+            return
+        retry_msg = (retry.stderr or retry.stdout or "").strip()
+        raise RuntimeError(retry_msg or f"gdal2tiles failed after 8-bit scaling for {dataset_name} ({project_id})")
+
+    print(f"GDAL FAILED with Error Code: {result.returncode}")
+    print(f"ERROR LOG:\n{result.stderr}")
+    print(f"GDAL OUTPUT LOG:\n{result.stdout}")
     raise RuntimeError(msg or f"gdal2tiles failed for {dataset_name} ({project_id})")
 
 
@@ -489,15 +611,22 @@ async def process_dataset_background(
     tile_folder: str,
 ) -> None:
     tiles_dir = str(Path(tile_output_dir).resolve())
+    existing_status = _read_dataset_status(project_id, dataset_id) or {}
+    common_status = {
+        "dataset_id": dataset_id,
+        "dataset_name": file_name or Path(input_tif).name,
+        "tile_folder": tile_folder,
+        "dataset_type": existing_status.get("dataset_type", _infer_dataset_type(file_name or Path(input_tif).name)),
+        "month": existing_status.get("month", ""),
+        "raw_rel_path": existing_status.get("raw_rel_path", ""),
+    }
     _write_dataset_status(
         project_id,
         dataset_id,
         {
+            **common_status,
             "status": "Generating XYZ tiles",
             "updated_at": _now_iso(),
-            "dataset_id": dataset_id,
-            "dataset_name": file_name or Path(input_tif).name,
-            "tile_folder": tile_folder,
         },
     )
     err_path = _dataset_dir(project_id, dataset_id) / ".conversion_error.txt"
@@ -526,11 +655,9 @@ async def process_dataset_background(
             project_id,
             dataset_id,
             {
+                **common_status,
                 "status": "Web-Ready",
                 "updated_at": _now_iso(),
-                "dataset_id": dataset_id,
-                "dataset_name": file_name or Path(input_tif).name,
-                "tile_folder": tile_folder,
                 "tiles_rel_path": tiles_rel,
             },
         )
@@ -544,12 +671,10 @@ async def process_dataset_background(
             project_id,
             dataset_id,
             {
+                **common_status,
                 "status": "Failed",
                 "error": msg[:8000],
                 "updated_at": _now_iso(),
-                "dataset_id": dataset_id,
-                "dataset_name": file_name or Path(input_tif).name,
-                "tile_folder": tile_folder,
             },
         )
         _upsert_processing_job(
@@ -628,6 +753,23 @@ def get_project_dirs(project_id: str) -> tuple[Path, Path]:
     return raw_dir, processed_dir
 
 
+def _dataset_type_folder(dataset_type: str) -> str:
+    normalized = _normalize_dataset_type(dataset_type, "")
+    if normalized in {"ortho", "dtm", "dsm", "pointcloud", "csv"}:
+        return normalized
+    return "other"
+
+
+def get_project_dataset_type_dirs(project_id: str, dataset_type: str) -> tuple[Path, Path]:
+    raw_root, processed_root = get_project_dirs(project_id)
+    folder = _dataset_type_folder(dataset_type)
+    raw_dir = raw_root / folder
+    processed_dir = processed_root / folder
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    return raw_dir, processed_dir
+
+
 def _safe_tileset_id(tileset_id: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,240}", tileset_id or ""):
         raise HTTPException(status_code=400, detail="Invalid tileset_id")
@@ -694,6 +836,29 @@ def _set_cached_project_files(project_id: str, files: list[dict[str, str]]) -> N
     _PROJECT_FILES_CACHE[project_id] = (time.time(), files)
 
 
+def _fast_tile_dir_size(tile_root: Path) -> str:
+    """Avoid walking thousands of XYZ PNG tiles just to populate a UI size label."""
+    for marker_name in ("tilemapresource.xml", "doc.kml"):
+        marker = tile_root / marker_name
+        if marker.is_file():
+            return str(max(marker.stat().st_size, 1))
+    return "1"
+
+
+def _candidate_processed_tile_dirs(processed_root: Path) -> list[Path]:
+    if not processed_root.is_dir():
+        return []
+    candidates: list[Path] = []
+    for child in sorted([p for p in processed_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
+        if _is_valid_tile_dataset(child):
+            candidates.append(child)
+            continue
+        for nested in sorted([p for p in child.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
+            if _is_valid_tile_dataset(nested):
+                candidates.append(nested)
+    return candidates
+
+
 def _write_processing_jobs(data: dict[str, list[dict[str, str]]]) -> None:
     jobs_path = _processing_jobs_file()
     jobs_path.parent.mkdir(parents=True, exist_ok=True)
@@ -732,6 +897,131 @@ def _read_dataset_status(project_id: str, dataset_id: str) -> dict[str, str] | N
     except (OSError, json.JSONDecodeError):
         return None
     return None
+
+
+def _safe_tile_folder_name(tile_folder: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9._ /-]{1,300}", tile_folder or "") or ".." in tile_folder:
+        raise HTTPException(status_code=400, detail="Invalid tile_folder")
+    return tile_folder.strip("/")
+
+
+def _ring_score(points: list[list[float]]) -> float:
+    if len(points) < 3:
+        return 0
+    score = 0.0
+    closed = points + [points[0]]
+    for idx in range(len(points)):
+        lat_a, lng_a = closed[idx]
+        lat_b, lng_b = closed[idx + 1]
+        score += lng_a * lat_b - lng_b * lat_a
+    return abs(score)
+
+
+def _normalize_crop_points(points: list[list[float]]) -> list[list[float]]:
+    normalized: list[list[float]] = []
+    for pair in points:
+        if not isinstance(pair, list) or len(pair) < 2:
+            continue
+        try:
+            lat = float(pair[0])
+            lng = float(pair[1])
+        except (TypeError, ValueError):
+            continue
+        if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+            continue
+        normalized.append([lat, lng])
+    if len(normalized) >= 2 and normalized[0] == normalized[-1]:
+        normalized.pop()
+    if len(normalized) < 3:
+        raise HTTPException(status_code=400, detail="At least 3 valid points required")
+    return normalized
+
+
+def _extract_kml_points(kml_text: str) -> list[list[float]]:
+    try:
+        root = ET.fromstring(kml_text)
+    except ET.ParseError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid KML: {exc}") from exc
+    candidates: list[list[list[float]]] = []
+    for node in root.iter():
+        if node.tag.endswith("coordinates") and node.text and node.text.strip():
+            points: list[list[float]] = []
+            for token in node.text.strip().split():
+                parts = token.split(",")
+                if len(parts) < 2:
+                    continue
+                try:
+                    lon = float(parts[0])
+                    lat = float(parts[1])
+                except ValueError:
+                    continue
+                points.append([lat, lon])
+            if len(points) >= 3:
+                try:
+                    candidates.append(_normalize_crop_points(points))
+                except HTTPException:
+                    continue
+    if not candidates:
+        raise HTTPException(status_code=400, detail="KML coordinates not found")
+    return max(candidates, key=_ring_score)
+
+
+def _save_crop_mask(project_id: str, tile_folder: str, source: str, points: list[list[float]]) -> None:
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO dataset_crop_masks (project_id, tile_folder, source, points_json, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, tile_folder)
+            DO UPDATE SET source=excluded.source, points_json=excluded.points_json, updated_at=excluded.updated_at
+            """,
+            (
+                project_id,
+                tile_folder,
+                source,
+                json.dumps(points, ensure_ascii=True),
+                _now_iso(),
+            ),
+        )
+        connection.commit()
+
+
+def _get_crop_mask(project_id: str, tile_folder: str) -> dict[str, str] | None:
+    with get_db_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT source, points_json, updated_at
+            FROM dataset_crop_masks
+            WHERE project_id = ? AND tile_folder = ?
+            """,
+            (project_id, tile_folder),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "source": str(row["source"]),
+        "points_json": str(row["points_json"]),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
+def _is_valid_tile_dataset(folder: Path) -> bool:
+    """
+    Accept either:
+    - classical gdal2tiles metadata (`tilemapresource.xml`), OR
+    - plain XYZ output where only zoom folders + PNG tiles exist.
+    """
+    if not folder.is_dir():
+        return False
+    if (folder / "tilemapresource.xml").is_file():
+        return True
+    zoom_dirs = [d for d in folder.iterdir() if d.is_dir() and d.name.isdigit()]
+    if not zoom_dirs:
+        return False
+    for zdir in zoom_dirs:
+        if any(p.is_file() and p.suffix.lower() == ".png" for p in zdir.rglob("*.png")):
+            return True
+    return False
 
 
 def _detect_epsg_from_file(file_path: Path) -> str | None:
@@ -915,65 +1205,6 @@ def pointcloud_status(
         "failed": False,
         "tileset_url": f"{base_url}/data/pointclouds/{safe_id}{pending_suffix}/tileset.json",
     }
-
-
-def get_db_connection() -> sqlite3.Connection:
-    connection = sqlite3.connect(ISSUES_DB_PATH)
-    connection.row_factory = sqlite3.Row
-    return connection
-
-
-def ensure_tables() -> None:
-    with get_db_connection() as connection:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS issues (
-                id INTEGER PRIMARY KEY,
-                lat REAL,
-                lng REAL,
-                title TEXT,
-                description TEXT,
-                status TEXT DEFAULT 'open'
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS projects (
-                id TEXT PRIMARY KEY,
-                owner_user_id INTEGER NOT NULL,
-                name TEXT NOT NULL,
-                location TEXT NOT NULL,
-                date TEXT NOT NULL,
-                status TEXT NOT NULL,
-                type TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(owner_user_id) REFERENCES users(id)
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS sessions (
-                token_hash TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                expires_at INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id)
-            )
-            """
-        )
-        connection.commit()
 
 
 @app.on_event("startup")
@@ -1461,39 +1692,82 @@ async def process_dataset(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     project_id: str = Form(...),
+    dataset_type: str = Form(""),
+    month: str = Form(""),
 ) -> ProcessDatasetOut:
     user = _require_user(request)
     safe_project_id = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
-    safe_name = _safe_tif_basename(file.filename or "")
+    safe_name = _safe_dataset_upload_basename(file.filename or "")
+    ext = Path(safe_name).suffix.lower()
+    if ext not in (".tif", ".tiff", ".csv"):
+        raise HTTPException(status_code=400, detail="Only .tif/.tiff/.csv dataset files are supported")
+    normalized_type = _normalize_dataset_type(dataset_type, safe_name)
+    normalized_month = _normalize_month(month)
 
     dataset_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(safe_name).stem).strip("-") or "dataset"
     dataset_id = _safe_dataset_id(f"{dataset_stem[:40]}-{secrets.token_hex(6)}")
     tile_output_folder = _safe_dataset_id(f"{dataset_stem[:56]}-{secrets.token_hex(4)}")
 
-    raw_dir, processed_dir = get_project_dirs(safe_project_id)
+    raw_dir, processed_dir = get_project_dataset_type_dirs(safe_project_id, normalized_type)
     meta_dir = _dataset_dir(safe_project_id, dataset_id)
     meta_dir.mkdir(parents=True, exist_ok=True)
 
-    ext = Path(safe_name).suffix.lower()
-    if ext not in (".tif", ".tiff"):
-        ext = ".tif"
-    input_tif = raw_dir / f"{tile_output_folder}{ext}"
+    input_path = raw_dir / f"{tile_output_folder}{ext}"
 
     content_length = request.headers.get("content-length")
     expected_bytes = int(content_length) if content_length and content_length.isdigit() else 0
     _ensure_disk_space_for_bytes(raw_dir, max(expected_bytes * 2, 512 * 1024 * 1024))
 
     output_tile_dir = processed_dir / tile_output_folder
-    output_tile_dir.mkdir(parents=True, exist_ok=True)
+    if ext != ".csv":
+        output_tile_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        with open(input_tif, "wb") as out_f:
+        with open(input_path, "wb") as out_f:
             shutil.copyfileobj(file.file, out_f, length=MERGE_COPY_BUFFER_BYTES)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to store dataset: {exc}") from exc
     finally:
         await file.close()
+
+    raw_rel = input_path.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+    if ext == ".csv":
+        _write_dataset_status(
+            safe_project_id,
+            dataset_id,
+            {
+                "status": "Web-Ready",
+                "updated_at": _now_iso(),
+                "dataset_id": dataset_id,
+                "dataset_name": safe_name,
+                "tile_folder": "",
+                "dataset_type": "csv",
+                "month": normalized_month,
+                "raw_rel_path": raw_rel,
+            },
+        )
+        _upsert_processing_job(
+            safe_project_id,
+            {
+                "job_id": dataset_id,
+                "kind": "dataset",
+                "file_name": safe_name,
+                "status": "Completed",
+                "updated_at": _now_iso(),
+                "result_url": f"/data/{raw_rel}",
+            },
+        )
+        _invalidate_project_files_cache(safe_project_id)
+        return ProcessDatasetOut(
+            status="success",
+            message="CSV dataset uploaded and ready for comparison.",
+            project_id=safe_project_id,
+            dataset_id=dataset_id,
+            dataset_name=safe_name,
+            cog_path="",
+            cog_tile_url_template="",
+        )
 
     _write_dataset_status(
         safe_project_id,
@@ -1504,6 +1778,9 @@ async def process_dataset(
             "dataset_id": dataset_id,
             "dataset_name": safe_name,
             "tile_folder": tile_output_folder,
+            "dataset_type": normalized_type,
+            "month": normalized_month,
+            "raw_rel_path": raw_rel,
         },
     )
     _upsert_processing_job(
@@ -1522,7 +1799,7 @@ async def process_dataset(
         process_dataset_background,
         safe_project_id,
         dataset_id,
-        str(input_tif),
+        str(input_path),
         safe_name,
         str(output_tile_dir),
         tile_output_folder,
@@ -1552,6 +1829,164 @@ async def upload_dataset(
 ) -> dict[str, str]:
     await process_dataset(request, background_tasks, file, project_id)
     return {"status": "processing"}
+
+
+@app.post("/api/datasets/{project_id}/sync")
+def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+
+    _, processed_dir = get_project_dirs(safe_project_id)
+    jobs_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "_dataset_jobs"
+    jobs_root.mkdir(parents=True, exist_ok=True)
+
+    tracked_folders: set[str] = set()
+    for job_dir in jobs_root.iterdir():
+        if not job_dir.is_dir():
+            continue
+        st = _read_dataset_status(safe_project_id, job_dir.name)
+        if not st:
+            continue
+        folder = (st.get("tile_folder") or "").strip()
+        if folder:
+            tracked_folders.add(folder)
+
+    found_new = 0
+    for item in sorted(processed_dir.iterdir(), key=lambda p: p.name.lower()):
+        if not _is_valid_tile_dataset(item):
+            continue
+        folder_name = item.name
+        if folder_name in tracked_folders:
+            continue
+
+        dataset_id = _safe_dataset_id(
+            f"manual-{re.sub(r'[^A-Za-z0-9._-]+', '-', folder_name)[:48]}-{secrets.token_hex(4)}",
+        )
+        _write_dataset_status(
+            safe_project_id,
+            dataset_id,
+            {
+                "status": "Web-Ready",
+                "updated_at": _now_iso(),
+                "dataset_id": dataset_id,
+                "dataset_name": folder_name,
+                "tile_folder": folder_name,
+                "dataset_type": _infer_dataset_type(folder_name),
+                "month": "",
+                "raw_rel_path": "",
+                "tiles_rel_path": item.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix(),
+            },
+        )
+        _upsert_processing_job(
+            safe_project_id,
+            {
+                "job_id": dataset_id,
+                "kind": "dataset",
+                "file_name": folder_name,
+                "status": "Completed",
+                "updated_at": _now_iso(),
+                "result_url": f"/data/projects/{safe_project_id}/processed/{folder_name}",
+            },
+        )
+        tracked_folders.add(folder_name)
+        found_new += 1
+
+    _invalidate_project_files_cache(safe_project_id)
+    return {
+        "status": "success",
+        "message": f"Found {found_new} manual datasets",
+        "new_count": str(found_new),
+    }
+
+
+@app.post("/api/datasets/{project_id}/open-manual-folder")
+def open_manual_dataset_folder(project_id: str, request: Request) -> dict[str, str]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    _, processed_dir = get_project_dirs(safe_project_id)
+    folder = processed_dir.resolve()
+    try:
+        if os.name == "nt":
+            os.startfile(str(folder))  # type: ignore[attr-defined]
+        elif platform.system() == "Darwin":
+            subprocess.run(["open", str(folder)], check=False)
+        else:
+            subprocess.run(["xdg-open", str(folder)], check=False)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to open folder: {exc}") from exc
+    return {
+        "status": "success",
+        "message": "Manual tiles folder opened.",
+        "folder_path": str(folder),
+    }
+
+
+@app.get("/api/datasets/{project_id}/{tile_folder:path}/crop-mask")
+def get_crop_mask(project_id: str, tile_folder: str, request: Request) -> dict[str, object]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    safe_tile_folder = _safe_tile_folder_name(tile_folder)
+    record = _get_crop_mask(safe_project_id, safe_tile_folder)
+    if not record:
+        return {"status": "none", "points": []}
+    try:
+        points = json.loads(record["points_json"])
+    except json.JSONDecodeError:
+        points = []
+    if not isinstance(points, list):
+        points = []
+    return {
+        "status": "success",
+        "source": record["source"],
+        "updated_at": record["updated_at"],
+        "points": points,
+    }
+
+
+@app.post("/api/datasets/{project_id}/{tile_folder:path}/crop-mask/kml")
+async def save_crop_mask_from_kml(
+    project_id: str,
+    tile_folder: str,
+    request: Request,
+    file: UploadFile = File(...),
+) -> dict[str, object]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    safe_tile_folder = _safe_tile_folder_name(tile_folder)
+    _, processed_dir = get_project_dirs(safe_project_id)
+    if not (processed_dir / safe_tile_folder).is_dir():
+        raise HTTPException(status_code=404, detail="Tile folder not found")
+    try:
+        raw = await file.read()
+        text = raw.decode("utf-8", errors="replace")
+    finally:
+        await file.close()
+    points = _extract_kml_points(text)
+    _save_crop_mask(safe_project_id, safe_tile_folder, "kml", points)
+    return {"status": "success", "source": "kml", "points": points}
+
+
+@app.post("/api/datasets/{project_id}/{tile_folder:path}/crop-mask/draw")
+def save_crop_mask_from_draw(
+    project_id: str,
+    tile_folder: str,
+    payload: CropMaskPayload,
+    request: Request,
+) -> dict[str, object]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    safe_tile_folder = _safe_tile_folder_name(tile_folder)
+    _, processed_dir = get_project_dirs(safe_project_id)
+    if not (processed_dir / safe_tile_folder).is_dir():
+        raise HTTPException(status_code=404, detail="Tile folder not found")
+    points = _normalize_crop_points(payload.points)
+    _save_crop_mask(safe_project_id, safe_tile_folder, "draw", points)
+    return {"status": "success", "source": "draw", "points": points}
 
 
 @app.post("/api/dataset-metadata")
@@ -1604,9 +2039,14 @@ def dataset_status(project_id: str, dataset_id: str, request: Request) -> dict[s
 
 def _resolve_dataset_tiles_dir(project_id: str, dataset_name: str) -> Path | None:
     processed_root = Path(LOCAL_DATA_PATH) / "projects" / project_id / "processed"
-    direct = processed_root / dataset_name
-    if direct.is_dir():
-        return direct
+    direct_candidates = [processed_root / dataset_name]
+    for dtype in ("ortho", "dtm", "dsm", "other"):
+        direct_candidates.append(processed_root / dtype / dataset_name)
+    for direct in direct_candidates:
+        if _is_valid_tile_dataset(direct):
+            return direct
+        if direct.is_dir():
+            return direct
 
     jobs_root = Path(LOCAL_DATA_PATH) / "projects" / project_id / "_dataset_jobs"
     if not jobs_root.is_dir():
@@ -1631,11 +2071,430 @@ def _resolve_dataset_tiles_dir(project_id: str, dataset_name: str) -> Path | Non
             continue
         name = str(loaded.get("dataset_name", "")).strip()
         tile_folder = str(loaded.get("tile_folder", "")).strip()
-        if name in target_variants and tile_folder:
-            resolved = processed_root / tile_folder
-            if resolved.is_dir():
-                return resolved
+        if name in target_variants:
+            tiles_rel_path = str(loaded.get("tiles_rel_path", "")).strip()
+            candidates: list[Path] = []
+            if tiles_rel_path:
+                candidates.append(Path(LOCAL_DATA_PATH) / tiles_rel_path)
+            if tile_folder:
+                candidates.append(processed_root / tile_folder)
+                for dtype in ("ortho", "dtm", "dsm", "other"):
+                    candidates.append(processed_root / dtype / tile_folder)
+            for resolved in candidates:
+                if _is_valid_tile_dataset(resolved):
+                    return resolved
+                if resolved.is_dir():
+                    return resolved
     return None
+
+
+def _tile_y_to_lat(y: int, z: int) -> float:
+    n = 2.0 ** z
+    rad = math.atan(math.sinh(math.pi * (1 - (2 * y) / n)))
+    return math.degrees(rad)
+
+
+def _xyz_bounds_from_tiles_dir(tiles_dir: Path) -> list[float] | None:
+    zoom_dirs = sorted(
+        [d for d in tiles_dir.iterdir() if d.is_dir() and d.name.isdigit()],
+        key=lambda p: int(p.name),
+        reverse=True,
+    )
+    if not zoom_dirs:
+        return None
+
+    for zdir in zoom_dirs:
+        z = int(zdir.name)
+        x_dirs = [d for d in zdir.iterdir() if d.is_dir() and d.name.isdigit()]
+        if not x_dirs:
+            continue
+        x_values = sorted(int(d.name) for d in x_dirs)
+        min_x = x_values[0]
+        max_x = x_values[-1]
+
+        min_y: int | None = None
+        max_y: int | None = None
+        for xdir in x_dirs:
+            for png in xdir.glob("*.png"):
+                stem = png.stem
+                if stem.isdigit():
+                    y = int(stem)
+                    min_y = y if min_y is None else min(min_y, y)
+                    max_y = y if max_y is None else max(max_y, y)
+        if min_y is None or max_y is None:
+            continue
+
+        n = 2 ** z
+        min_lon = (min_x / n) * 360.0 - 180.0
+        max_lon = ((max_x + 1) / n) * 360.0 - 180.0
+        max_lat = _tile_y_to_lat(min_y, z)
+        min_lat = _tile_y_to_lat(max_y + 1, z)
+        return [min_lon, min_lat, max_lon, max_lat]
+    return None
+
+
+def _analysis_cache_dir(project_id: str) -> Path:
+    path = Path(LOCAL_DATA_PATH) / "projects" / project_id / "_analysis_cache"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _file_fingerprint(path: Path) -> dict[str, str]:
+    st = path.stat()
+    return {
+        "path": path.resolve().as_posix(),
+        "size": str(st.st_size),
+        "mtime_ns": str(st.st_mtime_ns),
+    }
+
+
+def _cache_path(project_id: str, kind: str, payload: object) -> Path:
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    return _analysis_cache_dir(project_id) / f"{kind}-{digest[:24]}.json"
+
+
+def _read_cache(path: Path) -> dict[str, object] | None:
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def _write_cache(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+
+
+def _project_dataset_statuses(project_id: str) -> list[dict[str, str]]:
+    jobs_root = Path(LOCAL_DATA_PATH) / "projects" / project_id / "_dataset_jobs"
+    if not jobs_root.is_dir():
+        return []
+    rows: list[dict[str, str]] = []
+    for job_dir in sorted([p for p in jobs_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
+        st = _read_dataset_status(project_id, job_dir.name)
+        if not st:
+            continue
+        rows.append({**st, "dataset_id": st.get("dataset_id") or job_dir.name})
+    return rows
+
+
+def _dataset_status_by_id(project_id: str, dataset_id: str) -> dict[str, str]:
+    safe_id = _safe_dataset_id(dataset_id)
+    st = _read_dataset_status(project_id, safe_id)
+    if not st:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    st["dataset_id"] = st.get("dataset_id") or safe_id
+    return st
+
+
+def _dataset_source_path(project_id: str, dataset_id: str) -> Path:
+    st = _dataset_status_by_id(project_id, dataset_id)
+    raw_rel = (st.get("raw_rel_path") or "").strip()
+    if raw_rel:
+        path = (Path(LOCAL_DATA_PATH) / raw_rel).resolve()
+        if path.is_file():
+            return path
+    tile_folder = (st.get("tile_folder") or "").strip()
+    raw_dir, _ = get_project_dirs(project_id)
+    for ext in (".tif", ".tiff", ".csv"):
+        candidate = raw_dir / f"{tile_folder}{ext}"
+        if tile_folder and candidate.is_file():
+            return candidate.resolve()
+    raise HTTPException(status_code=404, detail="Source file not found")
+
+
+def _require_rasterio():
+    try:
+        import rasterio  # type: ignore
+        from rasterio.warp import transform as rio_transform  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=501,
+            detail="Raster analysis requires rasterio. Install rasterio in backend environment.",
+        ) from exc
+    return rasterio, rio_transform
+
+
+def _sample_raster(dataset_path: Path, lat: float, lng: float) -> float:
+    rasterio, rio_transform = _require_rasterio()
+    with rasterio.open(str(dataset_path)) as src:
+        xs, ys = rio_transform("EPSG:4326", src.crs, [lng], [lat]) if src.crs else ([lng], [lat])
+        row, col = src.index(xs[0], ys[0])
+        if row < 0 or col < 0 or row >= src.height or col >= src.width:
+            raise HTTPException(status_code=400, detail="Point is outside raster bounds")
+        value = next(src.sample([(xs[0], ys[0])], masked=True))[0]
+        if getattr(value, "mask", False):
+            raise HTTPException(status_code=404, detail="No elevation value at this point")
+        if value is None or not math.isfinite(float(value)):
+            raise HTTPException(status_code=404, detail="No elevation value at this point")
+        return float(value)
+
+
+def _interpolate_profile_points(points: list[list[float]], samples: int) -> list[dict[str, float]]:
+    clean = _normalize_crop_points(points) if len(points) >= 3 else []
+    if not clean:
+        clean = []
+        for pair in points:
+            if len(pair) >= 2:
+                clean.append([float(pair[0]), float(pair[1])])
+    if len(clean) < 2:
+        raise HTTPException(status_code=400, detail="At least 2 profile points required")
+    segment_lengths: list[float] = []
+    total = 0.0
+    for idx in range(1, len(clean)):
+        a = LLatLng(clean[idx - 1][0], clean[idx - 1][1])
+        b = LLatLng(clean[idx][0], clean[idx][1])
+        dist = a.distance_to(b)
+        segment_lengths.append(dist)
+        total += dist
+    count = max(2, min(int(samples or 120), 500))
+    targets = [total * i / (count - 1) for i in range(count)]
+    out: list[dict[str, float]] = []
+    seg_start_dist = 0.0
+    seg_idx = 0
+    for target in targets:
+        while seg_idx < len(segment_lengths) - 1 and target > seg_start_dist + segment_lengths[seg_idx]:
+            seg_start_dist += segment_lengths[seg_idx]
+            seg_idx += 1
+        seg_len = segment_lengths[seg_idx] or 1.0
+        t = (target - seg_start_dist) / seg_len
+        lat_a, lng_a = clean[seg_idx]
+        lat_b, lng_b = clean[seg_idx + 1]
+        out.append({
+            "lat": lat_a + (lat_b - lat_a) * t,
+            "lng": lng_a + (lng_b - lng_a) * t,
+            "distance_m": target,
+        })
+    return out
+
+
+def _profile_summary(values: list[dict[str, object]], corridor_width_m: float) -> dict[str, float | None]:
+    valid = [
+        {
+            "distance_m": float(row["distance_m"]),
+            "elevation": float(row["elevation"]),
+        }
+        for row in values
+        if row.get("elevation") is not None
+    ]
+    if not valid:
+        return {
+            "length_m": None,
+            "min_elevation": None,
+            "max_elevation": None,
+            "avg_elevation": None,
+            "start_elevation": None,
+            "end_elevation": None,
+            "elevation_change": None,
+            "elevation_gain": None,
+            "elevation_loss": None,
+            "volume_above_min_m3": None,
+            "corridor_width_m": max(0.1, min(float(corridor_width_m or 1.0), 1000.0)),
+        }
+
+    elevations = [row["elevation"] for row in valid]
+    min_elev = min(elevations)
+    gain = 0.0
+    loss = 0.0
+    volume_above_min = 0.0
+    width = max(0.1, min(float(corridor_width_m or 1.0), 1000.0))
+    for prev, curr in zip(valid, valid[1:]):
+        diff = curr["elevation"] - prev["elevation"]
+        if diff > 0:
+            gain += diff
+        else:
+            loss += abs(diff)
+        segment_len = max(0.0, curr["distance_m"] - prev["distance_m"])
+        avg_height_above_min = ((prev["elevation"] - min_elev) + (curr["elevation"] - min_elev)) / 2
+        volume_above_min += segment_len * width * avg_height_above_min
+
+    return {
+        "length_m": max(row["distance_m"] for row in valid),
+        "min_elevation": min_elev,
+        "max_elevation": max(elevations),
+        "avg_elevation": sum(elevations) / len(elevations),
+        "start_elevation": valid[0]["elevation"],
+        "end_elevation": valid[-1]["elevation"],
+        "elevation_change": valid[-1]["elevation"] - valid[0]["elevation"],
+        "elevation_gain": gain,
+        "elevation_loss": loss,
+        "volume_above_min_m3": volume_above_min,
+        "corridor_width_m": width,
+    }
+
+
+def _circle_points(center: list[float], radius_m: float, segments: int = 96) -> list[list[float]]:
+    if len(center) < 2:
+        raise HTTPException(status_code=400, detail="Circle center is required")
+    lat = float(center[0])
+    lng = float(center[1])
+    radius = max(0.1, float(radius_m))
+    lat_rad = math.radians(lat)
+    meters_per_deg_lat = 111320.0
+    meters_per_deg_lng = max(1.0, 111320.0 * math.cos(lat_rad))
+    points: list[list[float]] = []
+    for idx in range(max(16, segments)):
+        angle = (2 * math.pi * idx) / max(16, segments)
+        points.append([
+            lat + (math.sin(angle) * radius) / meters_per_deg_lat,
+            lng + (math.cos(angle) * radius) / meters_per_deg_lng,
+        ])
+    return points
+
+
+def _pixel_area_m2(src) -> float:
+    if src.crs and getattr(src.crs, "is_geographic", False):
+        center_lat = (src.bounds.top + src.bounds.bottom) / 2
+        meters_per_deg_lng = 111320.0 * math.cos(math.radians(center_lat))
+        return abs(src.transform.a * meters_per_deg_lng * src.transform.e * 111320.0)
+    return abs(src.transform.a * src.transform.e)
+
+
+def _volume_for_raster(path: Path, points: list[list[float]], base_elevation: float | None) -> dict[str, object]:
+    rasterio, rio_transform = _require_rasterio()
+    from rasterio.features import geometry_mask  # type: ignore
+    import numpy as np  # type: ignore
+
+    with rasterio.open(str(path)) as src:
+        arr = src.read(1, masked=True).astype("float64")
+        valid = ~np.ma.getmaskarray(arr)
+        scope = "overall"
+        if points:
+            clean = _normalize_crop_points(points)
+            lngs = [p[1] for p in clean]
+            lats = [p[0] for p in clean]
+            xs, ys = rio_transform("EPSG:4326", src.crs, lngs, lats) if src.crs else (lngs, lats)
+            geom = {"type": "Polygon", "coordinates": [[list(pair) for pair in zip(xs, ys)]]}
+            inside = geometry_mask([geom], out_shape=(src.height, src.width), transform=src.transform, invert=True)
+            valid = valid & inside
+            scope = "selection"
+        if not np.any(valid):
+            raise HTTPException(status_code=404, detail="No valid DTM cells found for volume")
+
+        values = np.asarray(arr.filled(np.nan))[valid]
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            raise HTTPException(status_code=404, detail="No valid DTM elevation values found for volume")
+
+        base = float(base_elevation) if base_elevation is not None else float(np.min(values))
+        pixel_area = _pixel_area_m2(src)
+        heights = values - base
+        fill = float(np.sum(np.where(heights > 0, heights, 0)) * pixel_area)
+        cut = float(np.sum(np.where(heights < 0, -heights, 0)) * pixel_area)
+        net = fill - cut
+        area_m2 = float(values.size * pixel_area)
+        min_elev = float(np.min(values))
+        max_elev = float(np.max(values))
+        avg_elev = float(np.mean(values))
+        bins = []
+        if max_elev > min_elev:
+            hist, edges = np.histogram(values, bins=min(12, max(3, int(math.sqrt(values.size) // 2))))
+            for idx, count in enumerate(hist):
+                low = float(edges[idx])
+                high = float(edges[idx + 1])
+                mid_height = max(((low + high) / 2) - base, 0)
+                bins.append({
+                    "label": f"{low:.2f}-{high:.2f} m",
+                    "volume": float(count * pixel_area * mid_height),
+                })
+    return {
+        "scope": scope,
+        "base_elevation": base,
+        "min_elevation": min_elev,
+        "max_elevation": max_elev,
+        "avg_elevation": avg_elev,
+        "area_m2": area_m2,
+        "fill_volume_m3": fill,
+        "cut_volume_m3": cut,
+        "net_volume_m3": net,
+        "cell_count": int(values.size),
+        "bins": bins,
+        "unit": "m3",
+    }
+
+
+class LLatLng:
+    def __init__(self, lat: float, lng: float) -> None:
+        self.lat = math.radians(lat)
+        self.lng = math.radians(lng)
+
+    def distance_to(self, other: "LLatLng") -> float:
+        dlat = other.lat - self.lat
+        dlng = other.lng - self.lng
+        a = math.sin(dlat / 2) ** 2 + math.cos(self.lat) * math.cos(other.lat) * math.sin(dlng / 2) ** 2
+        return 6371008.8 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _read_volume_csv(path: Path) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    with open(path, newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            month = str(row.get("month") or row.get("Month") or row.get("date") or "").strip()
+            label = str(row.get("label") or row.get("Label") or month or path.stem).strip()
+            def num(*keys: str) -> float:
+                for key in keys:
+                    val = row.get(key)
+                    if val not in (None, ""):
+                        try:
+                            return float(str(val).replace(",", ""))
+                        except ValueError:
+                            continue
+                return 0.0
+            rows.append({
+                "month": month,
+                "label": label,
+                "volume": num("volume", "Volume", "net", "Net"),
+                "cut": num("cut", "Cut"),
+                "fill": num("fill", "Fill"),
+                "net": num("net", "Net", "volume", "Volume"),
+                "area": num("area", "Area"),
+                "source": "csv",
+            })
+    return rows
+
+
+def _dtm_volume_between(project_id: str, prev_id: str, next_id: str) -> dict[str, object]:
+    rasterio, _ = _require_rasterio()
+    import numpy as np  # type: ignore
+    prev_path = _dataset_source_path(project_id, prev_id)
+    next_path = _dataset_source_path(project_id, next_id)
+    cache_payload = {
+        "kind": "dtm_volume",
+        "prev": _file_fingerprint(prev_path),
+        "next": _file_fingerprint(next_path),
+    }
+    cache = _cache_path(project_id, "volume", cache_payload)
+    cached = _read_cache(cache)
+    if cached:
+        return cached
+    with rasterio.open(str(prev_path)) as a, rasterio.open(str(next_path)) as b:
+        if a.width != b.width or a.height != b.height or a.transform != b.transform:
+            raise HTTPException(status_code=400, detail="DTM rasters must have matching grid for volume fallback")
+        arr_a = a.read(1, masked=True).astype("float64")
+        arr_b = b.read(1, masked=True).astype("float64")
+        diff = arr_b - arr_a
+        valid = ~diff.mask if hasattr(diff, "mask") else np.isfinite(diff)
+        pixel_area = abs(a.transform.a * a.transform.e)
+        cut = float(np.sum(np.where(diff < 0, -diff, 0)[valid]) * pixel_area)
+        fill = float(np.sum(np.where(diff > 0, diff, 0)[valid]) * pixel_area)
+        net = fill - cut
+        area = float(np.sum(valid) * pixel_area)
+    result: dict[str, object] = {
+        "month": "",
+        "label": f"{prev_id} to {next_id}",
+        "volume": net,
+        "cut": cut,
+        "fill": fill,
+        "net": net,
+        "area": area,
+        "source": "dtm",
+    }
+    _write_cache(cache, result)
+    return result
 
 
 @app.get("/api/datasets/{project_id}/{dataset_name}/bounds")
@@ -1650,27 +2509,231 @@ def get_dataset_bounds(project_id: str, dataset_name: str, request: Request) -> 
     if not tiles_dir:
         return {"bounds": None}
     xml_path = tiles_dir / "tilemapresource.xml"
-    if not xml_path.exists():
-        return {"bounds": None}
-    try:
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
-        bbox = root.find(".//BoundingBox")
-        if bbox is None:
-            for node in root.iter():
-                if node.tag.endswith("BoundingBox"):
-                    bbox = node
-                    break
-        if bbox is not None:
-            minx = bbox.get("minx")
-            miny = bbox.get("miny")
-            maxx = bbox.get("maxx")
-            maxy = bbox.get("maxy")
-            if minx and miny and maxx and maxy:
-                return {"bounds": [float(minx), float(miny), float(maxx), float(maxy)]}
-    except Exception as exc:  # noqa: BLE001
-        print(f"Error reading bounds: {exc}")
+    if xml_path.exists():
+        try:
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+            bbox = root.find(".//BoundingBox")
+            if bbox is None:
+                for node in root.iter():
+                    if node.tag.endswith("BoundingBox"):
+                        bbox = node
+                        break
+            if bbox is not None:
+                minx = bbox.get("minx")
+                miny = bbox.get("miny")
+                maxx = bbox.get("maxx")
+                maxy = bbox.get("maxy")
+                if minx and miny and maxx and maxy:
+                    return {"bounds": [float(minx), float(miny), float(maxx), float(maxy)]}
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error reading bounds XML: {exc}")
+
+    # Manual QGIS exports may not include tilemapresource.xml; derive from XYZ indices.
+    xyz_bounds = _xyz_bounds_from_tiles_dir(tiles_dir)
+    if xyz_bounds:
+        return {"bounds": xyz_bounds}
     return {"bounds": None}
+
+
+@app.post("/api/datasets/{project_id}/metadata")
+def update_dataset_metadata(project_id: str, payload: DatasetMetaPayload, request: Request) -> dict[str, str]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    dataset_id = _safe_dataset_id(payload.dataset_id)
+    st = _read_dataset_status(safe_project_id, dataset_id)
+    if not st:
+        raise HTTPException(status_code=404, detail="Dataset status not found")
+    st["month"] = _normalize_month(payload.month)
+    if payload.dataset_type.strip():
+        st["dataset_type"] = _normalize_dataset_type(payload.dataset_type, st.get("dataset_name", ""))
+    st["updated_at"] = _now_iso()
+    _write_dataset_status(safe_project_id, dataset_id, st)
+    _invalidate_project_files_cache(safe_project_id)
+    return {"status": "success"}
+
+
+@app.get("/api/analysis/{project_id}/elevation")
+def analysis_elevation(
+    project_id: str,
+    dataset_id: str,
+    lat: float,
+    lng: float,
+    request: Request,
+) -> dict[str, object]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    path = _dataset_source_path(safe_project_id, dataset_id)
+    if path.suffix.lower() not in (".tif", ".tiff"):
+        raise HTTPException(status_code=400, detail="Elevation requires a DTM/DSM TIFF source")
+    fp = _file_fingerprint(path)
+    cache_payload = {"kind": "elevation", "source": fp, "lat": round(lat, 8), "lng": round(lng, 8)}
+    cache = _cache_path(safe_project_id, "elevation", cache_payload)
+    cached = _read_cache(cache)
+    if cached:
+        return cached
+    value = _sample_raster(path, lat, lng)
+    result: dict[str, object] = {
+        "status": "success",
+        "dataset_id": dataset_id,
+        "lat": lat,
+        "lng": lng,
+        "elevation": value,
+        "unit": "m",
+        "cached": False,
+    }
+    _write_cache(cache, result)
+    return result
+
+
+@app.post("/api/analysis/{project_id}/profile")
+def analysis_profile(project_id: str, payload: ProfilePayload, request: Request) -> dict[str, object]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    path = _dataset_source_path(safe_project_id, payload.dataset_id)
+    if path.suffix.lower() not in (".tif", ".tiff"):
+        raise HTTPException(status_code=400, detail="Profile requires a DTM/DSM TIFF source")
+    samples = _interpolate_profile_points(payload.points, payload.samples)
+    fp = _file_fingerprint(path)
+    corridor_width_m = max(0.1, min(float(payload.corridor_width_m or 1.0), 1000.0))
+    cache_payload = {
+        "kind": "profile",
+        "source": fp,
+        "points": payload.points,
+        "samples": payload.samples,
+        "corridor_width_m": corridor_width_m,
+    }
+    cache = _cache_path(safe_project_id, "profile", cache_payload)
+    cached = _read_cache(cache)
+    if cached:
+        return cached
+    values = []
+    for sample in samples:
+        try:
+            elev: float | None = _sample_raster(path, sample["lat"], sample["lng"])
+        except HTTPException:
+            elev = None
+        values.append({**sample, "elevation": elev})
+    summary = _profile_summary(values, corridor_width_m)
+    result: dict[str, object] = {
+        "status": "success",
+        "dataset_id": payload.dataset_id,
+        "unit": "m",
+        "points": values,
+        **summary,
+        "cached": False,
+    }
+    _write_cache(cache, result)
+    return result
+
+
+@app.post("/api/analysis/{project_id}/volume")
+def analysis_volume(project_id: str, payload: VolumePayload, request: Request) -> dict[str, object]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    path = _dataset_source_path(safe_project_id, payload.dataset_id)
+    if path.suffix.lower() not in (".tif", ".tiff"):
+        raise HTTPException(status_code=400, detail="Volume requires a DTM/DSM TIFF source")
+    points = payload.points
+    if payload.circle_center and payload.circle_radius_m > 0:
+        points = _circle_points(payload.circle_center, payload.circle_radius_m)
+    fp = _file_fingerprint(path)
+    cache_payload = {
+        "kind": "single_dtm_volume",
+        "source": fp,
+        "points": points,
+        "base_elevation": payload.base_elevation,
+    }
+    cache = _cache_path(safe_project_id, "single-volume", cache_payload)
+    cached = _read_cache(cache)
+    if cached:
+        return cached
+    volume = _volume_for_raster(path, points, payload.base_elevation)
+    result: dict[str, object] = {
+        "status": "success",
+        "dataset_id": payload.dataset_id,
+        **volume,
+        "cached": False,
+    }
+    _write_cache(cache, result)
+    return result
+
+
+@app.get("/api/compare/{project_id}/datasets")
+def compare_datasets(project_id: str, request: Request) -> dict[str, object]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    rows = []
+    for st in _project_dataset_statuses(safe_project_id):
+        dataset_type = str(st.get("dataset_type") or _infer_dataset_type(str(st.get("dataset_name") or "")))
+        if dataset_type not in ("dtm", "dsm", "csv"):
+            continue
+        raw_rel = str(st.get("raw_rel_path") or "")
+        raw_path = Path(LOCAL_DATA_PATH) / raw_rel if raw_rel else None
+        rows.append({
+            "dataset_id": st.get("dataset_id", ""),
+            "name": st.get("dataset_name", ""),
+            "dataset_type": dataset_type,
+            "month": st.get("month", ""),
+            "status": st.get("status", ""),
+            "has_source": bool(raw_path and raw_path.is_file()),
+        })
+    return {"datasets": rows}
+
+
+@app.post("/api/compare/{project_id}/volume")
+def compare_volume(project_id: str, payload: CompareVolumePayload, request: Request) -> dict[str, object]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    selected = [_safe_dataset_id(item) for item in payload.dataset_ids if item]
+    statuses = [
+        st for st in _project_dataset_statuses(safe_project_id)
+        if not selected or str(st.get("dataset_id")) in selected
+    ]
+    statuses.sort(key=lambda st: (str(st.get("month") or ""), str(st.get("dataset_name") or "")))
+    csv_rows: list[dict[str, object]] = []
+    dtm_rows: list[dict[str, str]] = []
+    for st in statuses:
+        dtype = str(st.get("dataset_type") or _infer_dataset_type(str(st.get("dataset_name") or "")))
+        if dtype == "csv":
+            try:
+                csv_rows.extend(_read_volume_csv(_dataset_source_path(safe_project_id, str(st.get("dataset_id")))))
+            except Exception:
+                continue
+        elif dtype in ("dtm", "dsm"):
+            dtm_rows.append(st)
+    if csv_rows:
+        return {"status": "success", "source": "csv", "rows": csv_rows}
+    volume_rows: list[dict[str, object]] = []
+    for idx in range(1, len(dtm_rows)):
+        row = _dtm_volume_between(
+            safe_project_id,
+            str(dtm_rows[idx - 1].get("dataset_id")),
+            str(dtm_rows[idx].get("dataset_id")),
+        )
+        row["month"] = str(dtm_rows[idx].get("month") or row.get("month") or "")
+        row["label"] = f"{dtm_rows[idx - 1].get('month') or dtm_rows[idx - 1].get('dataset_name')} to {dtm_rows[idx].get('month') or dtm_rows[idx].get('dataset_name')}"
+        volume_rows.append(row)
+    return {"status": "success", "source": "dtm", "rows": volume_rows}
+
+
+@app.post("/api/compare/{project_id}/refresh-if-changed")
+def compare_refresh_if_changed(project_id: str, request: Request) -> dict[str, object]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    cache_dir = _analysis_cache_dir(safe_project_id)
+    removed = 0
+    for cache_file in cache_dir.glob("*.json"):
+        cache_file.unlink(missing_ok=True)
+        removed += 1
+    return {"status": "success", "removed": removed}
 
 
 @app.get("/api/jobs/{project_id}")
@@ -1714,6 +2777,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
         if isinstance(job, dict)
     }
     files: list[dict[str, str]] = []
+    listed_rel_paths: set[str] = set()
 
     raw_dir_proj, processed_root = get_project_dirs(safe_project_id)
     legacy_raw = Path(LOCAL_DATA_PATH) / "raw_uploads"
@@ -1736,8 +2800,13 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "layer_url": "",
                     "file_path": str(file_path.resolve()),
                     "rel_path": rel_path,
+                    "dataset_id": "",
+                    "dataset_type": _infer_dataset_type(display_name),
+                    "month": "",
+                    "raw_rel_path": rel_path,
                 },
             )
+            listed_rel_paths.add(rel_path)
 
     jobs_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "_dataset_jobs"
     if jobs_root.is_dir():
@@ -1746,15 +2815,40 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
             if not st:
                 continue
             tile_folder = (st.get("tile_folder") or "").strip()
+            raw_rel_path = (st.get("raw_rel_path") or "").strip()
+            display_name = str(st.get("dataset_name") or job_dir.name)
+            if str(st.get("dataset_type") or "").lower() == "csv" and raw_rel_path:
+                csv_path = Path(LOCAL_DATA_PATH) / raw_rel_path
+                if csv_path.is_file():
+                    files.append(
+                        {
+                            "name": display_name,
+                            "kind": "Analysis CSV",
+                            "type": "csv",
+                            "size_bytes": str(csv_path.stat().st_size),
+                            "status": "Web-Ready",
+                            "file_url": f"{base_url}/data/{raw_rel_path}",
+                            "layer_url": "",
+                            "file_path": str(csv_path.resolve()),
+                            "rel_path": raw_rel_path,
+                            "dataset_id": str(st.get("dataset_id") or job_dir.name),
+                            "dataset_type": "csv",
+                            "month": str(st.get("month") or ""),
+                            "raw_rel_path": raw_rel_path,
+                        },
+                    )
+                    listed_rel_paths.add(raw_rel_path)
+                continue
             if not tile_folder:
                 continue
-            tile_root = processed_root / tile_folder
-            if not tile_root.is_dir():
+            tiles_rel_path = str(st.get("tiles_rel_path") or "").strip()
+            tile_root = Path(LOCAL_DATA_PATH) / tiles_rel_path if tiles_rel_path else processed_root / tile_folder
+            if not _is_valid_tile_dataset(tile_root) and tile_folder:
+                typed_root = processed_root / _dataset_type_folder(str(st.get("dataset_type") or "")) / tile_folder
+                if _is_valid_tile_dataset(typed_root):
+                    tile_root = typed_root
+            if not _is_valid_tile_dataset(tile_root):
                 continue
-            if not any(d.is_dir() and d.name.isdigit() for d in tile_root.iterdir()):
-                continue
-            display_name = str(st.get("dataset_name") or f"{tile_folder}.tif")
-            total_bytes = sum(p.stat().st_size for p in tile_root.rglob("*") if p.is_file())
             rel_base = tile_root.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
             layer_url = f"{base_url}/data/{rel_base}/{{z}}/{{x}}/{{y}}.png"
             files.append(
@@ -1762,14 +2856,45 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "name": display_name,
                     "kind": "Web-Optimized Data",
                     "type": "cog",
-                    "size_bytes": str(total_bytes or 1),
+                    "size_bytes": _fast_tile_dir_size(tile_root),
                     "status": jobs_by_file.get(display_name, {}).get("status", "Web-Ready"),
                     "file_url": f"{base_url}/data/{rel_base}",
                     "layer_url": layer_url,
                     "file_path": str(tile_root.resolve()),
                     "rel_path": rel_base,
+                    "dataset_id": str(st.get("dataset_id") or job_dir.name),
+                    "dataset_type": str(st.get("dataset_type") or _infer_dataset_type(display_name)),
+                    "month": str(st.get("month") or ""),
+                    "raw_rel_path": str(st.get("raw_rel_path") or ""),
                 },
             )
+            listed_rel_paths.add(rel_base)
+
+    # Include manual processed folders even when not synced/tracked yet.
+    if processed_root.is_dir():
+        for tile_root in _candidate_processed_tile_dirs(processed_root):
+            rel_base = tile_root.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            if rel_base in listed_rel_paths:
+                continue
+            layer_url = f"{base_url}/data/{rel_base}/{{z}}/{{x}}/{{y}}.png"
+            files.append(
+                {
+                    "name": tile_root.name,
+                    "kind": "Web-Optimized Data",
+                    "type": "cog",
+                    "size_bytes": _fast_tile_dir_size(tile_root),
+                    "status": "Web-Ready",
+                    "file_url": f"{base_url}/data/{rel_base}",
+                    "layer_url": layer_url,
+                    "file_path": str(tile_root.resolve()),
+                    "rel_path": rel_base,
+                    "dataset_id": "",
+                    "dataset_type": _infer_dataset_type(tile_root.name),
+                    "month": "",
+                    "raw_rel_path": "",
+                },
+            )
+            listed_rel_paths.add(rel_base)
 
     dataset_root = Path(LOCAL_DATA_PATH) / "datasets" / safe_project_id
     if dataset_root.is_dir():
@@ -1789,7 +2914,6 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                 except (OSError, json.JSONDecodeError, TypeError):
                     st = {}
             display_name = str(st.get("dataset_name") or f"{ds_dir.name}.tif")
-            total_bytes = sum(p.stat().st_size for p in webtiles.rglob("*") if p.is_file())
             rel_base = webtiles.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
             layer_url = f"{base_url}/data/{rel_base}/{{z}}/{{x}}/{{y}}.png"
             files.append(
@@ -1797,14 +2921,19 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "name": display_name,
                     "kind": "Web-Optimized Data",
                     "type": "cog",
-                    "size_bytes": str(total_bytes or 1),
+                    "size_bytes": _fast_tile_dir_size(webtiles),
                     "status": jobs_by_file.get(display_name, {}).get("status", "Web-Ready"),
                     "file_url": f"{base_url}/data/{rel_base}",
                     "layer_url": layer_url,
                     "file_path": str(webtiles.resolve()),
                     "rel_path": rel_base,
+                    "dataset_id": str(st.get("dataset_id") or ds_dir.name),
+                    "dataset_type": str(st.get("dataset_type") or _infer_dataset_type(display_name)),
+                    "month": str(st.get("month") or ""),
+                    "raw_rel_path": str(st.get("raw_rel_path") or ""),
                 },
             )
+            listed_rel_paths.add(rel_base)
 
     pointcloud_root = Path(LOCAL_DATA_PATH) / "pointclouds" / safe_project_id
     if pointcloud_root.is_dir():
@@ -1822,8 +2951,13 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "layer_url": f"{base_url}/data/{rel}",
                     "file_path": str(tileset.resolve()),
                     "rel_path": rel,
+                    "dataset_id": tileset.parent.name,
+                    "dataset_type": "pointcloud",
+                    "month": "",
+                    "raw_rel_path": "",
                 },
             )
+            listed_rel_paths.add(rel)
 
     reports_dir = Path(LOCAL_DATA_PATH) / "reports" / safe_project_id
     if reports_dir.is_dir():
@@ -1842,6 +2976,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "rel_path": rel,
                 },
             )
+            listed_rel_paths.add(rel)
 
     _set_cached_project_files(safe_project_id, files)
     return {"files": files}

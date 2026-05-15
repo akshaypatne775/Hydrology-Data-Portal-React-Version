@@ -1,18 +1,81 @@
 {
   "proj_9b8098d17046469b": [
     {
-      "job_id": "Auro-Point-Cloud-Cropped-b1d1f6bfb647",
-      "kind": "pointcloud",
-      "file_name": "Auro-Point Cloud Cropped.las",
+      "job_id": "Auro_DTM_Crop-5e8c38124a26",
+      "kind": "dataset",
+      "file_name": "Auro_DTM_Crop.tif",
+      "status": "Completed",
+      "updated_at": "2026-05-03T06:46:14.532421+00:00",
+      "result_url": "/data/projects/proj_9b8098d17046469b/processed/dtm/Auro_DTM_Crop-d380aba0"
+    },
+    {
+      "job_id": "Auro_DTM_Crop-ca972a01a828",
+      "kind": "dataset",
+      "file_name": "Auro_DTM_Crop.tif",
+      "status": "Failed",
+      "error": "Usage: gdal2tiles [options] input_file [output]\n\ngdal2tiles: error: Please convert this file to 8-bit and run gdal2tiles on the result.\n\n\nTo scale pixel values you can use:\ngdal_translate -of VRT -ot Byte -scale D:\\1_Portal_Workflows_development\\Hydrology Data Portal React Version\\Project_Data\\projects\\proj_9b8098d17046469b\\raw\\dtm\\Auro_DTM_Crop-8690267b.tif temp.vrt\nthen run:\ngdal2tiles temp.vrt",
+      "updated_at": "2026-05-03T06:30:07.564796+00:00"
+    },
+    {
+      "job_id": "manual-AuroTiles-2-472ead51",
+      "kind": "dataset",
+      "file_name": "AuroTiles-2",
+      "status": "Completed",
+      "updated_at": "2026-04-30T10:04:24.682590+00:00",
+      "result_url": "/data/projects/proj_9b8098d17046469b/processed/AuroTiles-2"
+    },
+    {
+      "job_id": "manual-AuroTiles-74b0848b",
+      "kind": "dataset",
+      "file_name": "AuroTiles",
+      "status": "Completed",
+      "updated_at": "2026-04-30T10:04:24.678585+00:00",
+      "result_url": "/data/projects/proj_9b8098d17046469b/processed/AuroTiles"
+    },
+    {
+      "job_id": "AuroTrimmed-d5cae17065a4",
+      "kind": "dataset",
+      "file_name": "AuroTrimmed.tif",
       "status": "Processing",
-      "updated_at": "2026-04-30T05:42:32.202286+00:00"
+      "updated_at": "2026-04-30T10:00:21.009760+00:00"
+    },
+    {
+      "job_id": "AuroTrimmed-e197cbdaa1f5",
+      "kind": "dataset",
+      "file_name": "AuroTrimmed.tif",
+      "status": "Processing",
+      "updated_at": "2026-04-30T09:58:28.768289+00:00"
+    },
+    {
+      "job_id": "AuroTrimmed-c9da8c7135a0",
+      "kind": "dataset",
+      "file_name": "AuroTrimmed.tif",
+      "status": "Processing",
+      "updated_at": "2026-04-30T08:13:13.321847+00:00"
+    },
+    {
+      "job_id": "AuroTrimmed-578401489fa8",
+      "kind": "dataset",
+      "file_name": "AuroTrimmed.tif",
+      "status": "Failed",
+      "error": "'\"C:\\Program Files\\QGIS 3.44.8\\bin\\gdal2tiles.bat\"' is not recognized as an internal or external command,\noperable program or batch file.",
+      "updated_at": "2026-04-30T07:49:47.887919+00:00"
     },
     {
       "job_id": "AuroTrimmed-effbc6e6e46c",
       "kind": "dataset",
       "file_name": "AuroTrimmed.tif",
-      "status": "Processing",
-      "updated_at": "2026-04-30T05:36:48.665432+00:00"
+      "status": "Completed",
+      "updated_at": "2026-04-30T06:22:15.109953+00:00",
+      "result_url": "/data/projects/proj_9b8098d17046469b/processed/AuroTrimmed-d5da99c9"
+    },
+    {
+      "job_id": "Auro-Point-Cloud-Cropped-b1d1f6bfb647",
+      "kind": "pointcloud",
+      "file_name": "Auro-Point Cloud Cropped.las",
+      "status": "Completed",
+      "updated_at": "2026-04-30T05:57:16.243099+00:00",
+      "result_url": "/data/pointclouds/proj_9b8098d17046469b/Auro-Point-Cloud-Cropped-b1d1f6bfb647/tileset.json"
     }
   ]
 }

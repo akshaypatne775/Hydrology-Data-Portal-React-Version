@@ -6,14 +6,17 @@ import {
   getProjectFiles,
   getProjectJobs,
   invalidateProjectDataCache,
+  openManualDatasetFolder,
   readDatasetMetadata,
+  syncManualDatasetFolders,
+  updateDatasetMetadata,
   type ProjectFile,
   type ProjectJob,
 } from '../../services/datasetService'
 import './DatasetsPanel.css'
 
-const ALLOWED_EXTENSIONS = new Set(['las', 'laz', 'tif', 'tiff'])
-type DatasetType = 'Ortho' | 'DTM' | 'DSM' | 'Point Cloud'
+const ALLOWED_EXTENSIONS = new Set(['las', 'laz', 'tif', 'tiff', 'csv'])
+type DatasetType = 'Ortho' | 'DTM' | 'DSM' | 'Point Cloud' | 'CSV'
 type DatasetStatus = 'Raw' | 'Processing' | 'Web-Ready'
 
 type DatasetRow = {
@@ -26,6 +29,9 @@ type DatasetRow = {
   relPath?: string
   layerType?: 'cog' | 'pointcloud'
   layerUrl?: string
+  datasetId?: string
+  month?: string
+  datasetType?: string
 }
 
 type DatasetsPanelProps = {
@@ -43,6 +49,7 @@ function inferDatasetType(fileName: string): DatasetType {
   const lowered = fileName.toLowerCase()
   if (lowered.includes('dtm')) return 'DTM'
   if (lowered.includes('dsm')) return 'DSM'
+  if (lowered.endsWith('.csv')) return 'CSV'
   if (lowered.includes('ortho') || lowered.endsWith('.tif') || lowered.endsWith('.tiff')) return 'Ortho'
   return 'Point Cloud'
 }
@@ -73,7 +80,18 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
     relPath: file.rel_path,
     layerType,
     layerUrl: file.layer_url || undefined,
+    datasetId: file.dataset_id,
+    month: file.month,
+    datasetType: file.dataset_type,
   }
+}
+
+function toBackendDatasetType(type: DatasetType): string {
+  if (type === 'Ortho') return 'ortho'
+  if (type === 'DTM') return 'dtm'
+  if (type === 'DSM') return 'dsm'
+  if (type === 'CSV') return 'csv'
+  return 'pointcloud'
 }
 
 export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
@@ -84,6 +102,9 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   const [datasets, setDatasets] = useState<DatasetRow[]>([])
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [loadingRows, setLoadingRows] = useState(false)
+  const [syncingManual, setSyncingManual] = useState(false)
+  const [openingManualFolder, setOpeningManualFolder] = useState(false)
+  const [detectingEpsg, setDetectingEpsg] = useState(false)
   const [uploadForm, setUploadForm] = useState<UploadFormState>({
     name: '',
     type: 'Point Cloud',
@@ -92,6 +113,32 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   })
 
   const activeTasks = useMemo(() => tasks.filter((task) => task.projectId === projectId), [projectId, tasks])
+
+  const loadRows = useCallback(async (currentProjectId: string, cacheKey: string, cancelledRef: () => boolean) => {
+    try {
+      const [jobs, files] = await Promise.all([getProjectJobs(currentProjectId), getProjectFiles(currentProjectId)])
+      if (cancelledRef()) return
+      const fileRows = files.filter((file) => file.kind !== 'Reports').map(mapProjectFile)
+      const jobRows: DatasetRow[] = jobs.map((job: ProjectJob) => ({
+        id: `job-${job.job_id}`,
+        fileName: job.file_name,
+        type: inferDatasetType(job.file_name),
+        size: '--',
+        status: normalizeJobStatus(job.status),
+      }))
+      const mergedMap = new Map<string, DatasetRow>()
+      ;[...fileRows, ...jobRows].forEach((row) => {
+        if (!mergedMap.has(row.fileName) || row.layerUrl) mergedMap.set(row.fileName, row)
+      })
+      const mergedRows = [...mergedMap.values()]
+      setDatasets(mergedRows)
+      window.sessionStorage.setItem(cacheKey, JSON.stringify(mergedRows))
+    } catch {
+      if (!cancelledRef()) setDatasets([])
+    } finally {
+      if (!cancelledRef()) setLoadingRows(false)
+    }
+  }, [])
 
   useEffect(() => {
     if (!projectId) return
@@ -107,41 +154,16 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     } catch {
       // ignore cache parse issues
     }
-    const load = async () => {
-      try {
-        const [jobs, files] = await Promise.all([getProjectJobs(projectId), getProjectFiles(projectId)])
-        if (cancelled) return
-        const fileRows = files.filter((file) => file.kind !== 'Reports').map(mapProjectFile)
-        const jobRows: DatasetRow[] = jobs.map((job: ProjectJob) => ({
-          id: `job-${job.job_id}`,
-          fileName: job.file_name,
-          type: inferDatasetType(job.file_name),
-          size: '--',
-          status: normalizeJobStatus(job.status),
-        }))
-        const mergedMap = new Map<string, DatasetRow>()
-        ;[...fileRows, ...jobRows].forEach((row) => {
-          if (!mergedMap.has(row.fileName) || row.layerUrl) mergedMap.set(row.fileName, row)
-        })
-        const mergedRows = [...mergedMap.values()]
-        setDatasets(mergedRows)
-        window.sessionStorage.setItem(cacheKey, JSON.stringify(mergedRows))
-      } catch {
-        setDatasets([])
-      } finally {
-        if (!cancelled) setLoadingRows(false)
-      }
-    }
-    void load()
+    void loadRows(projectId, cacheKey, () => cancelled)
     const poll = window.setInterval(() => {
       invalidateProjectDataCache(projectId)
-      void load()
+      void loadRows(projectId, cacheKey, () => cancelled)
     }, 10000)
     return () => {
       cancelled = true
       window.clearInterval(poll)
     }
-  }, [projectId])
+  }, [loadRows, projectId])
 
   useEffect(() => {
     if (!projectId) return
@@ -167,23 +189,13 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       if (!projectId) return
       const ext = file.name.split('.').pop()?.toLowerCase() || ''
       if (!ALLOWED_EXTENSIONS.has(ext)) return
-      const form = new FormData()
-      form.append('project_id', projectId)
-      form.append('file', file)
-      let epsg = ''
-      try {
-        const meta = await readDatasetMetadata(form)
-        epsg = meta.epsg || ''
-      } catch {
-        epsg = ''
-      }
       const defaultName = file.name.replace(/\.[^.]+$/, '')
       setSelectedFile(file)
       setUploadForm({
         name: defaultName,
         type: inferDatasetType(file.name),
         date: new Date().toISOString().slice(0, 10),
-        epsg,
+        epsg: '',
       })
     },
     [projectId],
@@ -205,14 +217,17 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       type: selectedFile.type,
       lastModified: selectedFile.lastModified,
     })
-    if (ext.toLowerCase() === 'tif' || ext.toLowerCase() === 'tiff') {
-      await startDatasetUpload(renamed, projectId)
+    if (['tif', 'tiff', 'csv'].includes(ext.toLowerCase())) {
+      await startDatasetUpload(renamed, projectId, {
+        datasetType: toBackendDatasetType(uploadForm.type),
+        month: uploadForm.date.slice(0, 7),
+      })
     } else {
       await startPointCloudUpload(renamed, projectId)
     }
     invalidateProjectDataCache(projectId)
     setSelectedFile(null)
-  }, [projectId, selectedFile, startDatasetUpload, startPointCloudUpload, uploadForm.name])
+  }, [projectId, selectedFile, startDatasetUpload, startPointCloudUpload, uploadForm.date, uploadForm.name, uploadForm.type])
 
   const getActionLabel = useCallback((row: DatasetRow) => {
     if (row.layerType === 'cog') return 'Show Ortho on Map'
@@ -220,12 +235,78 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     return 'Delete'
   }, [])
 
+  const onSyncManual = useCallback(async () => {
+    if (!projectId || syncingManual) return
+    setSyncingManual(true)
+    try {
+      const res = await syncManualDatasetFolders(projectId)
+      window.alert(res.message || `Found ${res.new_count} manual datasets`)
+      const cacheKey = `datasets:rows:${projectId}`
+      setLoadingRows(true)
+      await loadRows(projectId, cacheKey, () => false)
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : 'Manual sync failed')
+    } finally {
+      setSyncingManual(false)
+    }
+  }, [loadRows, projectId, syncingManual])
+
+  const onOpenManualFolder = useCallback(async () => {
+    if (!projectId || openingManualFolder) return
+    setOpeningManualFolder(true)
+    try {
+      const res = await openManualDatasetFolder(projectId)
+      window.alert(res.message)
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : 'Cannot open manual folder')
+    } finally {
+      setOpeningManualFolder(false)
+    }
+  }, [openingManualFolder, projectId])
+
+  const onDetectEpsg = useCallback(async () => {
+    if (!projectId || !selectedFile || detectingEpsg) return
+    setDetectingEpsg(true)
+    try {
+      const form = new FormData()
+      form.append('project_id', projectId)
+      form.append('file', selectedFile)
+      const meta = await readDatasetMetadata(form)
+      setUploadForm((s) => ({ ...s, epsg: meta.epsg || '' }))
+      if (!meta.epsg) {
+        window.alert('EPSG auto detect failed. Please enter it manually if known.')
+      }
+    } catch {
+      window.alert('EPSG detect failed. Please enter manually.')
+    } finally {
+      setDetectingEpsg(false)
+    }
+  }, [detectingEpsg, projectId, selectedFile])
+
   return (
     <section className="dsp-root">
       <header className="dsp-head">
         <div>
           <h3>Dataset Management</h3>
           <p>Upload only from this panel with metadata and automatic EPSG detection.</p>
+        </div>
+        <div className="dsp-head__actions">
+          <button
+            type="button"
+            className="dsp-action dsp-action--sync"
+            onClick={() => void onOpenManualFolder()}
+            disabled={!projectId || openingManualFolder}
+          >
+            {openingManualFolder ? 'Opening...' : '➕ Add Manually'}
+          </button>
+          <button
+            type="button"
+            className="dsp-action dsp-action--sync"
+            onClick={() => void onSyncManual()}
+            disabled={!projectId || syncingManual}
+          >
+            {syncingManual ? 'Syncing...' : '🔄 Sync Manual Folders'}
+          </button>
         </div>
       </header>
 
@@ -254,14 +335,14 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         <input
           ref={fileInputRef}
           type="file"
-          accept=".las,.laz,.tif,.tiff"
+          accept=".las,.laz,.tif,.tiff,.csv"
           className="gv-file-input"
           onChange={(event) => {
             const file = event.target.files?.[0]
             if (file) void prepareFile(file)
           }}
         />
-        <p className="dsp-dropzone__title">Drop or Select .las, .laz, .tif files</p>
+        <p className="dsp-dropzone__title">Drop or Select .las, .laz, .tif, .csv files</p>
         <p className="dsp-dropzone__meta">After select, fill details and start upload</p>
       </div>
 
@@ -283,6 +364,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
               <option value="Ortho">Ortho</option>
               <option value="DTM">DTM</option>
               <option value="DSM">DSM</option>
+              <option value="CSV">CSV</option>
               <option value="Point Cloud">Point Cloud</option>
             </select>
           </label>
@@ -302,6 +384,14 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
               placeholder="EPSG:32644"
             />
           </label>
+          <button
+            type="button"
+            className="dsp-action"
+            onClick={() => void onDetectEpsg()}
+            disabled={!projectId || !selectedFile || detectingEpsg}
+          >
+            {detectingEpsg ? 'Detecting EPSG...' : 'Auto Detect EPSG'}
+          </button>
           <button type="button" className="dsp-action" onClick={() => void submitUpload()}>
             Start Upload
           </button>
@@ -327,6 +417,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
               <th>File Name</th>
               <th>Type</th>
               <th>Size</th>
+              <th>Month</th>
               <th>Status</th>
               <th>Action</th>
             </tr>
@@ -334,7 +425,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
           <tbody>
             {loadingRows && datasets.length === 0 ? (
               <tr>
-                <td colSpan={5}>Loading datasets...</td>
+                <td colSpan={6}>Loading datasets...</td>
               </tr>
             ) : null}
             {datasets.map((row) => (
@@ -342,6 +433,31 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                 <td>{row.fileName}</td>
                 <td>{row.type}</td>
                 <td>{row.size}</td>
+                <td>
+                  {row.datasetId ? (
+                    <input
+                      className="dsp-month-input"
+                      type="month"
+                      value={row.month || ''}
+                      onChange={async (event) => {
+                        if (!projectId || !row.datasetId) return
+                        const nextMonth = event.target.value
+                        setDatasets((prev) => prev.map((item) => item.id === row.id ? { ...item, month: nextMonth } : item))
+                        try {
+                          await updateDatasetMetadata(projectId, {
+                            dataset_id: row.datasetId,
+                            month: nextMonth,
+                            dataset_type: row.datasetType || toBackendDatasetType(row.type),
+                          })
+                        } catch {
+                          // keep local UI usable; poll refresh will restore server value if needed
+                        }
+                      }}
+                    />
+                  ) : (
+                    '--'
+                  )}
+                </td>
                 <td>
                   <span className={row.status === 'Web-Ready' ? 'dsp-badge dsp-badge--ready' : 'dsp-badge dsp-badge--processing'}>
                     {row.status}
@@ -360,6 +476,9 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                           name: row.fileName,
                           layerType: row.layerType,
                           url: row.layerUrl,
+                          datasetId: row.datasetId,
+                          datasetType: row.datasetType || toBackendDatasetType(row.type),
+                          month: row.month,
                         })
                         setActiveId(row.layerType === 'cog' ? 'map' : 'globe')
                       }}

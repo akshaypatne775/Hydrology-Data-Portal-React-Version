@@ -7,6 +7,19 @@
   min-height: 0;
 }
 
+.dsp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.dsp-head__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
 .dsp-head h3 {
   margin: 0;
   font-size: 1.02rem;
@@ -131,6 +144,16 @@
   color: #0f172a;
 }
 
+.dsp-month-input {
+  width: 8.5rem;
+  max-width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 0.35rem 0.45rem;
+  font: inherit;
+  font-size: 0.75rem;
+}
+
 .dsp-badge {
   display: inline-flex;
   align-items: center;
@@ -167,6 +190,13 @@
   font-size: 0.68rem;
   font-weight: 700;
   cursor: pointer;
+}
+
+.dsp-action--sync {
+  border-color: #0e3e49;
+  color: #0e3e49;
+  background: #f8fbfc;
+  white-space: nowrap;
 }
 
 .dsp-state {
