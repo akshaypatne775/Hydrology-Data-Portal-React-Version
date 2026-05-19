@@ -82,8 +82,9 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     shareCopied,
     setShareCopied,
   } = useWorkspaceContext()
-  const { projects, loading: projectsLoading, error: projectsError, addProject } = useProjects()
+  const { projects, loading: projectsLoading, error: projectsError, addProject, renameProject } = useProjects()
   const [createProjectError, setCreateProjectError] = useState<string | null>(null)
+  const [renamingProject, setRenamingProject] = useState(false)
   const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetric[]>([
     { label: 'Projects', value: '0', meta: 'Available workspaces', icon: 'fa-solid fa-folder-tree' },
     { label: 'Datasets', value: '0', meta: 'In selected project', icon: 'fa-solid fa-database' },
@@ -198,6 +199,21 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     onLogout()
   }
 
+  const handleRenameProject = useCallback(async () => {
+    if (!selectedProject) return
+    const name = window.prompt('Project name', selectedProject.name)
+    if (!name?.trim() || name.trim() === selectedProject.name) return
+    setRenamingProject(true)
+    try {
+      const updated = await renameProject(selectedProject.id, name.trim())
+      setSelectedProject(updated)
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Project rename failed')
+    } finally {
+      setRenamingProject(false)
+    }
+  }, [renameProject, selectedProject, setSelectedProject])
+
   const createProjectForm = useMemo(
     () => (
       <div className="ds-project-modal" role="dialog" aria-label="Create project">
@@ -310,6 +326,17 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
             <h1 className="ds-topbar__name">
               {selectedProject ? selectedProject.name : 'Select Project'}
             </h1>
+            {selectedProject ? (
+              <button
+                type="button"
+                className="ds-topbar__edit"
+                onClick={() => void handleRenameProject()}
+                disabled={renamingProject}
+                title="Edit project name"
+              >
+                <i className="fa-solid fa-pen" aria-hidden />
+              </button>
+            ) : null}
           </div>
 
           <div className="ds-topbar__actions">

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   createProject,
   listProjects,
+  updateProjectName,
   type CreateProjectPayload,
   type Project,
 } from '../services/projectService'
@@ -35,5 +36,11 @@ export function useProjects() {
     return created
   }, [])
 
-  return { projects, loading, error, refresh, addProject }
+  const renameProject = useCallback(async (projectId: string, name: string) => {
+    const updated = await updateProjectName(projectId, name)
+    setProjects((prev) => prev.map((project) => (project.id === projectId ? updated : project)))
+    return updated
+  }, [])
+
+  return { projects, loading, error, refresh, addProject, renameProject }
 }

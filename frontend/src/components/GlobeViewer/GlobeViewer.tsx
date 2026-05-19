@@ -5,6 +5,7 @@ import { API_BASE } from '../../lib/apiBase'
 import { useUploadContext } from '../../context/UploadContext'
 import { useWorkspaceContext } from '../../context/WorkspaceContext'
 import { getPointCloudStatus } from '../../services/pointCloudService'
+import { getProjectFiles, type ProjectFile } from '../../services/datasetService'
 import './GlobeViewer.css'
 import {
   readUploadedTilesets,
@@ -36,6 +37,15 @@ type ModelTilesetEntry = {
   latitude: number
   longitude: number
   sourceHeight: number
+}
+
+type ViewerLayerKind = 'model' | 'pointcloud'
+
+type ViewerDataOption = {
+  id: string
+  name: string
+  kind: ViewerLayerKind
+  url: string
 }
 
 const TILESET_MAX_WAIT_MS = 2 * 60 * 60 * 1000
@@ -134,6 +144,27 @@ function buildPointCloudStyle(pointSize: number, colorMode: ColorMode): Cesium.C
   })
 }
 
+function projectFileToViewerOption(file: ProjectFile): ViewerDataOption | null {
+  if (!file.layer_url) return null
+  if (file.type === '3DModel') {
+    return {
+      id: `model:${file.dataset_id || file.rel_path}`,
+      name: file.name,
+      kind: 'model',
+      url: file.layer_url,
+    }
+  }
+  if (file.type === 'pointcloud') {
+    return {
+      id: `pointcloud:${file.dataset_id || file.rel_path}`,
+      name: file.name,
+      kind: 'pointcloud',
+      url: file.layer_url,
+    }
+  }
+  return null
+}
+
 type GlobeViewerProps = {
   projectId: string
 }
@@ -155,7 +186,9 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
   const [viewerError, setViewerError] = useState<string | null>(null)
   const [pipelineNotice, setPipelineNotice] = useState<string | null>(null)
   const [uploadedTilesets, setUploadedTilesets] = useState<UploadedTileset[]>([])
-  const [selectedTilesetUrl, setSelectedTilesetUrl] = useState('')
+  const [viewerDataOptions, setViewerDataOptions] = useState<ViewerDataOption[]>([])
+  const [selectedViewerDataId, setSelectedViewerDataId] = useState('')
+  const [loadedLayerKind, setLoadedLayerKind] = useState<ViewerLayerKind>('pointcloud')
   const [cameraViews, setCameraViews] = useState<CameraView[]>([])
   const [selectedCameraViewId, setSelectedCameraViewId] = useState('')
   const [position, setPosition] = useState<GlobePosition>({
@@ -185,7 +218,15 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     [activeLayers, projectId],
   )
 
-  const activeControlMode = activeModelLayers.length > 0 ? 'model' : 'pointcloud'
+  const activeControlMode: ViewerLayerKind = activeModelLayers.length > 0 || loadedLayerKind === 'model' ? 'model' : 'pointcloud'
+  const selectedViewerData = useMemo(
+    () => viewerDataOptions.find((item) => item.id === selectedViewerDataId) ?? null,
+    [selectedViewerDataId, viewerDataOptions],
+  )
+  const selectedCameraView = useMemo(
+    () => cameraViews.find((view) => view.id === selectedCameraViewId) ?? null,
+    [cameraViews, selectedCameraViewId],
+  )
 
   const applyImageryMode = useCallback((mode: ImageryMode) => {
     const viewer = viewerRef.current
@@ -219,33 +260,36 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     modelTilesetsRef.current.values().next().value as ModelTilesetEntry | undefined
   ), [])
 
-  const flyToModelPreset = useCallback((preset: 'home' | 'top' | 'oblique' | 'side') => {
+  const getPrimaryCameraTarget = useCallback((): Cesium.Cesium3DTileset | null => {
+    const model = getPrimaryModelEntry()
+    if (model) return model.tileset
+    return pointCloudRef.current
+  }, [getPrimaryModelEntry])
+
+  const flyToPreset = useCallback((preset: 'home' | 'top' | 'front' | 'back' | 'left' | 'right') => {
     const viewer = viewerRef.current
-    const entry = getPrimaryModelEntry()
-    if (!viewer || !entry) return
-    const sphere = entry.tileset.boundingSphere
+    const target = getPrimaryCameraTarget()
+    if (!viewer || !target) return
+    const sphere = target.boundingSphere
     if (preset === 'home') {
-      void viewer.zoomTo(entry.tileset)
+      void viewer.zoomTo(target)
       return
     }
-    const range = Math.max(sphere.radius * (preset === 'top' ? 2.4 : 2.1), 300)
-    const heading =
-      preset === 'side'
-        ? Cesium.Math.toRadians(90)
-        : preset === 'oblique'
-          ? Cesium.Math.toRadians(35)
-          : 0
-    const pitch =
-      preset === 'top'
-        ? Cesium.Math.toRadians(-89)
-        : preset === 'side'
-          ? Cesium.Math.toRadians(-20)
-          : Cesium.Math.toRadians(-35)
+    const headingByPreset = {
+      top: 0,
+      front: 0,
+      back: 180,
+      left: 270,
+      right: 90,
+    } satisfies Record<Exclude<typeof preset, 'home'>, number>
+    const heading = Cesium.Math.toRadians(headingByPreset[preset])
+    const pitch = Cesium.Math.toRadians(preset === 'top' ? -89 : -28)
+    const range = Math.max(sphere.radius * (preset === 'top' ? 2.5 : 2.0), 300)
     viewer.camera.flyToBoundingSphere(sphere, {
       duration: 1.2,
       offset: new Cesium.HeadingPitchRange(heading, pitch, range),
     })
-  }, [getPrimaryModelEntry])
+  }, [getPrimaryCameraTarget])
 
   const flyToCameraView = useCallback((view: CameraView) => {
     const viewer = viewerRef.current
@@ -319,6 +363,7 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       viewer.scene.primitives.add(tileset)
       pointCloudRef.current = tileset
       await viewer.zoomTo(tileset)
+      setLoadedLayerKind('pointcloud')
       setViewerError(null)
       setPipelineNotice(null)
     } catch (error) {
@@ -432,6 +477,7 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       entry.tileset = addedTileset
       modelTilesetsRef.current.set(layer.id, entry)
       await viewer.zoomTo(entry.tileset)
+      setLoadedLayerKind('model')
       setViewerError(null)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load 3D model tileset'
@@ -439,6 +485,33 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       console.error('Error loading 3D Tileset:', error)
     }
   }, [setModelOffset])
+
+  const clearLoadedModels = useCallback(() => {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    for (const entry of modelTilesetsRef.current.values()) {
+      viewer.scene.primitives.remove(entry.tileset)
+    }
+    modelTilesetsRef.current.clear()
+  }, [])
+
+  const loadViewerDataOption = useCallback((option: ViewerDataOption) => {
+    if (option.kind === 'pointcloud') {
+      clearLoadedModels()
+      void loadPointCloudWhenReady(option.url)
+      return
+    }
+    if (pointCloudRef.current && viewerRef.current) {
+      viewerRef.current.scene.primitives.remove(pointCloudRef.current)
+      pointCloudRef.current = null
+    }
+    clearLoadedModels()
+    void load3DModel({
+      id: option.id,
+      name: option.name,
+      url: option.url,
+    })
+  }, [clearLoadedModels, load3DModel, loadPointCloudWhenReady])
 
   // Example TiTiler COG XYZ layer (reference):
   // const cogLayer = new Cesium.UrlTemplateImageryProvider({
@@ -448,7 +521,6 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
   useEffect(() => {
     const stored = readUploadedTilesets(projectId)
     setUploadedTilesets(stored)
-    setSelectedTilesetUrl(stored[0]?.url ?? '')
     setViewerError(null)
     setPipelineNotice(null)
 
@@ -466,7 +538,6 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
             writeUploadedTilesets(projectId, next)
             return next
           })
-          setSelectedTilesetUrl((curr) => curr || readyUrl)
         }
       } catch {
         // Keep UI usable even if restore check fails.
@@ -474,6 +545,64 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     }
 
     void restoreSavedTileset()
+    return () => {
+      cancelled = true
+    }
+  }, [projectId])
+
+  useEffect(() => {
+    let cancelled = false
+    const loadViewerData = async () => {
+      try {
+        const files = await getProjectFiles(projectId)
+        if (cancelled) return
+        const fileOptions = files
+          .map(projectFileToViewerOption)
+          .filter((item): item is ViewerDataOption => Boolean(item))
+        const storedPointClouds = uploadedTilesets.map((item) => ({
+          id: `stored-pointcloud:${item.url}`,
+          name: item.label,
+          kind: 'pointcloud' as const,
+          url: item.url,
+        }))
+        const activeOptions = activeLayers
+          .filter((layer) => layer.projectId === projectId && (layer.layerType === '3DModel' || layer.layerType === 'pointcloud') && layer.url)
+          .map((layer) => ({
+            id: `active:${layer.id}`,
+            name: layer.name,
+            kind: layer.layerType === '3DModel' ? 'model' as const : 'pointcloud' as const,
+            url: layer.url,
+          }))
+        const merged = [...activeOptions, ...fileOptions, ...storedPointClouds].filter(
+          (item, index, arr) => arr.findIndex((candidate) => candidate.url === item.url) === index,
+        )
+        setViewerDataOptions(merged)
+        setSelectedViewerDataId((current) => (
+          merged.some((item) => item.id === current) ? current : merged[0]?.id || ''
+        ))
+      } catch {
+        if (!cancelled) setViewerDataOptions([])
+      }
+    }
+    void loadViewerData()
+    return () => {
+      cancelled = true
+    }
+  }, [activeLayers, projectId, uploadedTilesets])
+
+  useEffect(() => {
+    let cancelled = false
+    const loadViews = async () => {
+      try {
+        const views = await getCameraViews(projectId)
+        if (cancelled) return
+        setCameraViews(views)
+        setSelectedCameraViewId((current) => current || views[0]?.id || '')
+      } catch {
+        if (!cancelled) setCameraViews([])
+      }
+    }
+    void loadViews()
     return () => {
       cancelled = true
     }
@@ -497,13 +626,11 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       writeUploadedTilesets(projectId, merged)
       return merged
     })
-    setSelectedTilesetUrl((curr) => curr || completed[0]!.url)
   }, [projectId, tasks])
 
   useEffect(() => {
     if (!viewerReady) return
     if (activePointCloudLayer?.url) {
-      setSelectedTilesetUrl(activePointCloudLayer.url)
       void loadPointCloudWhenReady(activePointCloudLayer.url)
     }
   }, [activePointCloudLayer, loadPointCloudWhenReady, viewerReady])
@@ -682,6 +809,35 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
           {activeControlMode === 'model' ? '3D Model Controls' : 'Point Cloud Controls'}
         </h3>
 
+        <label className="gv-field" htmlFor="gv-data-list">
+          <span>3D Data</span>
+          <select
+            id="gv-data-list"
+            value={selectedViewerDataId}
+            onChange={(event) => setSelectedViewerDataId(event.target.value)}
+          >
+            {viewerDataOptions.length > 0 ? (
+              viewerDataOptions.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.kind === 'model' ? 'Model' : 'Point Cloud'} - {item.name}
+                </option>
+              ))
+            ) : (
+              <option value="">No 3D data found</option>
+            )}
+          </select>
+        </label>
+        <button
+          type="button"
+          className="gv-action"
+          disabled={!selectedViewerData}
+          onClick={() => {
+            if (selectedViewerData) loadViewerDataOption(selectedViewerData)
+          }}
+        >
+          Load Selected Data
+        </button>
+
         {activeControlMode === 'model' ? (
           <>
             <label className="gv-field" htmlFor="gv-imagery-mode">
@@ -729,38 +885,7 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
           </>
         ) : (
           <>
-            {uploadedTilesets.length > 0 ? (
-              <>
-                <label className="gv-field" htmlFor="gv-pointcloud-list">
-                  <span>Point Cloud</span>
-                  <select
-                    id="gv-pointcloud-list"
-                    value={selectedTilesetUrl}
-                    onChange={(event) => setSelectedTilesetUrl(event.target.value)}
-                    aria-label="Uploaded point cloud list"
-                  >
-                    {uploadedTilesets.map((item) => (
-                      <option key={item.url} value={item.url}>
-                        {item.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button
-                  type="button"
-                  className="gv-action"
-                  onClick={() => {
-                    if (selectedTilesetUrl) {
-                      void loadPointCloudWhenReady(selectedTilesetUrl)
-                    }
-                  }}
-                >
-                  Show Point Cloud
-                </button>
-              </>
-            ) : (
-              <p className="gv-panel__hint">Upload LAS/LAZ files from the Datasets panel.</p>
-            )}
+            <p className="gv-panel__hint">Choose a point cloud from the 3D Data list above.</p>
 
             <label className="gv-field" htmlFor="gv-point-size">
               <span>Point Size</span>
@@ -789,6 +914,52 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
             </label>
           </>
         )}
+
+        <div className="gv-camera-controls">
+          <p className="gv-camera-controls__title">Camera Switch</p>
+          <div className="gv-camera-grid">
+            {(['top', 'front', 'back', 'left', 'right', 'home'] as const).map((preset) => (
+              <button key={preset} type="button" onClick={() => flyToPreset(preset)}>
+                {preset}
+              </button>
+            ))}
+          </div>
+          <label className="gv-field" htmlFor="gv-camera-view-list">
+            <span>Saved Camera Points</span>
+            <select
+              id="gv-camera-view-list"
+              value={selectedCameraViewId}
+              onChange={(event) => setSelectedCameraViewId(event.target.value)}
+            >
+              {cameraViews.length > 0 ? (
+                cameraViews.map((view) => (
+                  <option key={view.id} value={view.id}>
+                    {view.name}
+                  </option>
+                ))
+              ) : (
+                <option value="">No saved camera points</option>
+              )}
+            </select>
+          </label>
+          <div className="gv-camera-actions">
+            <button type="button" onClick={() => void saveCurrentCamera()}>
+              Save
+            </button>
+            <button
+              type="button"
+              disabled={!selectedCameraView}
+              onClick={() => {
+                if (selectedCameraView) flyToCameraView(selectedCameraView)
+              }}
+            >
+              Go
+            </button>
+            <button type="button" disabled={!selectedCameraViewId} onClick={() => void deleteSelectedCamera()}>
+              Delete
+            </button>
+          </div>
+        </div>
 
         {activeCogLayers.length > 0 ? (
           <div className="gv-overlay-actions">

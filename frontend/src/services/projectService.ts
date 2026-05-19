@@ -23,3 +23,11 @@ export async function createProject(payload: CreateProjectPayload): Promise<Proj
     body: JSON.stringify(payload),
   })
 }
+
+export async function updateProjectName(projectId: string, name: string): Promise<Project> {
+  return apiRequestJson<Project>(`/api/projects/${encodeURIComponent(projectId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+}

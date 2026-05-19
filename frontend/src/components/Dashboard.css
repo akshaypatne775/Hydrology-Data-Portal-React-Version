@@ -177,13 +177,19 @@
 }
 
 .ds-topbar__project {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
+  display: grid;
+  grid-template-columns: minmax(0, auto) auto;
+  grid-template-areas:
+    "label label"
+    "name edit";
+  align-items: center;
+  column-gap: 0.45rem;
+  row-gap: 0.15rem;
   min-width: 0;
 }
 
 .ds-topbar__label {
+  grid-area: label;
   font-size: 0.625rem;
   font-weight: 600;
   letter-spacing: 0.14em;
@@ -192,6 +198,7 @@
 }
 
 .ds-topbar__name {
+  grid-area: name;
   margin: 0;
   font-size: 1rem;
   font-weight: 600;
@@ -200,6 +207,25 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.ds-topbar__edit {
+  grid-area: edit;
+  width: 1.55rem;
+  height: 1.55rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.26);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 0.68rem;
+  cursor: pointer;
+}
+
+.ds-topbar__edit:hover {
+  background: rgba(255, 255, 255, 0.2);
 }
 
 .ds-topbar__actions {

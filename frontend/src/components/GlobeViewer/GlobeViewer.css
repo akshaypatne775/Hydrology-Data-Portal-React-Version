@@ -132,6 +132,11 @@
   background: #135160;
 }
 
+.gv-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .gv-action--ghost {
   background: rgba(244, 250, 251, 0.92);
   color: #0e3e49;
@@ -149,6 +154,61 @@
   padding-top: 0.65rem;
   margin-top: 0.25rem;
   border-top: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.gv-camera-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-top: 0.65rem;
+  margin-top: 0.25rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.gv-camera-controls__title {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #f8fafc;
+}
+
+.gv-camera-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.35rem;
+}
+
+.gv-camera-grid button,
+.gv-camera-actions button {
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 8px;
+  background: rgba(244, 250, 251, 0.92);
+  color: #0e3e49;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: capitalize;
+  font-family: 'Montserrat', sans-serif;
+  padding: 0.35rem 0.25rem;
+  cursor: pointer;
+}
+
+.gv-camera-grid button:hover,
+.gv-camera-actions button:hover {
+  background: rgba(209, 231, 235, 0.96);
+}
+
+.gv-camera-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.35rem;
+}
+
+.gv-camera-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .gv-nav-readout {
