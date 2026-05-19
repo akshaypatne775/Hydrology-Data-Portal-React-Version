@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { useUploadContext } from '../../context/UploadContext'
 import { useWorkspaceContext } from '../../context/WorkspaceContext'
+import { API_BASE } from '../../lib/apiBase'
 import {
   deleteProjectFile,
   getProjectFiles,
@@ -15,8 +16,8 @@ import {
 } from '../../services/datasetService'
 import './DatasetsPanel.css'
 
-const ALLOWED_EXTENSIONS = new Set(['las', 'laz', 'tif', 'tiff', 'csv'])
-type DatasetType = 'Ortho' | 'DTM' | 'DSM' | 'Point Cloud' | 'CSV'
+const ALLOWED_EXTENSIONS = new Set(['las', 'laz', 'tif', 'tiff', 'csv', 'zip'])
+type DatasetType = 'Ortho' | 'DTM' | 'DSM' | 'Point Cloud' | '3D Model' | 'CSV'
 type DatasetStatus = 'Raw' | 'Processing' | 'Web-Ready'
 
 type DatasetRow = {
@@ -27,7 +28,7 @@ type DatasetRow = {
   status: DatasetStatus
   filePath?: string
   relPath?: string
-  layerType?: 'cog' | 'pointcloud'
+  layerType?: 'cog' | 'pointcloud' | '3DModel'
   layerUrl?: string
   datasetId?: string
   month?: string
@@ -50,11 +51,13 @@ function inferDatasetType(fileName: string): DatasetType {
   if (lowered.includes('dtm')) return 'DTM'
   if (lowered.includes('dsm')) return 'DSM'
   if (lowered.endsWith('.csv')) return 'CSV'
+  if (lowered.endsWith('.zip')) return '3D Model'
   if (lowered.includes('ortho') || lowered.endsWith('.tif') || lowered.endsWith('.tiff')) return 'Ortho'
   return 'Point Cloud'
 }
 
 function normalizeJobStatus(status: string): DatasetStatus {
+  if (status.toLowerCase() === 'web-ready' || status.toUpperCase() === 'WEB-READY') return 'Web-Ready'
   return status === 'Completed' ? 'Web-Ready' : 'Processing'
 }
 
@@ -68,8 +71,16 @@ function formatSize(sizeBytes: string): string {
 }
 
 function mapProjectFile(file: ProjectFile): DatasetRow {
-  const type = inferDatasetType(file.name)
-  const layerType = file.type === 'cog' ? 'cog' : file.type === 'pointcloud' ? 'pointcloud' : undefined
+  const type = file.type === '3DModel' ? '3D Model' : inferDatasetType(file.name)
+  const layerType =
+    file.type === 'cog' ? 'cog' :
+      file.type === 'pointcloud' ? 'pointcloud' :
+        file.type === '3DModel' ? '3DModel' :
+          undefined
+  const layerUrl =
+    layerType === '3DModel'
+      ? file.layer_url || `${API_BASE}/data/${file.rel_path.replace(/\/$/, '')}/tileset.json`
+      : file.layer_url || undefined
   return {
     id: `file-${file.rel_path}`,
     fileName: file.name,
@@ -79,7 +90,7 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
     filePath: file.file_path || undefined,
     relPath: file.rel_path,
     layerType,
-    layerUrl: file.layer_url || undefined,
+    layerUrl,
     datasetId: file.dataset_id,
     month: file.month,
     datasetType: file.dataset_type,
@@ -91,6 +102,7 @@ function toBackendDatasetType(type: DatasetType): string {
   if (type === 'DTM') return 'dtm'
   if (type === 'DSM') return 'dsm'
   if (type === 'CSV') return 'csv'
+  if (type === '3D Model') return '3dmodel'
   return 'pointcloud'
 }
 
@@ -119,13 +131,16 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       const [jobs, files] = await Promise.all([getProjectJobs(currentProjectId), getProjectFiles(currentProjectId)])
       if (cancelledRef()) return
       const fileRows = files.filter((file) => file.kind !== 'Reports').map(mapProjectFile)
-      const jobRows: DatasetRow[] = jobs.map((job: ProjectJob) => ({
-        id: `job-${job.job_id}`,
-        fileName: job.file_name,
-        type: inferDatasetType(job.file_name),
-        size: '--',
-        status: normalizeJobStatus(job.status),
-      }))
+      const fileDatasetIds = new Set(fileRows.map((row) => row.datasetId).filter(Boolean))
+      const jobRows: DatasetRow[] = jobs
+        .filter((job: ProjectJob) => !fileDatasetIds.has(job.job_id))
+        .map((job: ProjectJob) => ({
+          id: `job-${job.job_id}`,
+          fileName: job.file_name,
+          type: inferDatasetType(job.file_name),
+          size: '--',
+          status: normalizeJobStatus(job.status),
+        }))
       const mergedMap = new Map<string, DatasetRow>()
       ;[...fileRows, ...jobRows].forEach((row) => {
         if (!mergedMap.has(row.fileName) || row.layerUrl) mergedMap.set(row.fileName, row)
@@ -168,13 +183,15 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   useEffect(() => {
     if (!projectId) return
     setDatasets((prev) => {
-      const live = activeTasks.map((task) => ({
-        id: `live-${task.id}`,
-        fileName: task.fileName,
-        type: inferDatasetType(task.fileName),
-        size: 'Uploading',
-        status: task.state === 'success' ? 'Web-Ready' : 'Processing',
-      } as DatasetRow))
+      const live = activeTasks
+        .filter((task) => task.state !== 'success')
+        .map((task) => ({
+          id: `live-${task.id}`,
+          fileName: task.fileName,
+          type: inferDatasetType(task.fileName),
+          size: 'Uploading',
+          status: 'Processing',
+        } as DatasetRow))
       const base = prev.filter((row) => !row.id.startsWith('live-'))
       const mergedMap = new Map<string, DatasetRow>()
       ;[...live, ...base].forEach((row) => {
@@ -217,7 +234,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       type: selectedFile.type,
       lastModified: selectedFile.lastModified,
     })
-    if (['tif', 'tiff', 'csv'].includes(ext.toLowerCase())) {
+    if (['tif', 'tiff', 'csv', 'zip'].includes(ext.toLowerCase())) {
       await startDatasetUpload(renamed, projectId, {
         datasetType: toBackendDatasetType(uploadForm.type),
         month: uploadForm.date.slice(0, 7),
@@ -232,6 +249,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   const getActionLabel = useCallback((row: DatasetRow) => {
     if (row.layerType === 'cog') return 'Show Ortho on Map'
     if (row.layerType === 'pointcloud') return 'Show in Globe'
+    if (row.layerType === '3DModel') return 'Show 3D Model'
     return 'Delete'
   }, [])
 
@@ -335,14 +353,14 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         <input
           ref={fileInputRef}
           type="file"
-          accept=".las,.laz,.tif,.tiff,.csv"
+          accept=".las,.laz,.tif,.tiff,.csv,.zip"
           className="gv-file-input"
           onChange={(event) => {
             const file = event.target.files?.[0]
             if (file) void prepareFile(file)
           }}
         />
-        <p className="dsp-dropzone__title">Drop or Select .las, .laz, .tif, .csv files</p>
+        <p className="dsp-dropzone__title">Drop or Select .las, .laz, .tif, .csv, .zip files</p>
         <p className="dsp-dropzone__meta">After select, fill details and start upload</p>
       </div>
 
@@ -365,6 +383,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
               <option value="DTM">DTM</option>
               <option value="DSM">DSM</option>
               <option value="CSV">CSV</option>
+              <option value="3D Model">3D Model</option>
               <option value="Point Cloud">Point Cloud</option>
             </select>
           </label>

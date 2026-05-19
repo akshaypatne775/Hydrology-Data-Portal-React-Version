@@ -1,6 +1,14 @@
 {
   "proj_9b8098d17046469b": [
     {
+      "job_id": "Scene-1045061a5f6e",
+      "kind": "dataset",
+      "file_name": "Scene.zip",
+      "status": "Completed",
+      "updated_at": "2026-05-18T11:40:07.790609+00:00",
+      "result_url": "/data/projects/proj_9b8098d17046469b/processed/3dmodel/Scene-61560662/Scene/tileset.json"
+    },
+    {
       "job_id": "Auro_DTM_Crop-5e8c38124a26",
       "kind": "dataset",
       "file_name": "Auro_DTM_Crop.tif",

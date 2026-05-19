@@ -11,12 +11,19 @@ import {
   writeUploadedTilesets,
   type UploadedTileset,
 } from '../../utils/pointCloudStorage'
+import {
+  deleteCameraView,
+  getCameraViews,
+  saveCameraView,
+  type CameraView,
+} from '../../services/cameraViewService'
 
 const CESIUM_ION_TOKEN = (import.meta.env.VITE_CESIUM_ION_TOKEN ?? '').trim()
 const HAS_VALID_ION_TOKEN =
   CESIUM_ION_TOKEN.length > 0 && CESIUM_ION_TOKEN !== 'APNA_TOKEN_YAHAN_PASTE_KAREIN'
 
 type ColorMode = 'RGB' | 'Elevation'
+type ImageryMode = 'earth' | 'none'
 
 type GlobePosition = {
   lat: number | null
@@ -24,8 +31,26 @@ type GlobePosition = {
   elevation: number | null
 }
 
+type ModelTilesetEntry = {
+  tileset: Cesium.Cesium3DTileset
+  latitude: number
+  longitude: number
+  sourceHeight: number
+}
+
 const TILESET_MAX_WAIT_MS = 2 * 60 * 60 * 1000
 const TILESET_POLL_MS = 2000
+const MODEL_TILE_CACHE_BYTES = 1024 * 1024 * 1024
+const MODEL_TILE_CACHE_OVERFLOW_BYTES = 1024 * 1024 * 1024
+const MODEL_SCREEN_SPACE_ERROR = 2
+const MODEL_GROUND_CLEARANCE_METERS = 80
+
+function applyModelHeightOffset(entry: ModelTilesetEntry, offsetMeters: number): void {
+  const surface = Cesium.Cartesian3.fromRadians(entry.longitude, entry.latitude, 0)
+  const offset = Cesium.Cartesian3.fromRadians(entry.longitude, entry.latitude, offsetMeters)
+  const translation = Cesium.Cartesian3.subtract(offset, surface, new Cesium.Cartesian3())
+  entry.tileset.modelMatrix = Cesium.Matrix4.fromTranslation(translation)
+}
 
 function projectIdFromTilesetUrl(tilesetUrl: string): string | null {
   try {
@@ -119,13 +144,20 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const viewerRef = useRef<Cesium.Viewer | null>(null)
   const pointCloudRef = useRef<Cesium.Cesium3DTileset | null>(null)
+  const modelTilesetsRef = useRef<Map<string, ModelTilesetEntry>>(new Map())
+  const modelHeightOffsetRef = useRef(0)
   const orthomosaicLayerRef = useRef<Cesium.ImageryLayer | null>(null)
   const [pointSize, setPointSize] = useState(3)
   const [colorMode, setColorMode] = useState<ColorMode>('RGB')
+  const [imageryMode, setImageryMode] = useState<ImageryMode>('earth')
+  const [viewerReady, setViewerReady] = useState(false)
+  const [modelHeightOffset, setModelHeightOffset] = useState(0)
   const [viewerError, setViewerError] = useState<string | null>(null)
   const [pipelineNotice, setPipelineNotice] = useState<string | null>(null)
   const [uploadedTilesets, setUploadedTilesets] = useState<UploadedTileset[]>([])
   const [selectedTilesetUrl, setSelectedTilesetUrl] = useState('')
+  const [cameraViews, setCameraViews] = useState<CameraView[]>([])
+  const [selectedCameraViewId, setSelectedCameraViewId] = useState('')
   const [position, setPosition] = useState<GlobePosition>({
     lat: null,
     lng: null,
@@ -140,10 +172,132 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     return `Lat ${position.lat.toFixed(6)} | Lng ${position.lng.toFixed(6)} | Elev ${elev} m`
   }, [position.elevation, position.lat, position.lng])
 
+  const activeModelLayers = useMemo(
+    () =>
+      activeLayers.filter(
+        (layer) => layer.projectId === projectId && layer.layerType === '3DModel' && Boolean(layer.url),
+      ),
+    [activeLayers, projectId],
+  )
+
+  const activePointCloudLayer = useMemo(
+    () => activeLayers.find((layer) => layer.projectId === projectId && layer.layerType === 'pointcloud'),
+    [activeLayers, projectId],
+  )
+
+  const activeControlMode = activeModelLayers.length > 0 ? 'model' : 'pointcloud'
+
+  const applyImageryMode = useCallback((mode: ImageryMode) => {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    viewer.scene.globe.show = mode !== 'none'
+    if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = mode !== 'none'
+    if (viewer.scene.skyBox) {
+      ;(viewer.scene.skyBox as Cesium.SkyBox & { show?: boolean }).show = mode !== 'none'
+    }
+    if (viewer.scene.moon) viewer.scene.moon.show = mode !== 'none'
+    viewer.scene.backgroundColor = mode === 'none' ? Cesium.Color.fromCssColorString('#020617') : Cesium.Color.BLACK
+    viewer.scene.requestRender()
+  }, [])
+
+  const setModelOffset = useCallback((nextOffset: number) => {
+    const rounded = Math.round(nextOffset)
+    modelHeightOffsetRef.current = rounded
+    setModelHeightOffset(rounded)
+    for (const entry of modelTilesetsRef.current.values()) {
+      applyModelHeightOffset(entry, rounded)
+    }
+  }, [])
+
+  const autoGroundModels = useCallback(() => {
+    const firstEntry = modelTilesetsRef.current.values().next().value as ModelTilesetEntry | undefined
+    if (!firstEntry) return
+    setModelOffset(-firstEntry.sourceHeight + MODEL_GROUND_CLEARANCE_METERS)
+  }, [setModelOffset])
+
+  const getPrimaryModelEntry = useCallback((): ModelTilesetEntry | undefined => (
+    modelTilesetsRef.current.values().next().value as ModelTilesetEntry | undefined
+  ), [])
+
+  const flyToModelPreset = useCallback((preset: 'home' | 'top' | 'oblique' | 'side') => {
+    const viewer = viewerRef.current
+    const entry = getPrimaryModelEntry()
+    if (!viewer || !entry) return
+    const sphere = entry.tileset.boundingSphere
+    if (preset === 'home') {
+      void viewer.zoomTo(entry.tileset)
+      return
+    }
+    const range = Math.max(sphere.radius * (preset === 'top' ? 2.4 : 2.1), 300)
+    const heading =
+      preset === 'side'
+        ? Cesium.Math.toRadians(90)
+        : preset === 'oblique'
+          ? Cesium.Math.toRadians(35)
+          : 0
+    const pitch =
+      preset === 'top'
+        ? Cesium.Math.toRadians(-89)
+        : preset === 'side'
+          ? Cesium.Math.toRadians(-20)
+          : Cesium.Math.toRadians(-35)
+    viewer.camera.flyToBoundingSphere(sphere, {
+      duration: 1.2,
+      offset: new Cesium.HeadingPitchRange(heading, pitch, range),
+    })
+  }, [getPrimaryModelEntry])
+
+  const flyToCameraView = useCallback((view: CameraView) => {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    viewer.camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(view.lng, view.lat, view.height),
+      orientation: {
+        heading: Cesium.Math.toRadians(view.heading),
+        pitch: Cesium.Math.toRadians(view.pitch),
+        roll: Cesium.Math.toRadians(view.roll),
+      },
+      duration: 1.2,
+    })
+  }, [])
+
+  const saveCurrentCamera = useCallback(async () => {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    const name = window.prompt('Camera point name', `View ${cameraViews.length + 1}`)
+    if (!name?.trim()) return
+    const cartographic = viewer.camera.positionCartographic
+    try {
+      const saved = await saveCameraView(projectId, {
+        name: name.trim(),
+        lat: Cesium.Math.toDegrees(cartographic.latitude),
+        lng: Cesium.Math.toDegrees(cartographic.longitude),
+        height: cartographic.height,
+        heading: Cesium.Math.toDegrees(viewer.camera.heading),
+        pitch: Cesium.Math.toDegrees(viewer.camera.pitch),
+        roll: Cesium.Math.toDegrees(viewer.camera.roll),
+      })
+      setCameraViews((prev) => [saved, ...prev])
+      setSelectedCameraViewId(saved.id)
+    } catch (error) {
+      setViewerError(error instanceof Error ? error.message : 'Failed to save camera point')
+    }
+  }, [cameraViews.length, projectId])
+
+  const deleteSelectedCamera = useCallback(async () => {
+    if (!selectedCameraViewId) return
+    try {
+      await deleteCameraView(projectId, selectedCameraViewId)
+      setCameraViews((prev) => prev.filter((view) => view.id !== selectedCameraViewId))
+      setSelectedCameraViewId('')
+    } catch (error) {
+      setViewerError(error instanceof Error ? error.message : 'Failed to delete camera point')
+    }
+  }, [projectId, selectedCameraViewId])
+
   const loadPointCloud = useCallback(async (tilesetUrl: string) => {
     const viewer = viewerRef.current
     if (!viewer) {
-      setViewerError('Viewer not ready. Please wait and try again.')
       return
     }
 
@@ -198,7 +352,6 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
   const loadOrthomosaic = useCallback((layerConfig: { url: string; projectId: string; name: string }) => {
     const viewer = viewerRef.current
     if (!viewer) {
-      setViewerError('Viewer not ready. Please wait and try again.')
       return
     }
     const tileUrl = layerConfig.url
@@ -240,6 +393,52 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       console.error('Orthomosaic load failed:', error)
     }
   }, [])
+
+  const load3DModel = useCallback(async (layer: { id: string; url: string; name: string }) => {
+    const viewer = viewerRef.current
+    if (!viewer) {
+      return
+    }
+    if (modelTilesetsRef.current.has(layer.id)) return
+
+    try {
+      const tileset = await Cesium.Cesium3DTileset.fromUrl(layer.url, {
+        maximumScreenSpaceError: MODEL_SCREEN_SPACE_ERROR,
+        cacheBytes: MODEL_TILE_CACHE_BYTES,
+        maximumCacheOverflowBytes: MODEL_TILE_CACHE_OVERFLOW_BYTES,
+        skipLevelOfDetail: false,
+        dynamicScreenSpaceError: false,
+        foveatedScreenSpaceError: false,
+        progressiveResolutionHeightFraction: 0,
+        cullRequestsWhileMoving: false,
+        preferLeaves: true,
+        preloadFlightDestinations: true,
+        backFaceCulling: false,
+      })
+      tileset.maximumScreenSpaceError = MODEL_SCREEN_SPACE_ERROR
+      tileset.dynamicScreenSpaceError = false
+      tileset.foveatedScreenSpaceError = false
+      const cartographic = Cesium.Cartographic.fromCartesian(tileset.boundingSphere.center)
+      const entry: ModelTilesetEntry = {
+        tileset,
+        latitude: cartographic.latitude,
+        longitude: cartographic.longitude,
+        sourceHeight: cartographic.height,
+      }
+      const autoGroundOffset = -cartographic.height + MODEL_GROUND_CLEARANCE_METERS
+      setModelOffset(autoGroundOffset)
+      applyModelHeightOffset(entry, autoGroundOffset)
+      const addedTileset = viewer.scene.primitives.add(tileset)
+      entry.tileset = addedTileset
+      modelTilesetsRef.current.set(layer.id, entry)
+      await viewer.zoomTo(entry.tileset)
+      setViewerError(null)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load 3D model tileset'
+      setViewerError(message)
+      console.error('Error loading 3D Tileset:', error)
+    }
+  }, [setModelOffset])
 
   // Example TiTiler COG XYZ layer (reference):
   // const cogLayer = new Cesium.UrlTemplateImageryProvider({
@@ -302,23 +501,41 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
   }, [projectId, tasks])
 
   useEffect(() => {
-    const pointCloudLayer = activeLayers.find(
-      (layer) => layer.projectId === projectId && layer.layerType === 'pointcloud',
-    )
-    if (pointCloudLayer?.url) {
-      setSelectedTilesetUrl(pointCloudLayer.url)
-      void loadPointCloudWhenReady(pointCloudLayer.url)
+    if (!viewerReady) return
+    if (activePointCloudLayer?.url) {
+      setSelectedTilesetUrl(activePointCloudLayer.url)
+      void loadPointCloudWhenReady(activePointCloudLayer.url)
     }
-  }, [activeLayers, loadPointCloudWhenReady, projectId])
+  }, [activePointCloudLayer, loadPointCloudWhenReady, viewerReady])
 
   useEffect(() => {
+    if (!viewerReady) return
     const cogLayer = activeLayers.find(
       (layer) => layer.projectId === projectId && layer.layerType === 'cog',
     )
     if (cogLayer?.url) {
       loadOrthomosaic(cogLayer)
     }
-  }, [activeLayers, loadOrthomosaic, projectId])
+  }, [activeLayers, loadOrthomosaic, projectId, viewerReady])
+
+  useEffect(() => {
+    if (!viewerReady) return
+    const viewer = viewerRef.current
+    if (!viewer) return
+
+    const activeIds = new Set(activeModelLayers.map((layer) => layer.id))
+
+    for (const [id, entry] of modelTilesetsRef.current.entries()) {
+      if (!activeIds.has(id)) {
+        viewer.scene.primitives.remove(entry.tileset)
+        modelTilesetsRef.current.delete(id)
+      }
+    }
+
+    for (const layer of activeModelLayers) {
+      void load3DModel(layer)
+    }
+  }, [activeModelLayers, load3DModel, viewerReady])
 
   const activeCogLayers = useMemo(
     () =>
@@ -339,6 +556,11 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       eyeDomeLighting: true,
     })
   }, [colorMode, pointSize])
+
+  useEffect(() => {
+    if (!viewerReady) return
+    applyImageryMode(imageryMode)
+  }, [applyImageryMode, imageryMode, viewerReady])
 
   useEffect(() => {
     const host = containerRef.current
@@ -362,6 +584,8 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
         shouldAnimate: true,
       } as Cesium.Viewer.ConstructorOptions)
       viewerRef.current = viewer
+      viewer.resolutionScale = Math.min(window.devicePixelRatio || 1, 2)
+      ;(viewer.scene as Cesium.Scene & { fxaa?: boolean }).fxaa = true
       setViewerError(
         HAS_VALID_ION_TOKEN
           ? null
@@ -405,6 +629,7 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
         const elevation = viewer.scene.globe.getHeight(cartographic) ?? 0
         setPosition({ lat, lng, elevation })
       }, Cesium.ScreenSpaceEventType.MOUSE_MOVE)
+      setViewerReady(true)
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Failed to initialize Cesium viewer'
@@ -414,20 +639,27 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
         viewer.destroy()
         viewerRef.current = null
       }
+      setViewerReady(false)
     }
 
+    const modelTilesets = modelTilesetsRef.current
     return () => {
       handler?.destroy()
       if (pointCloudRef.current) {
         viewer?.scene.primitives.remove(pointCloudRef.current)
         pointCloudRef.current = null
       }
+      for (const entry of modelTilesets.values()) {
+        viewer?.scene.primitives.remove(entry.tileset)
+      }
+      modelTilesets.clear()
       if (orthomosaicLayerRef.current) {
         viewer?.imageryLayers.remove(orthomosaicLayerRef.current, true)
         orthomosaicLayerRef.current = null
       }
       viewer?.destroy()
       viewerRef.current = null
+      setViewerReady(false)
     }
   }, [])
 
@@ -445,83 +677,133 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
         </div>
       ) : null}
 
-      <section className="gv-panel" aria-label="Point cloud controls">
-        <h3 className="gv-panel__title">Point Cloud Controls</h3>
-        <label className="gv-field" htmlFor="gv-point-size">
-          <span>Point Size</span>
-          <input
-            id="gv-point-size"
-            type="range"
-            min={1}
-            max={12}
-            step={1}
-            value={pointSize}
-            onChange={(event) => setPointSize(Number(event.target.value))}
-          />
-          <strong>{pointSize}px</strong>
-        </label>
+      <section className="gv-panel" aria-label="3D viewer controls">
+        <h3 className="gv-panel__title">
+          {activeControlMode === 'model' ? '3D Model Controls' : 'Point Cloud Controls'}
+        </h3>
 
-        <label className="gv-field" htmlFor="gv-color-mode">
-          <span>Color Mode</span>
-          <select
-            id="gv-color-mode"
-            value={colorMode}
-            onChange={(event) => setColorMode(event.target.value as ColorMode)}
-          >
-            <option value="RGB">RGB</option>
-            <option value="Elevation">Elevation</option>
-          </select>
-        </label>
-        <p className="gv-panel__hint">Upload LAS/LAZ/TIFF files from the Datasets panel only.</p>
-      </section>
-
-      <section className="d3d-layer-panel" aria-label="Data layer actions">
-        <p className="d3d-layer-panel__title">3D Data Layers</p>
-
-        {uploadedTilesets.length > 0 ? (
+        {activeControlMode === 'model' ? (
           <>
-            <select
-              className="d3d-layer-panel__select"
-              value={selectedTilesetUrl}
-              onChange={(event) => setSelectedTilesetUrl(event.target.value)}
-              aria-label="Uploaded point cloud list"
-            >
-              {uploadedTilesets.map((item) => (
-                <option key={item.url} value={item.url}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              className="d3d-layer-panel__btn"
-              onClick={() => {
-                if (selectedTilesetUrl) {
-                  void loadPointCloudWhenReady(selectedTilesetUrl)
-                }
-              }}
-            >
-              Show Uploaded Point Cloud
-            </button>
+            <label className="gv-field" htmlFor="gv-imagery-mode">
+              <span>Imagery</span>
+              <select
+                id="gv-imagery-mode"
+                value={imageryMode}
+                onChange={(event) => setImageryMode(event.target.value as ImageryMode)}
+              >
+                <option value="earth">Earth Imagery</option>
+                <option value="none">No Earth</option>
+              </select>
+            </label>
+
+            <div className="d3d-height-control d3d-height-control--dark">
+              <div className="d3d-height-control__head">
+                <span>Model Height</span>
+                <strong>{modelHeightOffset} m</strong>
+              </div>
+              <input
+                type="range"
+                min={-800}
+                max={200}
+                step={1}
+                value={modelHeightOffset}
+                onChange={(event) => setModelOffset(Number(event.target.value))}
+                aria-label="3D model height offset"
+              />
+              <div className="d3d-height-control__actions">
+                <button type="button" onClick={() => setModelOffset(modelHeightOffset - 10)}>
+                  -10m
+                </button>
+                <button type="button" onClick={() => void autoGroundModels()}>
+                  Auto Ground
+                </button>
+                <button type="button" onClick={() => setModelOffset(modelHeightOffset + 10)}>
+                  +10m
+                </button>
+              </div>
+            </div>
+
+            {activeModelLayers[0] ? (
+              <p className="gv-panel__hint">Active model: {activeModelLayers[0].name}</p>
+            ) : null}
           </>
         ) : (
-          <p className="d3d-layer-panel__hint">Upload LAS/LAZ to see selectable point clouds.</p>
+          <>
+            {uploadedTilesets.length > 0 ? (
+              <>
+                <label className="gv-field" htmlFor="gv-pointcloud-list">
+                  <span>Point Cloud</span>
+                  <select
+                    id="gv-pointcloud-list"
+                    value={selectedTilesetUrl}
+                    onChange={(event) => setSelectedTilesetUrl(event.target.value)}
+                    aria-label="Uploaded point cloud list"
+                  >
+                    {uploadedTilesets.map((item) => (
+                      <option key={item.url} value={item.url}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="gv-action"
+                  onClick={() => {
+                    if (selectedTilesetUrl) {
+                      void loadPointCloudWhenReady(selectedTilesetUrl)
+                    }
+                  }}
+                >
+                  Show Point Cloud
+                </button>
+              </>
+            ) : (
+              <p className="gv-panel__hint">Upload LAS/LAZ files from the Datasets panel.</p>
+            )}
+
+            <label className="gv-field" htmlFor="gv-point-size">
+              <span>Point Size</span>
+              <input
+                id="gv-point-size"
+                type="range"
+                min={1}
+                max={12}
+                step={1}
+                value={pointSize}
+                onChange={(event) => setPointSize(Number(event.target.value))}
+              />
+              <strong>{pointSize}px</strong>
+            </label>
+
+            <label className="gv-field" htmlFor="gv-color-mode">
+              <span>Color Mode</span>
+              <select
+                id="gv-color-mode"
+                value={colorMode}
+                onChange={(event) => setColorMode(event.target.value as ColorMode)}
+              >
+                <option value="RGB">RGB</option>
+                <option value="Elevation">Elevation</option>
+              </select>
+            </label>
+          </>
         )}
 
         {activeCogLayers.length > 0 ? (
-          activeCogLayers.map((layer) => (
-            <button
-              key={layer.id}
-              type="button"
-              className="d3d-layer-panel__btn d3d-layer-panel__btn--ghost"
-              onClick={() => loadOrthomosaic(layer)}
-            >
-              Load {layer.name}
-            </button>
-          ))
-        ) : (
-          <p className="d3d-layer-panel__hint">Select a Web-Ready TIFF from Datasets first.</p>
-        )}
+          <div className="gv-overlay-actions">
+            {activeCogLayers.map((layer) => (
+              <button
+                key={layer.id}
+                type="button"
+                className="gv-action gv-action--ghost"
+                onClick={() => loadOrthomosaic(layer)}
+              >
+                Load {layer.name}
+              </button>
+            ))}
+          </div>
+        ) : null}
       </section>
 
       <div className="gv-nav-readout" aria-live="polite">

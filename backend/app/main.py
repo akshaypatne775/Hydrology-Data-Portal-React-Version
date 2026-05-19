@@ -11,6 +11,7 @@ import secrets
 import shutil
 import subprocess
 import time
+import zipfile
 from pathlib import Path
 import sqlite3
 import json
@@ -221,6 +222,10 @@ class ProjectCreatePayload(BaseModel):
     type: str
 
 
+class ProjectUpdatePayload(BaseModel):
+    name: str = ""
+
+
 class ProjectOut(BaseModel):
     id: str
     name: str
@@ -273,6 +278,16 @@ class DatasetMetaPayload(BaseModel):
     dataset_type: str = ""
 
 
+class CameraViewPayload(BaseModel):
+    name: str
+    lat: float
+    lng: float
+    height: float
+    heading: float
+    pitch: float
+    roll: float = 0.0
+
+
 def _safe_pointcloud_basename(filename: str) -> str:
     """Reject path traversal; only allow simple .las / .laz names."""
     base = os.path.basename(filename.strip())
@@ -307,8 +322,8 @@ def _safe_dataset_upload_basename(filename: str) -> str:
     if "/" in base or "\\" in base or ".." in base:
         raise HTTPException(status_code=400, detail="Invalid filename")
     suffix = Path(base).suffix.lower()
-    if suffix not in (".tif", ".tiff", ".las", ".laz", ".csv"):
-        raise HTTPException(status_code=400, detail="Only .tif/.tiff/.las/.laz/.csv files are supported")
+    if suffix not in (".tif", ".tiff", ".las", ".laz", ".csv", ".zip"):
+        raise HTTPException(status_code=400, detail="Only .tif/.tiff/.las/.laz/.csv/.zip files are supported")
     return base
 
 
@@ -317,6 +332,8 @@ def _infer_dataset_type(name: str) -> str:
     suffix = Path(lowered).suffix
     if suffix == ".csv":
         return "csv"
+    if suffix == ".zip":
+        return "3dmodel"
     if "dtm" in lowered:
         return "dtm"
     if "dsm" in lowered:
@@ -337,6 +354,9 @@ def _normalize_dataset_type(value: str, fallback_name: str = "") -> str:
         "dem": "dtm",
         "dsm": "dsm",
         "pointcloud": "pointcloud",
+        "3dmodel": "3dmodel",
+        "3dtiles": "3dmodel",
+        "cesium3dtiles": "3dmodel",
         "las": "pointcloud",
         "laz": "pointcloud",
         "csv": "csv",
@@ -755,7 +775,7 @@ def get_project_dirs(project_id: str) -> tuple[Path, Path]:
 
 def _dataset_type_folder(dataset_type: str) -> str:
     normalized = _normalize_dataset_type(dataset_type, "")
-    if normalized in {"ortho", "dtm", "dsm", "pointcloud", "csv"}:
+    if normalized in {"ortho", "dtm", "dsm", "pointcloud", "csv", "3dmodel"}:
         return normalized
     return "other"
 
@@ -845,6 +865,61 @@ def _fast_tile_dir_size(tile_root: Path) -> str:
     return "1"
 
 
+def _looks_like_cesium_tileset_json(path: Path) -> bool:
+    if not path.is_file() or path.suffix.lower() != ".json":
+        return False
+    if path.name.lower() == "tileset.json":
+        return True
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    asset = data.get("asset")
+    root = data.get("root")
+    if not isinstance(asset, dict) or not isinstance(root, dict):
+        return False
+    has_tiles = any(key in root for key in ("children", "content", "contents"))
+    return has_tiles and ("geometricError" in data or "geometricError" in root)
+
+
+def _find_tileset_json(folder: Path) -> Path | None:
+    if not folder.is_dir():
+        return None
+    direct = folder / "tileset.json"
+    if _looks_like_cesium_tileset_json(direct):
+        return direct
+
+    candidates: dict[str, Path] = {}
+    for pattern in ("*.json", "*/*.json", "*/*/*.json"):
+        for candidate in folder.glob(pattern):
+            candidates[str(candidate.resolve())] = candidate
+
+    def sort_key(path: Path) -> tuple[int, int, str]:
+        name = path.name.lower()
+        priority = 0 if name == "tileset.json" else 1 if any(token in name for token in ("production", "scene", "root")) else 2
+        return (priority, len(path.relative_to(folder).parts), name)
+
+    for candidate in sorted(candidates.values(), key=sort_key):
+        if _looks_like_cesium_tileset_json(candidate):
+            return candidate
+    return None
+
+
+def _ensure_tileset_alias(tileset_path: Path) -> Path:
+    alias = tileset_path.parent / "tileset.json"
+    if tileset_path.name.lower() == "tileset.json":
+        return tileset_path
+    if not alias.exists():
+        shutil.copyfile(tileset_path, alias)
+    return alias
+
+
+def _is_3d_model_dataset(folder: Path) -> bool:
+    return _find_tileset_json(folder) is not None
+
+
 def _candidate_processed_tile_dirs(processed_root: Path) -> list[Path]:
     if not processed_root.is_dir():
         return []
@@ -857,6 +932,55 @@ def _candidate_processed_tile_dirs(processed_root: Path) -> list[Path]:
             if _is_valid_tile_dataset(nested):
                 candidates.append(nested)
     return candidates
+
+
+def _candidate_processed_model_dirs(processed_root: Path) -> list[Path]:
+    if not processed_root.is_dir():
+        return []
+    candidates: list[Path] = []
+    for child in sorted([p for p in processed_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
+        tileset = _find_tileset_json(child)
+        if tileset:
+            candidates.append(_ensure_tileset_alias(tileset).parent)
+            continue
+        for nested in sorted([p for p in child.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
+            tileset = _find_tileset_json(nested)
+            if tileset:
+                candidates.append(_ensure_tileset_alias(tileset).parent)
+    return candidates
+
+
+def _display_model_folder_name(model_root: Path, processed_root: Path) -> str:
+    if model_root.name.lower() in {"scene", "data", "tiles"} and model_root.parent != processed_root:
+        return model_root.parent.name
+    return model_root.name
+
+
+def _safe_extract_zip(zip_path: Path, extract_root: Path) -> None:
+    extract_root.mkdir(parents=True, exist_ok=True)
+    root = extract_root.resolve()
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            for member in zip_ref.infolist():
+                name = member.filename.replace("\\", "/")
+                if not name or name.startswith("/") or name.startswith("../") or "/../" in name:
+                    raise HTTPException(status_code=400, detail="ZIP contains unsafe paths")
+                target = (extract_root / name).resolve()
+                if not target.is_relative_to(root):
+                    raise HTTPException(status_code=400, detail="ZIP contains unsafe paths")
+            zip_ref.extractall(extract_root)
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(status_code=400, detail="Invalid ZIP file") from exc
+
+
+def _find_extracted_tileset_root(extract_root: Path) -> Path:
+    tileset = _find_tileset_json(extract_root)
+    if not tileset:
+        raise HTTPException(
+            status_code=400,
+            detail="ZIP does not contain a Cesium root tileset JSON. Expected tileset.json or a root JSON such as Production_*.json.",
+        )
+    return _ensure_tileset_alias(tileset).parent
 
 
 def _write_processing_jobs(data: dict[str, list[dict[str, str]]]) -> None:
@@ -1347,6 +1471,136 @@ def create_project(payload: ProjectCreatePayload, request: Request) -> ProjectOu
     )
 
 
+@app.patch("/api/projects/{project_id}")
+def update_project(project_id: str, payload: ProjectUpdatePayload, request: Request) -> ProjectOut:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Project name is required")
+    with get_db_connection() as connection:
+        connection.execute(
+            "UPDATE projects SET name = ? WHERE id = ? AND owner_user_id = ?",
+            (name, safe_project_id, int(user["id"])),
+        )
+        row = connection.execute(
+            "SELECT id, name, location, date, status, type FROM projects WHERE id = ? AND owner_user_id = ?",
+            (safe_project_id, int(user["id"])),
+        ).fetchone()
+        connection.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return ProjectOut(
+        id=str(row["id"]),
+        name=str(row["name"]),
+        location=str(row["location"]),
+        date=str(row["date"]),
+        status=str(row["status"]),
+        type=str(row["type"]),
+    )
+
+
+@app.get("/api/projects/{project_id}/camera-views")
+def get_camera_views(project_id: str, request: Request) -> dict[str, list[dict[str, str | float]]]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    with get_db_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, name, lat, lng, height, heading, pitch, roll, created_at, updated_at
+            FROM camera_views
+            WHERE project_id = ? AND owner_user_id = ?
+            ORDER BY updated_at DESC
+            """,
+            (safe_project_id, int(user["id"])),
+        ).fetchall()
+    return {
+        "views": [
+            {
+                "id": str(row["id"]),
+                "name": str(row["name"]),
+                "lat": float(row["lat"]),
+                "lng": float(row["lng"]),
+                "height": float(row["height"]),
+                "heading": float(row["heading"]),
+                "pitch": float(row["pitch"]),
+                "roll": float(row["roll"]),
+                "created_at": str(row["created_at"]),
+                "updated_at": str(row["updated_at"]),
+            }
+            for row in rows
+        ],
+    }
+
+
+@app.post("/api/projects/{project_id}/camera-views")
+def save_camera_view(project_id: str, payload: CameraViewPayload, request: Request) -> dict[str, str | float]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    name = payload.name.strip()[:80]
+    if not name:
+        raise HTTPException(status_code=400, detail="Camera view name is required")
+    if not (-90 <= payload.lat <= 90 and -180 <= payload.lng <= 180):
+        raise HTTPException(status_code=400, detail="Invalid camera location")
+    view_id = _safe_dataset_id(f"cam-{secrets.token_hex(8)}")
+    now = _now_iso()
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO camera_views
+                (id, project_id, owner_user_id, name, lat, lng, height, heading, pitch, roll, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                view_id,
+                safe_project_id,
+                int(user["id"]),
+                name,
+                float(payload.lat),
+                float(payload.lng),
+                float(payload.height),
+                float(payload.heading),
+                float(payload.pitch),
+                float(payload.roll),
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+    return {
+        "id": view_id,
+        "name": name,
+        "lat": float(payload.lat),
+        "lng": float(payload.lng),
+        "height": float(payload.height),
+        "heading": float(payload.heading),
+        "pitch": float(payload.pitch),
+        "roll": float(payload.roll),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+@app.delete("/api/projects/{project_id}/camera-views/{view_id}")
+def delete_camera_view(project_id: str, view_id: str, request: Request) -> dict[str, str]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    safe_view_id = _safe_dataset_id(view_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    with get_db_connection() as connection:
+        cursor = connection.execute(
+            "DELETE FROM camera_views WHERE id = ? AND project_id = ? AND owner_user_id = ?",
+            (safe_view_id, safe_project_id, int(user["id"])),
+        )
+        connection.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Camera view not found")
+    return {"status": "success"}
+
+
 @app.get("/api/project-stats")
 def project_stats() -> dict[str, list]:
     return {
@@ -1700,9 +1954,9 @@ async def process_dataset(
     _ensure_project_owner(int(user["id"]), safe_project_id)
     safe_name = _safe_dataset_upload_basename(file.filename or "")
     ext = Path(safe_name).suffix.lower()
-    if ext not in (".tif", ".tiff", ".csv"):
-        raise HTTPException(status_code=400, detail="Only .tif/.tiff/.csv dataset files are supported")
-    normalized_type = _normalize_dataset_type(dataset_type, safe_name)
+    if ext not in (".tif", ".tiff", ".csv", ".zip"):
+        raise HTTPException(status_code=400, detail="Only .tif/.tiff/.csv/.zip dataset files are supported")
+    normalized_type = "3dmodel" if ext == ".zip" else _normalize_dataset_type(dataset_type, safe_name)
     normalized_month = _normalize_month(month)
 
     dataset_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(safe_name).stem).strip("-") or "dataset"
@@ -1732,6 +1986,55 @@ async def process_dataset(
         await file.close()
 
     raw_rel = input_path.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+    if ext == ".zip":
+        print(f"Extracting 3D Tiles ZIP {safe_name}...")
+        if output_tile_dir.exists():
+            shutil.rmtree(output_tile_dir)
+        output_tile_dir.mkdir(parents=True, exist_ok=True)
+        _safe_extract_zip(input_path, output_tile_dir)
+        tileset_root = _find_extracted_tileset_root(output_tile_dir)
+        tileset_rel = (tileset_root / "tileset.json").resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+        model_rel = tileset_root.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+        tileset_url = f"{str(request.base_url).rstrip('/')}/data/{tileset_rel}"
+        _write_dataset_status(
+            safe_project_id,
+            dataset_id,
+            {
+                "status": "Web-Ready",
+                "updated_at": _now_iso(),
+                "dataset_id": dataset_id,
+                "dataset_name": Path(safe_name).stem,
+                "tile_folder": tile_output_folder,
+                "dataset_type": "3dmodel",
+                "layer_type": "3DModel",
+                "month": normalized_month,
+                "raw_rel_path": raw_rel,
+                "tiles_rel_path": model_rel,
+                "tileset_rel_path": tileset_rel,
+            },
+        )
+        _upsert_processing_job(
+            safe_project_id,
+            {
+                "job_id": dataset_id,
+                "kind": "dataset",
+                "file_name": safe_name,
+                "status": "Completed",
+                "updated_at": _now_iso(),
+                "result_url": f"/data/{tileset_rel}",
+            },
+        )
+        _invalidate_project_files_cache(safe_project_id)
+        return ProcessDatasetOut(
+            status="success",
+            message="3D model ZIP extracted and ready.",
+            project_id=safe_project_id,
+            dataset_id=dataset_id,
+            dataset_name=Path(safe_name).stem,
+            cog_path="",
+            cog_tile_url_template=tileset_url,
+        )
+
     if ext == ".csv":
         _write_dataset_status(
             safe_project_id,
@@ -1851,13 +2154,19 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
         folder = (st.get("tile_folder") or "").strip()
         if folder:
             tracked_folders.add(folder)
+        rel = (st.get("tiles_rel_path") or "").strip()
+        if rel:
+            tracked_folders.add(rel)
 
     found_new = 0
-    for item in sorted(processed_dir.iterdir(), key=lambda p: p.name.lower()):
-        if not _is_valid_tile_dataset(item):
-            continue
-        folder_name = item.name
-        if folder_name in tracked_folders:
+    candidates: list[tuple[Path, str, str]] = [
+        *[(item, "cog", _infer_dataset_type(item.name)) for item in _candidate_processed_tile_dirs(processed_dir)],
+        *[(item, "3DModel", "3dmodel") for item in _candidate_processed_model_dirs(processed_dir)],
+    ]
+    for item, layer_kind, dataset_type in candidates:
+        rel_path = item.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+        folder_name = _display_model_folder_name(item, processed_dir) if layer_kind == "3DModel" else item.name
+        if folder_name in tracked_folders or rel_path in tracked_folders:
             continue
 
         dataset_id = _safe_dataset_id(
@@ -1872,12 +2181,14 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
                 "dataset_id": dataset_id,
                 "dataset_name": folder_name,
                 "tile_folder": folder_name,
-                "dataset_type": _infer_dataset_type(folder_name),
+                "dataset_type": dataset_type,
+                "layer_type": layer_kind,
                 "month": "",
                 "raw_rel_path": "",
-                "tiles_rel_path": item.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix(),
+                "tiles_rel_path": rel_path,
             },
         )
+        result_url = f"/data/{rel_path}/tileset.json" if layer_kind == "3DModel" else f"/data/{rel_path}"
         _upsert_processing_job(
             safe_project_id,
             {
@@ -1886,10 +2197,11 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
                 "file_name": folder_name,
                 "status": "Completed",
                 "updated_at": _now_iso(),
-                "result_url": f"/data/projects/{safe_project_id}/processed/{folder_name}",
+                "result_url": result_url,
             },
         )
         tracked_folders.add(folder_name)
+        tracked_folders.add(rel_path)
         found_new += 1
 
     _invalidate_project_files_cache(safe_project_id)
@@ -2024,7 +2336,11 @@ def dataset_status(project_id: str, dataset_id: str, request: Request) -> dict[s
 
     base = str(request.base_url).rstrip("/")
     tiles_rel = status.get("tiles_rel_path", "").strip()
-    if tiles_rel:
+    if str(status.get("dataset_type") or "").lower() in ("3dmodel", "3dtiles"):
+        tileset_rel = status.get("tileset_rel_path", "").strip() or f"{tiles_rel.rstrip('/')}/tileset.json"
+        status["cog_tile_url_template"] = f"{base}/data/{tileset_rel}"
+        status["layer_type"] = "3DModel"
+    elif tiles_rel:
         status["cog_tile_url_template"] = f"{base}/data/{tiles_rel}/{{z}}/{{x}}/{{y}}.png"
     else:
         cog_path = status.get("cog_path", "")
@@ -2843,6 +3159,34 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                 continue
             tiles_rel_path = str(st.get("tiles_rel_path") or "").strip()
             tile_root = Path(LOCAL_DATA_PATH) / tiles_rel_path if tiles_rel_path else processed_root / tile_folder
+            if str(st.get("dataset_type") or "").lower() in ("3dmodel", "3dtiles") or _is_3d_model_dataset(tile_root):
+                tileset_path = _find_tileset_json(tile_root)
+                if not tileset_path:
+                    continue
+                tileset_path = _ensure_tileset_alias(tileset_path)
+                tile_root = tileset_path.parent
+                rel_base = tile_root.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+                tileset_rel = tileset_path.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+                files.append(
+                    {
+                        "name": display_name,
+                        "kind": "3D Photogrammetry Model",
+                        "type": "3DModel",
+                        "size_bytes": str(tileset_path.stat().st_size),
+                        "status": jobs_by_file.get(display_name, {}).get("status", str(st.get("status") or "WEB-READY")),
+                        "file_url": f"{base_url}/data/{tileset_rel}",
+                        "layer_url": f"{base_url}/data/{tileset_rel}",
+                        "file_path": str(tileset_path.resolve()),
+                        "rel_path": rel_base,
+                        "dataset_id": str(st.get("dataset_id") or job_dir.name),
+                        "dataset_type": "3dmodel",
+                        "month": str(st.get("month") or ""),
+                        "raw_rel_path": raw_rel_path,
+                    },
+                )
+                listed_rel_paths.add(rel_base)
+                listed_rel_paths.add(tileset_rel)
+                continue
             if not _is_valid_tile_dataset(tile_root) and tile_folder:
                 typed_root = processed_root / _dataset_type_folder(str(st.get("dataset_type") or "")) / tile_folder
                 if _is_valid_tile_dataset(typed_root):
@@ -2872,7 +3216,40 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
 
     # Include manual processed folders even when not synced/tracked yet.
     if processed_root.is_dir():
+        for model_root in _candidate_processed_model_dirs(processed_root):
+            tileset_path = _find_tileset_json(model_root)
+            if not tileset_path:
+                continue
+            tileset_path = _ensure_tileset_alias(tileset_path)
+            model_root = tileset_path.parent
+            display_name = _display_model_folder_name(model_root, processed_root)
+            rel_base = model_root.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            tileset_rel = tileset_path.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            if rel_base in listed_rel_paths or tileset_rel in listed_rel_paths:
+                continue
+            files.append(
+                {
+                    "name": display_name,
+                    "kind": "3D Photogrammetry Model",
+                    "type": "3DModel",
+                    "size_bytes": str(tileset_path.stat().st_size),
+                    "status": "WEB-READY",
+                    "file_url": f"{base_url}/data/{tileset_rel}",
+                    "layer_url": f"{base_url}/data/{tileset_rel}",
+                    "file_path": str(tileset_path.resolve()),
+                    "rel_path": rel_base,
+                    "dataset_id": "",
+                    "dataset_type": "3dmodel",
+                    "month": "",
+                    "raw_rel_path": "",
+                },
+            )
+            listed_rel_paths.add(rel_base)
+            listed_rel_paths.add(tileset_rel)
+
         for tile_root in _candidate_processed_tile_dirs(processed_root):
+            if _is_3d_model_dataset(tile_root):
+                continue
             rel_base = tile_root.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
             if rel_base in listed_rel_paths:
                 continue

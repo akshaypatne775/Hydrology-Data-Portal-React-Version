@@ -18,6 +18,7 @@ export type DatasetStatusResponse = {
   updated_at?: string
   dataset_id?: string
   dataset_name?: string
+  layer_type?: string
   error?: string
   cog_path?: string
   cog_tile_url_template?: string
@@ -79,7 +80,14 @@ export async function processDatasetTif(form: FormData): Promise<ProcessDatasetR
     body: form,
   })
   if (!res.ok) {
-    throw new Error(`Dataset upload failed (${res.status})`)
+    let detail = ''
+    try {
+      const data = (await res.json()) as { detail?: string }
+      detail = data.detail ? `: ${data.detail}` : ''
+    } catch {
+      detail = ''
+    }
+    throw new Error(`Dataset upload failed (${res.status})${detail}`)
   }
   return (await res.json()) as ProcessDatasetResponse
 }

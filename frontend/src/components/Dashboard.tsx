@@ -466,7 +466,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                   {activeId === 'map'
                     ? 'Leaflet · 2D'
                     : activeId === 'globe'
-                      ? 'CesiumJS · 3D'
+                      ? '3D Model Viewer'
                     : activeId === 'datasets'
                       ? 'Data Catalog'
                     : activeId === 'compare'
@@ -554,3 +554,4 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
 }
 
 export default Dashboard
+

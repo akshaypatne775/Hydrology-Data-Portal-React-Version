@@ -85,4 +85,24 @@ def ensure_tables() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS camera_views (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                owner_user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                lat REAL NOT NULL,
+                lng REAL NOT NULL,
+                height REAL NOT NULL,
+                heading REAL NOT NULL,
+                pitch REAL NOT NULL,
+                roll REAL NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(owner_user_id) REFERENCES users(id),
+                FOREIGN KEY(project_id) REFERENCES projects(id)
+            )
+            """
+        )
         connection.commit()

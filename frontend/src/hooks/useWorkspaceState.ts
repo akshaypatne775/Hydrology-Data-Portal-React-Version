@@ -14,7 +14,7 @@ export type ActiveLayerConfig = {
   id: string
   projectId: string
   name: string
-  layerType: 'cog' | 'pointcloud'
+  layerType: 'cog' | 'pointcloud' | '3DModel'
   url: string
   rawPath?: string
   datasetId?: string

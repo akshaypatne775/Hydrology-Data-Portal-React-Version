@@ -115,6 +115,42 @@
   background: #135160;
 }
 
+.gv-action {
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: #0e3e49;
+  color: #fff;
+  border-radius: 10px;
+  padding: 0.55rem 0.7rem;
+  font-size: 0.77rem;
+  font-weight: 700;
+  font-family: 'Montserrat', sans-serif;
+  cursor: pointer;
+}
+
+.gv-action:hover {
+  background: #135160;
+}
+
+.gv-action--ghost {
+  background: rgba(244, 250, 251, 0.92);
+  color: #0e3e49;
+  border-color: rgba(14, 62, 73, 0.5);
+}
+
+.gv-action--ghost:hover {
+  background: rgba(209, 231, 235, 0.96);
+}
+
+.gv-overlay-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding-top: 0.65rem;
+  margin-top: 0.25rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.16);
+}
+
 .gv-nav-readout {
   position: absolute;
   right: 1rem;
@@ -228,4 +264,78 @@
   font-size: 0.72rem;
   color: #0e3e49;
   line-height: 1.35;
+}
+
+.d3d-height-control {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid rgba(14, 62, 73, 0.18);
+}
+
+.d3d-height-control__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  color: #0e3e49;
+}
+
+.d3d-height-control__head strong {
+  white-space: nowrap;
+}
+
+.d3d-height-control input[type='range'] {
+  width: 100%;
+  accent-color: #0e3e49;
+}
+
+.d3d-height-control__actions {
+  display: grid;
+  grid-template-columns: 1fr 1.35fr 1fr;
+  gap: 0.35rem;
+}
+
+.d3d-height-control__actions button {
+  min-width: 0;
+  border: 1px solid rgba(14, 62, 73, 0.55);
+  border-radius: 8px;
+  background: #f4fafb;
+  color: #0e3e49;
+  font-size: 0.68rem;
+  font-weight: 700;
+  font-family: 'Montserrat', sans-serif;
+  padding: 0.35rem 0.25rem;
+  cursor: pointer;
+}
+
+.d3d-height-control__actions button:hover {
+  background: #d1e7eb;
+}
+
+.d3d-height-control--dark {
+  border-top-color: rgba(255, 255, 255, 0.16);
+}
+
+.d3d-height-control--dark .d3d-height-control__head {
+  color: #f8fafc;
+}
+
+.d3d-height-control--dark .d3d-height-control__head strong {
+  color: #bfdbfe;
+}
+
+.d3d-height-control--dark .d3d-height-control__actions button {
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(244, 250, 251, 0.92);
+}
+
+.gv-root .cesium-widget-credits,
+.gv-root .cesium-credit-logoContainer,
+.gv-root .cesium-credit-textContainer {
+  opacity: 0.08;
+  filter: blur(3px);
+  pointer-events: none;
 }

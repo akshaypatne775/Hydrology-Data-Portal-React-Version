@@ -163,6 +163,9 @@ export function UploadProvider({ children }: PropsWithChildren) {
       })
 
       try {
+        const lowerFileName = file.name.toLowerCase()
+        const isCsv = lowerFileName.endsWith('.csv')
+        const isZip = lowerFileName.endsWith('.zip')
         const form = new FormData()
         form.append('project_id', projectId)
         form.append('file', file)
@@ -173,11 +176,13 @@ export function UploadProvider({ children }: PropsWithChildren) {
           datasetId: created.dataset_id,
           progressPercent: 45,
           state: 'processing',
-          statusText: file.name.toLowerCase().endsWith('.csv')
+          statusText: isCsv
             ? `Preparing ${file.name} for compare...`
-            : `Converting ${file.name} to COG...`,
+            : isZip
+              ? `Extracting ${file.name} as 3D model...`
+              : `Converting ${file.name} to COG...`,
         })
-        if (file.name.toLowerCase().endsWith('.csv')) {
+        if (isCsv) {
           upsertTask(id, {
             state: 'success',
             progressPercent: 100,
@@ -190,13 +195,13 @@ export function UploadProvider({ children }: PropsWithChildren) {
         while (Date.now() - start < 2 * 60 * 60 * 1000) {
           const status = await getDatasetStatus(projectId, created.dataset_id)
           if (status.status === 'Web-Ready') {
-            if (status.cog_tile_url_template) {
+            if (!isZip && status.cog_tile_url_template) {
               saveWebReadyCogLayer(projectId, created.dataset_id, file.name, status.cog_tile_url_template)
             }
             upsertTask(id, {
               state: 'success',
               progressPercent: 100,
-              statusText: `${file.name} is Web-Ready.`,
+              statusText: isZip ? `${file.name} 3D model is ready.` : `${file.name} is Web-Ready.`,
               resultUrl: status.cog_tile_url_template,
             })
             return
@@ -207,7 +212,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
           upsertTask(id, {
             state: 'processing',
             progressPercent: 60,
-            statusText: `Converting ${file.name} to COG...`,
+            statusText: isZip ? `Extracting ${file.name} as 3D model...` : `Converting ${file.name} to COG...`,
           })
           await new Promise((resolve) => window.setTimeout(resolve, 2000))
         }
