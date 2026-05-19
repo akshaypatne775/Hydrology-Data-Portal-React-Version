@@ -688,6 +688,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
     () => (measureMode === 'distance' || measureMode === 'profile' ? totalPathLengthM(points) : 0),
     [measureMode, points],
   )
+
   const areaM2 = useMemo(
     () => (measureMode === 'area' || measureMode === 'volume-area' ? ringAreaM2(points) : 0),
     [measureMode, points],

@@ -63,6 +63,10 @@ OSGEO4W_BAT = os.getenv(
     "OSGEO4W_BAT",
     r"C:\Program Files\QGIS 3.44.8\OSGeo4W.bat",
 ).strip()
+POTREE_CONVERTER_EXE = os.getenv(
+    "POTREE_CONVERTER_EXE",
+    r"C:\PotreeConverter\PotreeConverter.exe",
+).strip()
 PROJECT_FILES_CACHE_TTL_SECONDS = float(os.getenv("PROJECT_FILES_CACHE_TTL_SECONDS", "4"))
 SESSION_COOKIE_NAME = "droid_cloud_session"
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "604800"))
@@ -160,7 +164,7 @@ app.mount(
 # /data/projects/{project_id}/processed/{tile_folder}/{z}/{x}/{y}.png
 # /data/pointclouds/{project_id}/{tileset_id}/tileset.json
 
-# Study metrics (mirrors frontend HydrologyStats placeholders; PDF scope 964 Acres).
+# Study metrics placeholders for report/demo API responses (PDF scope 964 Acres).
 CATCHMENT_STATS: list[dict[str, str]] = [
     {"label": "Gross catchment", "value": "390.0", "unit": "ha"},
     {"label": "Net contributing", "value": "382.4", "unit": "ha"},
@@ -535,6 +539,83 @@ async def process_pointcloud_background(
             _invalidate_project_files_cache(project_id)
 
 
+def process_pointcloud(input_las: str, output_dir: str, dataset_name: str) -> None:
+    """
+    Convert LAS/LAZ to a Potree web viewer.
+    PotreeConverter.exe is expected at C:\\PotreeConverter\\ unless POTREE_CONVERTER_EXE is set.
+    """
+    safe_dataset_name = _potree_dataset_name(dataset_name)
+    output_path = Path(output_dir)
+    if output_path.is_dir():
+        shutil.rmtree(output_path, ignore_errors=True)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    command = (
+        f'"{POTREE_CONVERTER_EXE}" "{input_las}" '
+        f'-o "{output_path}" --generate-page {safe_dataset_name}'
+    )
+    result = subprocess.run(command, capture_output=True, text=True, shell=True)
+    if result.returncode != 0:
+        message = result.stderr or result.stdout or f"PotreeConverter exited with code {result.returncode}"
+        raise RuntimeError(message)
+
+    html_path = output_path / f"{safe_dataset_name}.html"
+    if not html_path.is_file():
+        found_html = sorted(output_path.glob("*.html"), key=lambda p: p.name.lower())
+        if found_html:
+            shutil.copyfile(found_html[0], html_path)
+    _brand_potree_viewer(output_path, safe_dataset_name)
+
+
+def process_pointcloud_potree_job(
+    input_las: str,
+    output_dir: str,
+    dataset_name: str,
+    project_id: str,
+    job_id: str,
+    file_name: str,
+    source_hash: str = "",
+) -> None:
+    output_path = Path(output_dir)
+    err_path = output_path / ".conversion_error.txt"
+    try:
+        process_pointcloud(input_las, output_dir, dataset_name)
+        (output_path / ".source_name.txt").write_text(file_name, encoding="utf-8")
+        if source_hash:
+            (output_path / ".source_hash.txt").write_text(source_hash, encoding="utf-8")
+        _upsert_processing_job(
+            project_id,
+            {
+                "job_id": job_id,
+                "kind": "pointcloud",
+                "file_name": file_name,
+                "status": "Completed",
+                "updated_at": _now_iso(),
+                "result_url": f"/data/projects/{project_id}/processed/{dataset_name}/{dataset_name}.html",
+            },
+        )
+    except Exception as exc:
+        msg = str(exc)
+        output_path.mkdir(parents=True, exist_ok=True)
+        try:
+            err_path.write_text(msg, encoding="utf-8")
+        except OSError:
+            pass
+        _upsert_processing_job(
+            project_id,
+            {
+                "job_id": job_id,
+                "kind": "pointcloud",
+                "file_name": file_name,
+                "status": "Failed",
+                "error": msg[:8000],
+                "updated_at": _now_iso(),
+            },
+        )
+    finally:
+        _invalidate_project_files_cache(project_id)
+
+
 def _run_gdal2tiles_subprocess(
     input_tif: str,
     output_dir: str,
@@ -794,6 +875,222 @@ def _safe_tileset_id(tileset_id: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,240}", tileset_id or ""):
         raise HTTPException(status_code=400, detail="Invalid tileset_id")
     return tileset_id
+
+
+def _potree_dataset_name(name: str) -> str:
+    stem = Path(name).stem if Path(name).suffix else name
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-")
+    return _safe_tileset_id(cleaned[:120] or "pointcloud")
+
+
+def _potree_html_url(base_url: str, project_id: str, dataset_name: str) -> str:
+    safe_project = _safe_project_id(project_id)
+    safe_dataset = _safe_tileset_id(dataset_name)
+    return (
+        f"{base_url.rstrip('/')}/data/projects/{safe_project}/processed/"
+        f"{safe_dataset}/{safe_dataset}.html"
+    )
+
+
+def _brand_potree_viewer(output_path: Path, dataset_name: str) -> None:
+    """Apply Droid workspace branding and quick tools to a generated point-cloud viewer."""
+    safe_dataset_name = _potree_dataset_name(dataset_name)
+    html_path = output_path / f"{safe_dataset_name}.html"
+    if not html_path.is_file():
+        html_files = sorted(output_path.glob("*.html"), key=lambda p: p.name.lower())
+        if not html_files:
+            return
+        html_path = html_files[0]
+
+    droid_style = """
+<style id="droid-pointcloud-theme">
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #06171b; font-family: Montserrat, Arial, sans-serif; }
+  #potree_render_area { background: radial-gradient(circle at 20% 10%, #123f49 0%, #06171b 48%, #020708 100%) !important; }
+  #potree_sidebar_container {
+    background: linear-gradient(180deg, rgba(14,62,73,0.96), rgba(4,19,24,0.96)) !important;
+    border-right: 1px solid rgba(148, 206, 214, 0.28) !important;
+    box-shadow: 14px 0 34px rgba(0,0,0,0.34);
+  }
+  #sidebar_header { min-height: 56px; padding: 14px 18px 8px; box-sizing: border-box; }
+  #sidebar_header::before {
+    content: "Droid 3D Point Cloud System";
+    display: block;
+    color: #f8fafc;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  #potree_branding, #potree_languages, #menu_about, #menu_about + div {
+    display: none !important;
+  }
+  #potree_menu h3, .accordion > h3 {
+    background: rgba(255,255,255,0.08) !important;
+    border: 1px solid rgba(148,206,214,0.18) !important;
+    color: #e6fbff !important;
+    border-radius: 8px !important;
+    margin: 8px 10px 0 !important;
+    font-family: Montserrat, Arial, sans-serif !important;
+    letter-spacing: 0.04em;
+  }
+  #potree_menu h3 + div, .pv-menu-list {
+    background: rgba(3,16,20,0.42) !important;
+    color: #d7eef2 !important;
+    font-family: Montserrat, Arial, sans-serif !important;
+  }
+  .divider > span {
+    color: #8bd6df !important;
+    background: rgba(14,62,73,0.95) !important;
+  }
+  .ui-slider .ui-slider-range { background: #14b8a6 !important; }
+  .ui-slider .ui-slider-handle {
+    background: #ccfbf1 !important;
+    border: 2px solid #0e3e49 !important;
+    border-radius: 999px !important;
+  }
+  .droid-pointcloud-toolbar {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 100000;
+    min-width: 270px;
+    padding: 14px;
+    border: 1px solid rgba(203,251,241,0.26);
+    border-radius: 14px;
+    background: linear-gradient(145deg, rgba(14,62,73,0.82), rgba(3,16,20,0.72));
+    box-shadow: 0 14px 34px rgba(0,0,0,0.38);
+    backdrop-filter: blur(12px);
+    color: #f8fafc;
+    font-family: Montserrat, Arial, sans-serif;
+  }
+  .droid-pointcloud-toolbar__title {
+    margin: 0 0 10px;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .droid-pointcloud-toolbar__actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .droid-pointcloud-toolbar button {
+    min-height: 34px;
+    border: 1px solid rgba(203,251,241,0.3);
+    border-radius: 9px;
+    background: #0e3e49;
+    color: #f8fafc;
+    font: 800 12px Montserrat, Arial, sans-serif;
+    cursor: pointer;
+  }
+  .droid-pointcloud-toolbar button:hover {
+    background: #14b8a6;
+    color: #06272d;
+  }
+  .droid-pointcloud-toolbar__hint {
+    margin: 10px 0 0;
+    color: #b8dbe0;
+    font-size: 11px;
+    line-height: 1.35;
+  }
+</style>
+"""
+    droid_toolbar = """
+<div class="droid-pointcloud-toolbar" aria-label="Droid point cloud tools">
+  <p class="droid-pointcloud-toolbar__title">Droid 3D Point Cloud System</p>
+  <div class="droid-pointcloud-toolbar__actions">
+    <button type="button" onclick="window.droidStartCrossSection && window.droidStartCrossSection()">Cross Section</button>
+    <button type="button" onclick="window.droidStartClipBox && window.droidStartClipBox()">Clip Box</button>
+    <button type="button" onclick="window.droidClearSections && window.droidClearSections()">Clear Tools</button>
+    <button type="button" onclick="window.viewer && window.viewer.fitToScreen()">Fit View</button>
+  </div>
+  <p class="droid-pointcloud-toolbar__hint">Use Cross Section, then click across the cloud to draw a profile line.</p>
+</div>
+"""
+    droid_script = """
+<script id="droid-pointcloud-tools">
+  window.droidStartCrossSection = function () {
+    if (!window.viewer || !viewer.profileTool) return;
+    viewer.profileTool.startInsertion();
+  };
+  window.droidStartClipBox = function () {
+    if (!window.viewer || !viewer.volumeTool) return;
+    const volume = viewer.volumeTool.startInsertion({ clip: true });
+    if (window.Potree && Potree.ClipTask) {
+      viewer.setClipTask(Potree.ClipTask.SHOW_INSIDE);
+    }
+    return volume;
+  };
+  window.droidClearSections = function () {
+    if (!window.viewer || !viewer.scene) return;
+    const profiles = Array.from(viewer.scene.profiles || []);
+    profiles.forEach(profile => viewer.scene.removeProfile(profile));
+    const volumes = Array.from(viewer.scene.volumes || []).filter(volume => volume.clip);
+    volumes.forEach(volume => viewer.scene.removeVolume(volume));
+  };
+</script>
+"""
+
+    try:
+        html = html_path.read_text(encoding="utf-8", errors="replace")
+        html = re.sub(r"<title>.*?</title>", "<title>Droid 3D Point Cloud System</title>", html, flags=re.I | re.S)
+        if "droid-pointcloud-theme" not in html:
+            html = html.replace("</head>", f"{droid_style}\n</head>")
+        if "droid-pointcloud-toolbar" not in html:
+            html = html.replace("<body>", f"<body>\n{droid_toolbar}", 1)
+        if "droid-pointcloud-tools" not in html:
+            html = html.replace("</body>", f"{droid_script}\n</body>")
+        html = html.replace('viewer.setDescription("");', 'viewer.setDescription("Droid 3D Point Cloud System");')
+        html_path.write_text(html, encoding="utf-8")
+    except OSError:
+        pass
+
+    sidebar_path = output_path / "libs" / "potree" / "sidebar.html"
+    if sidebar_path.is_file():
+        try:
+            sidebar = sidebar_path.read_text(encoding="utf-8", errors="replace")
+            sidebar = re.sub(
+                r'<span id="potree_branding" class="potree_sidebar_brand">.*?</span>\s*<div id="potree_languages"[^>]*></div>',
+                '<span id="potree_branding" class="potree_sidebar_brand">Droid 3D Point Cloud System</span>',
+                sidebar,
+                flags=re.I | re.S,
+            )
+            sidebar = re.sub(
+                r'<h3 id="menu_about">.*?</h3>\s*<div>.*?</div>\s*(?=</div>\s*</div>)',
+                "",
+                sidebar,
+                flags=re.I | re.S,
+            )
+            sidebar_path.write_text(sidebar, encoding="utf-8")
+        except OSError:
+            pass
+
+    css_path = output_path / "libs" / "potree" / "potree.css"
+    if css_path.is_file():
+        try:
+            css = css_path.read_text(encoding="utf-8", errors="replace")
+            if "droid-pointcloud-css-overrides" not in css:
+                css += "\n\n/* droid-pointcloud-css-overrides */\n" + """
+:root {
+  --color-0: rgba(6, 23, 27, 1);
+  --color-1: rgba(102, 151, 160, 1);
+  --color-2: rgba(14, 62, 73, 1);
+  --color-3: rgba(20, 184, 166, 1);
+  --color-4: rgba(204, 251, 241, 1);
+  --bg-color: rgba(6, 23, 27, 1);
+  --bg-color-2: rgba(14, 62, 73, 1);
+  --bg-light-color: rgba(14, 62, 73, 0.86);
+  --bg-dark-color: rgba(3, 16, 20, 1);
+  --bg-hover-color: rgba(20, 184, 166, 0.25);
+  --font-color: #d7eef2;
+  --font-color-2: #f8fafc;
+}
+"""
+                css_path.write_text(css, encoding="utf-8")
+        except OSError:
+            pass
 
 
 def _safe_dataset_id(dataset_id: str) -> str:
@@ -1272,31 +1569,45 @@ def pointcloud_status(
     project_id: str, request: Request, tileset_id: str | None = None
 ) -> dict[str, bool | str]:
     """
-    Poll conversion progress: tileset.json appears when py3dtiles finishes.
+    Poll conversion progress: Potree HTML appears when PotreeConverter finishes.
+    Older py3dtiles tileset.json outputs are still recognized for compatibility.
     If conversion fails, .conversion_error.txt is written under the output folder.
     """
     user = _require_user(request)
     safe_id = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_id)
     base_url = str(request.base_url).rstrip("/")
-    project_root = Path(LOCAL_DATA_PATH) / "pointclouds" / safe_id
+    potree_root = Path(LOCAL_DATA_PATH) / "projects" / safe_id / "processed"
+    legacy_root = Path(LOCAL_DATA_PATH) / "pointclouds" / safe_id
 
     candidates: list[Path] = []
     if tileset_id:
         safe_tileset_id = _safe_tileset_id(tileset_id)
-        candidates.append(project_root / safe_tileset_id)
+        candidates.append(potree_root / safe_tileset_id)
+        candidates.append(legacy_root / safe_tileset_id)
     else:
-        if (project_root / "tileset.json").is_file():
-            candidates.append(project_root)
-        if project_root.is_dir():
+        if potree_root.is_dir():
             children = sorted(
-                [p for p in project_root.iterdir() if p.is_dir()],
+                [p for p in potree_root.iterdir() if p.is_dir()],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            candidates.extend(children)
+        if (legacy_root / "tileset.json").is_file():
+            candidates.append(legacy_root)
+        if legacy_root.is_dir():
+            children = sorted(
+                [p for p in legacy_root.iterdir() if p.is_dir()],
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
             candidates.extend(children)
 
     for candidate in candidates:
+        potree_html = candidate / f"{candidate.name}.html"
+        if not potree_html.is_file():
+            html_candidates = sorted(candidate.glob("*.html"), key=lambda p: p.name.lower())
+            potree_html = html_candidates[0] if html_candidates else potree_html
         tileset = candidate / "tileset.json"
         err_file = candidate / ".conversion_error.txt"
         if err_file.is_file():
@@ -1304,18 +1615,27 @@ def pointcloud_status(
                 msg = err_file.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 msg = "Unknown conversion error"
-            suffix = (
-                f"/{candidate.name}" if candidate.resolve() != project_root.resolve() else ""
-            )
+            if potree_root in candidate.parents or candidate == potree_root:
+                url = _potree_html_url(base_url, safe_id, candidate.name)
+            else:
+                suffix = f"/{candidate.name}" if candidate.resolve() != legacy_root.resolve() else ""
+                url = f"{base_url}/data/pointclouds/{safe_id}{suffix}/tileset.json"
             return {
                 "ready": False,
                 "failed": True,
                 "error": msg[:8000],
-                "tileset_url": f"{base_url}/data/pointclouds/{safe_id}{suffix}/tileset.json",
+                "tileset_url": url,
+            }
+        if potree_html.is_file():
+            rel = potree_html.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            return {
+                "ready": True,
+                "failed": False,
+                "tileset_url": f"{base_url}/data/{rel}",
             }
         if tileset.is_file():
             suffix = (
-                f"/{candidate.name}" if candidate.resolve() != project_root.resolve() else ""
+                f"/{candidate.name}" if candidate.resolve() != legacy_root.resolve() else ""
             )
             return {
                 "ready": True,
@@ -1327,7 +1647,11 @@ def pointcloud_status(
     return {
         "ready": False,
         "failed": False,
-        "tileset_url": f"{base_url}/data/pointclouds/{safe_id}{pending_suffix}/tileset.json",
+        "tileset_url": (
+            _potree_html_url(base_url, safe_id, _safe_tileset_id(tileset_id))
+            if tileset_id
+            else f"{base_url}/data/projects/{safe_id}/processed{pending_suffix}/"
+        ),
     }
 
 
@@ -1714,7 +2038,7 @@ async def run_flood_engine() -> dict[str, str]:
 
 
 @app.post("/api/process-pointcloud")
-async def process_pointcloud(payload: PointCloudProcessPayload, request: Request) -> dict[str, str]:
+async def process_pointcloud_request(payload: PointCloudProcessPayload, request: Request) -> dict[str, str]:
     user = _require_user(request)
     _ensure_project_owner(int(user["id"]), _safe_project_id(payload.project_id))
     # Simulate running py3dtiles conversion:
@@ -1862,7 +2186,8 @@ async def complete_upload(
     else:
         stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(safe_name).stem).strip("-") or "cloud"
         reused_tileset_id = f"{stem[:40]}-{content_hash[:12]}"
-    output_dir = Path(LOCAL_DATA_PATH) / "pointclouds" / safe_project_id / reused_tileset_id
+    potree_dataset_name = _potree_dataset_name(reused_tileset_id)
+    output_dir = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "processed" / potree_dataset_name
     final_path = out_path
     hash_marker = output_dir / ".source_hash.txt"
     existing_hash = None
@@ -1872,32 +2197,29 @@ async def complete_upload(
     except OSError:
         existing_hash = None
 
-    if (output_dir / "tileset.json").is_file() and existing_hash == content_hash:
-        final_path.unlink(missing_ok=True)
+    potree_html = output_dir / f"{potree_dataset_name}.html"
+    if potree_html.is_file() and existing_hash == content_hash:
         _upsert_processing_job(
             safe_project_id,
             {
-                "job_id": reused_tileset_id,
+                "job_id": potree_dataset_name,
                 "kind": "pointcloud",
                 "file_name": safe_name,
                 "status": "Completed",
                 "updated_at": _now_iso(),
-                "result_url": f"/data/pointclouds/{safe_project_id}/{reused_tileset_id}/tileset.json",
+                "result_url": f"/data/projects/{safe_project_id}/processed/{potree_dataset_name}/{potree_dataset_name}.html",
             },
         )
         return {
             "status": "success",
             "message": (
                 f"Merged {total} chunks into {safe_name}. "
-                "Found existing converted tiles for same file content; reusing project tiles."
+                "Found existing Droid point cloud viewer for same file content; reusing project viewer."
             ),
             "tileset_url": "PENDING",
             "project_id": safe_project_id,
-            "target_tileset_url": (
-                f"{str(request.base_url).rstrip('/')}/data/pointclouds/"
-                f"{safe_project_id}/{reused_tileset_id}/tileset.json"
-            ),
-            "tileset_id": reused_tileset_id,
+            "target_tileset_url": _potree_html_url(str(request.base_url), safe_project_id, potree_dataset_name),
+            "tileset_id": potree_dataset_name,
         }
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1909,34 +2231,33 @@ async def complete_upload(
     _write_conversion_cache(cache)
     _upsert_processing_job(
         safe_project_id,
-        {
-            "job_id": reused_tileset_id,
-            "kind": "pointcloud",
-            "file_name": safe_name,
-            "status": "Processing",
+            {
+                "job_id": potree_dataset_name,
+                "kind": "pointcloud",
+                "file_name": safe_name,
+                "status": "Processing",
             "updated_at": _now_iso(),
         },
     )
     _invalidate_project_files_cache(safe_project_id)
     background_tasks.add_task(
-        process_pointcloud_background,
-        final_path,
-        output_dir,
+        process_pointcloud_potree_job,
+        str(final_path),
+        str(output_dir),
+        potree_dataset_name,
         safe_project_id,
-        reused_tileset_id,
+        potree_dataset_name,
         safe_name,
+        content_hash,
     )
 
     return {
         "status": "success",
-        "message": "File merged. 3D Tile processing started in background.",
+        "message": "File merged. Droid 3D point cloud processing started in background.",
         "tileset_url": "PENDING",
         "project_id": safe_project_id,
-        "target_tileset_url": (
-            f"{str(request.base_url).rstrip('/')}/data/pointclouds/"
-            f"{safe_project_id}/{reused_tileset_id}/tileset.json"
-        ),
-        "tileset_id": reused_tileset_id,
+        "target_tileset_url": _potree_html_url(str(request.base_url), safe_project_id, potree_dataset_name),
+        "tileset_id": potree_dataset_name,
     }
 
 
@@ -3216,6 +3537,39 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
 
     # Include manual processed folders even when not synced/tracked yet.
     if processed_root.is_dir():
+        for potree_html in sorted(processed_root.glob("*/*.html"), key=lambda p: p.parent.name.lower()):
+            rel = potree_html.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            rel_base = potree_html.parent.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            if rel in listed_rel_paths or rel_base in listed_rel_paths:
+                continue
+            source_name = ""
+            source_marker = potree_html.parent / ".source_name.txt"
+            if source_marker.is_file():
+                try:
+                    source_name = source_marker.read_text(encoding="utf-8").strip()
+                except OSError:
+                    source_name = ""
+            display_name = source_name or f"{potree_html.parent.name}.las"
+            files.append(
+                {
+                    "name": display_name,
+                    "kind": "Droid 3D Point Cloud",
+                    "type": "PointCloud",
+                    "size_bytes": str(potree_html.stat().st_size),
+                    "status": jobs_by_file.get(display_name, {}).get("status", "WEB-READY"),
+                    "file_url": f"{base_url}/data/{rel}",
+                    "layer_url": f"{base_url}/data/{rel}",
+                    "file_path": str(potree_html.resolve()),
+                    "rel_path": rel,
+                    "dataset_id": potree_html.parent.name,
+                    "dataset_type": "pointcloud",
+                    "month": "",
+                    "raw_rel_path": "",
+                },
+            )
+            listed_rel_paths.add(rel)
+            listed_rel_paths.add(rel_base)
+
         for model_root in _candidate_processed_model_dirs(processed_root):
             tileset_path = _find_tileset_json(model_root)
             if not tileset_path:

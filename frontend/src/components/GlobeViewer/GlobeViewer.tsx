@@ -144,8 +144,15 @@ function buildPointCloudStyle(pointSize: number, colorMode: ColorMode): Cesium.C
   })
 }
 
+function formatMeasureDistance(meters: number): string {
+  if (!Number.isFinite(meters) || meters <= 0) return '0.00 m'
+  if (meters >= 1000) return `${(meters / 1000).toFixed(3)} km`
+  return `${meters.toFixed(2)} m`
+}
+
 function projectFileToViewerOption(file: ProjectFile): ViewerDataOption | null {
   if (!file.layer_url) return null
+  const fileType = String(file.type).toLowerCase()
   if (file.type === '3DModel') {
     return {
       id: `model:${file.dataset_id || file.rel_path}`,
@@ -154,7 +161,7 @@ function projectFileToViewerOption(file: ProjectFile): ViewerDataOption | null {
       url: file.layer_url,
     }
   }
-  if (file.type === 'pointcloud') {
+  if (fileType === 'pointcloud' && !file.layer_url.toLowerCase().endsWith('.html')) {
     return {
       id: `pointcloud:${file.dataset_id || file.rel_path}`,
       name: file.name,
@@ -178,9 +185,13 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
   const modelTilesetsRef = useRef<Map<string, ModelTilesetEntry>>(new Map())
   const modelHeightOffsetRef = useRef(0)
   const orthomosaicLayerRef = useRef<Cesium.ImageryLayer | null>(null)
+  const measurePointsRef = useRef<Cesium.Cartesian3[]>([])
+  const measureEntityIdsRef = useRef<string[]>([])
   const [pointSize, setPointSize] = useState(3)
   const [colorMode, setColorMode] = useState<ColorMode>('RGB')
   const [imageryMode, setImageryMode] = useState<ImageryMode>('earth')
+  const [distanceMeasureActive, setDistanceMeasureActive] = useState(false)
+  const [measureDistanceM, setMeasureDistanceM] = useState(0)
   const [viewerReady, setViewerReady] = useState(false)
   const [modelHeightOffset, setModelHeightOffset] = useState(0)
   const [viewerError, setViewerError] = useState<string | null>(null)
@@ -214,7 +225,13 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
   )
 
   const activePointCloudLayer = useMemo(
-    () => activeLayers.find((layer) => layer.projectId === projectId && layer.layerType === 'pointcloud'),
+    () =>
+      activeLayers.find(
+        (layer) =>
+          layer.projectId === projectId &&
+          String(layer.layerType).toLowerCase() === 'pointcloud' &&
+          !layer.url.toLowerCase().endsWith('.html'),
+      ),
     [activeLayers, projectId],
   )
 
@@ -227,6 +244,85 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     () => cameraViews.find((view) => view.id === selectedCameraViewId) ?? null,
     [cameraViews, selectedCameraViewId],
   )
+
+  const clearDistanceMeasurement = useCallback(() => {
+    const viewer = viewerRef.current
+    if (viewer) {
+      for (const id of measureEntityIdsRef.current) {
+        const entity = viewer.entities.getById(id)
+        if (entity) viewer.entities.remove(entity)
+      }
+      viewer.scene.requestRender()
+    }
+    measureEntityIdsRef.current = []
+    measurePointsRef.current = []
+    setMeasureDistanceM(0)
+  }, [])
+
+  const refreshDistanceMeasurement = useCallback((points: Cesium.Cartesian3[]) => {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    for (const id of measureEntityIdsRef.current) {
+      const entity = viewer.entities.getById(id)
+      if (entity) viewer.entities.remove(entity)
+    }
+    measureEntityIdsRef.current = []
+
+    let total = 0
+    for (let i = 1; i < points.length; i += 1) {
+      total += Cesium.Cartesian3.distance(points[i - 1]!, points[i]!)
+    }
+    setMeasureDistanceM(total)
+
+    points.forEach((point, index) => {
+      const entity = viewer.entities.add({
+        id: `measure-point-${Date.now()}-${index}`,
+        position: point,
+        point: {
+          pixelSize: 9,
+          color: Cesium.Color.fromCssColorString('#14b8a6'),
+          outlineColor: Cesium.Color.WHITE,
+          outlineWidth: 2,
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+      })
+      measureEntityIdsRef.current.push(entity.id)
+    })
+
+    if (points.length >= 2) {
+      const line = viewer.entities.add({
+        id: `measure-line-${Date.now()}`,
+        polyline: {
+          positions: points,
+          width: 4,
+          material: Cesium.Color.fromCssColorString('#14b8a6'),
+          clampToGround: false,
+        },
+      })
+      measureEntityIdsRef.current.push(line.id)
+    }
+
+    const lastPoint = points[points.length - 1]
+    if (lastPoint) {
+      const label = viewer.entities.add({
+        id: `measure-label-${Date.now()}`,
+        position: lastPoint,
+        label: {
+          text: `Distance ${formatMeasureDistance(total)}`,
+          font: '600 14px Montserrat, sans-serif',
+          fillColor: Cesium.Color.WHITE,
+          outlineColor: Cesium.Color.BLACK,
+          outlineWidth: 3,
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+          pixelOffset: new Cesium.Cartesian2(0, -18),
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+      })
+      measureEntityIdsRef.current.push(label.id)
+    }
+    viewer.scene.requestRender()
+  }, [])
 
   const applyImageryMode = useCallback((mode: ImageryMode) => {
     const viewer = viewerRef.current
@@ -559,14 +655,22 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
         const fileOptions = files
           .map(projectFileToViewerOption)
           .filter((item): item is ViewerDataOption => Boolean(item))
-        const storedPointClouds = uploadedTilesets.map((item) => ({
-          id: `stored-pointcloud:${item.url}`,
-          name: item.label,
-          kind: 'pointcloud' as const,
-          url: item.url,
-        }))
+        const storedPointClouds = uploadedTilesets
+          .filter((item) => !item.url.toLowerCase().endsWith('.html'))
+          .map((item) => ({
+            id: `stored-pointcloud:${item.url}`,
+            name: item.label,
+            kind: 'pointcloud' as const,
+            url: item.url,
+          }))
         const activeOptions = activeLayers
-          .filter((layer) => layer.projectId === projectId && (layer.layerType === '3DModel' || layer.layerType === 'pointcloud') && layer.url)
+          .filter(
+            (layer) =>
+              layer.projectId === projectId &&
+              (layer.layerType === '3DModel' || String(layer.layerType).toLowerCase() === 'pointcloud') &&
+              layer.url &&
+              !layer.url.toLowerCase().endsWith('.html'),
+          )
           .map((layer) => ({
             id: `active:${layer.id}`,
             name: layer.name,
@@ -690,6 +794,30 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
   }, [applyImageryMode, imageryMode, viewerReady])
 
   useEffect(() => {
+    if (!viewerReady || !distanceMeasureActive) return
+    const viewer = viewerRef.current
+    if (!viewer) return
+
+    const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas)
+    handler.setInputAction((click: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
+      const scene = viewer.scene
+      let picked: Cesium.Cartesian3 | undefined
+      if (scene.pickPositionSupported) {
+        picked = scene.pickPosition(click.position)
+      }
+      if (!picked) {
+        picked = viewer.camera.pickEllipsoid(click.position, scene.globe.ellipsoid) ?? undefined
+      }
+      if (!picked) return
+      const nextPoints = [...measurePointsRef.current, Cesium.Cartesian3.clone(picked)]
+      measurePointsRef.current = nextPoints
+      refreshDistanceMeasurement(nextPoints)
+    }, Cesium.ScreenSpaceEventType.LEFT_CLICK)
+
+    return () => handler.destroy()
+  }, [distanceMeasureActive, refreshDistanceMeasurement, viewerReady])
+
+  useEffect(() => {
     const host = containerRef.current
     if (!host) return
     if (viewerRef.current) return
@@ -784,6 +912,12 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
         viewer?.imageryLayers.remove(orthomosaicLayerRef.current, true)
         orthomosaicLayerRef.current = null
       }
+      for (const id of measureEntityIdsRef.current) {
+        const entity = viewer?.entities.getById(id)
+        if (entity) viewer?.entities.remove(entity)
+      }
+      measureEntityIdsRef.current = []
+      measurePointsRef.current = []
       viewer?.destroy()
       viewerRef.current = null
       setViewerReady(false)
@@ -975,6 +1109,23 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
             ))}
           </div>
         ) : null}
+      </section>
+
+      <section className="gv-tools-panel" aria-label="Cesium measurement tools">
+        <div className="gv-tools-panel__head">
+          <span>Tools</span>
+          <strong>{formatMeasureDistance(measureDistanceM)}</strong>
+        </div>
+        <button
+          type="button"
+          className={distanceMeasureActive ? 'gv-tool-button gv-tool-button--active' : 'gv-tool-button'}
+          onClick={() => setDistanceMeasureActive((active) => !active)}
+        >
+          Measure Distance
+        </button>
+        <button type="button" className="gv-tool-button gv-tool-button--ghost" onClick={clearDistanceMeasurement}>
+          Clear
+        </button>
       </section>
 
       <div className="gv-nav-readout" aria-live="polite">

@@ -10,6 +10,7 @@ const MapViewer = lazy(() =>
   import('./MapViewer/MapViewer').then((m) => ({ default: m.MapViewer })),
 )
 const GlobeViewer = lazy(() => import('./GlobeViewer/GlobeViewer'))
+const PotreeViewer = lazy(() => import('./GlobeViewer/PotreeViewer'))
 const DatasetsPanel = lazy(() => import('./Datasets/DatasetsPanel'))
 const DownloadsPanel = lazy(() => import('./Downloads/DownloadsPanel'))
 const ComparePanel = lazy(() => import('./Compare/ComparePanel'))
@@ -81,6 +82,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     setCreateForm,
     shareCopied,
     setShareCopied,
+    activeLayers,
   } = useWorkspaceContext()
   const { projects, loading: projectsLoading, error: projectsError, addProject, renameProject } = useProjects()
   const [createProjectError, setCreateProjectError] = useState<string | null>(null)
@@ -96,6 +98,16 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     () =>
       selectedProject ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.id === 'projects'),
     [selectedProject],
+  )
+  const activePointCloudLayer = useMemo(
+    () =>
+      activeLayers.find(
+        (layer) =>
+          layer.projectId === selectedProject?.id &&
+          String(layer.layerType).toLowerCase() === 'pointcloud' &&
+          layer.url.toLowerCase().endsWith('.html'),
+      ),
+    [activeLayers, selectedProject?.id],
   )
 
   const handleShare = useCallback(() => {
@@ -493,7 +505,9 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                   {activeId === 'map'
                     ? 'Leaflet · 2D'
                     : activeId === 'globe'
-                      ? '3D Model Viewer'
+                      ? activePointCloudLayer?.url
+                        ? 'Droid 3D Point Cloud'
+                        : '3D Model Viewer'
                     : activeId === 'datasets'
                       ? 'Data Catalog'
                     : activeId === 'compare'
@@ -518,7 +532,11 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                   aria-label="3D globe viewer"
                 >
                   <Suspense fallback={<div className="ds-panel-loading">Loading 3D globe…</div>}>
-                    <GlobeViewer projectId={selectedProject!.id} />
+                    {activePointCloudLayer?.url ? (
+                      <PotreeViewer url={activePointCloudLayer.url} />
+                    ) : (
+                      <GlobeViewer projectId={selectedProject!.id} />
+                    )}
                   </Suspense>
                 </div>
               ) : activeId === 'datasets' ? (

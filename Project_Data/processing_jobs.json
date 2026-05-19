@@ -1,6 +1,14 @@
 {
   "proj_9b8098d17046469b": [
     {
+      "job_id": "Auro-Point-Cloud-Cropped-b1d1f6bfb647",
+      "kind": "pointcloud",
+      "file_name": "Auro-Point Cloud Cropped new.las",
+      "status": "Completed",
+      "updated_at": "2026-05-19T08:45:24.987018+00:00",
+      "result_url": "/data/projects/proj_9b8098d17046469b/processed/Auro-Point-Cloud-Cropped-b1d1f6bfb647/Auro-Point-Cloud-Cropped-b1d1f6bfb647.html"
+    },
+    {
       "job_id": "Scene-1045061a5f6e",
       "kind": "dataset",
       "file_name": "Scene.zip",
@@ -76,14 +84,6 @@
       "status": "Completed",
       "updated_at": "2026-04-30T06:22:15.109953+00:00",
       "result_url": "/data/projects/proj_9b8098d17046469b/processed/AuroTrimmed-d5da99c9"
-    },
-    {
-      "job_id": "Auro-Point-Cloud-Cropped-b1d1f6bfb647",
-      "kind": "pointcloud",
-      "file_name": "Auro-Point Cloud Cropped.las",
-      "status": "Completed",
-      "updated_at": "2026-04-30T05:57:16.243099+00:00",
-      "result_url": "/data/pointclouds/proj_9b8098d17046469b/Auro-Point-Cloud-Cropped-b1d1f6bfb647/tileset.json"
     }
   ]
 }

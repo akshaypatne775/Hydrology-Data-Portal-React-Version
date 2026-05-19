@@ -156,6 +156,73 @@
   border-top: 1px solid rgba(255, 255, 255, 0.16);
 }
 
+.gv-tools-panel {
+  position: absolute;
+  right: 1rem;
+  top: 4.5rem;
+  z-index: 22;
+  width: min(260px, calc(100% - 2rem));
+  padding: 0.85rem;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: linear-gradient(145deg, rgba(14, 62, 73, 0.64), rgba(6, 23, 31, 0.5));
+  box-shadow:
+    0 8px 28px rgba(2, 6, 23, 0.38),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  backdrop-filter: blur(12px);
+  color: #f8fafc;
+}
+
+.gv-tools-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  margin-bottom: 0.65rem;
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.gv-tools-panel__head strong {
+  max-width: 8rem;
+  overflow: hidden;
+  color: #ccfbf1;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gv-tool-button {
+  width: 100%;
+  min-height: 2.15rem;
+  margin-top: 0.45rem;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 9px;
+  background: #0e3e49;
+  color: #fff;
+  font-family: 'Montserrat', sans-serif;
+  font-size: 0.76rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.gv-tool-button:hover,
+.gv-tool-button--active {
+  background: #14b8a6;
+  color: #06272d;
+}
+
+.gv-tool-button--ghost {
+  background: rgba(244, 250, 251, 0.92);
+  color: #0e3e49;
+}
+
+.gv-tool-button--ghost:hover {
+  background: rgba(209, 231, 235, 0.96);
+}
+
 .gv-camera-controls {
   display: flex;
   flex-direction: column;

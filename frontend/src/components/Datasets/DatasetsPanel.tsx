@@ -28,7 +28,7 @@ type DatasetRow = {
   status: DatasetStatus
   filePath?: string
   relPath?: string
-  layerType?: 'cog' | 'pointcloud' | '3DModel'
+  layerType?: 'cog' | 'pointcloud' | 'PointCloud' | '3DModel'
   layerUrl?: string
   datasetId?: string
   month?: string
@@ -71,10 +71,11 @@ function formatSize(sizeBytes: string): string {
 }
 
 function mapProjectFile(file: ProjectFile): DatasetRow {
+  const fileType = String(file.type).toLowerCase()
   const type = file.type === '3DModel' ? '3D Model' : inferDatasetType(file.name)
   const layerType =
     file.type === 'cog' ? 'cog' :
-      file.type === 'pointcloud' ? 'pointcloud' :
+      fileType === 'pointcloud' ? 'pointcloud' :
         file.type === '3DModel' ? '3DModel' :
           undefined
   const layerUrl =
@@ -248,7 +249,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
 
   const getActionLabel = useCallback((row: DatasetRow) => {
     if (row.layerType === 'cog') return 'Show Ortho on Map'
-    if (row.layerType === 'pointcloud') return 'Show in Globe'
+    if (String(row.layerType).toLowerCase() === 'pointcloud') return 'Open Point Cloud'
     if (row.layerType === '3DModel') return 'Show 3D Model'
     return 'Delete'
   }, [])
