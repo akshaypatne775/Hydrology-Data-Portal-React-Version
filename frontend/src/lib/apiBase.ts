@@ -50,6 +50,30 @@ export function getApiBaseUrl(): string {
 /** Deployment-ready API origin resolved from environment. */
 export const API_BASE = getApiBaseUrl()
 
+export function toSameOriginBackendUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined
+  const trimmed = url.trim()
+  if (!trimmed) return undefined
+
+  try {
+    const parsed = new URL(
+      trimmed,
+      typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:5173',
+    )
+    if (
+      parsed.pathname.startsWith('/api/') ||
+      parsed.pathname.startsWith('/data/') ||
+      parsed.pathname.startsWith('/tiles/')
+    ) {
+      return `${parsed.pathname}${parsed.search}${parsed.hash}`
+    }
+  } catch {
+    // Keep the original value when it is not URL-like.
+  }
+
+  return trimmed
+}
+
 export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`
   return fetch(`${API_BASE}${normalizedPath}`, {

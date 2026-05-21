@@ -65,6 +65,12 @@ const DASHBOARD_MODULES = [
   },
 ] as const
 
+function formatDisplayDate(dateValue: string): string {
+  const date = new Date(dateValue)
+  if (Number.isNaN(date.getTime())) return dateValue
+  return date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+}
+
 type DashboardProps = {
   user: { id: number; email: string }
   onLogout: () => void
@@ -87,10 +93,11 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   const { projects, loading: projectsLoading, error: projectsError, addProject, renameProject } = useProjects()
   const [createProjectError, setCreateProjectError] = useState<string | null>(null)
   const [renamingProject, setRenamingProject] = useState(false)
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
   const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetric[]>([
     { label: 'Projects', value: '0', meta: 'Available workspaces', icon: 'fa-solid fa-folder-tree' },
     { label: 'Datasets', value: '0', meta: 'In selected project', icon: 'fa-solid fa-database' },
-    { label: 'Processing Jobs', value: '0', meta: 'Running server tasks', icon: 'fa-solid fa-gear' },
+    { label: 'Client Data Hub', value: '0', meta: 'Running server tasks', icon: 'fa-solid fa-gear' },
     { label: 'Reports', value: '0', meta: 'Downloadable files', icon: 'fa-solid fa-file-lines' },
   ])
 
@@ -144,7 +151,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
         setDashboardMetrics([
           { label: 'Projects', value: String(projects.length), meta: 'Available workspaces', icon: 'fa-solid fa-folder-tree' },
           { label: 'Datasets', value: '-', meta: 'Select a project', icon: 'fa-solid fa-database' },
-          { label: 'Processing Jobs', value: '-', meta: 'Select a project', icon: 'fa-solid fa-gear' },
+          { label: 'Client Data Hub', value: '-', meta: 'Select a project', icon: 'fa-solid fa-gear' },
           { label: 'Reports', value: '-', meta: 'Select a project', icon: 'fa-solid fa-file-lines' },
         ])
         return
@@ -160,7 +167,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
         setDashboardMetrics([
           { label: 'Projects', value: String(projects.length), meta: 'Available workspaces', icon: 'fa-solid fa-folder-tree' },
           { label: 'Datasets', value: String(files.length), meta: 'In selected project', icon: 'fa-solid fa-database' },
-          { label: 'Processing Jobs', value: String(processing), meta: 'Running server tasks', icon: 'fa-solid fa-gear' },
+          { label: 'Client Data Hub', value: String(processing), meta: 'Running server tasks', icon: 'fa-solid fa-gear' },
           { label: 'Reports', value: String(reports), meta: 'Downloadable files', icon: 'fa-solid fa-file-lines' },
         ])
       } catch {
@@ -168,7 +175,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
           setDashboardMetrics([
             { label: 'Projects', value: String(projects.length), meta: 'Available workspaces', icon: 'fa-solid fa-folder-tree' },
             { label: 'Datasets', value: '0', meta: 'Unable to load', icon: 'fa-solid fa-database' },
-            { label: 'Processing Jobs', value: '0', meta: 'Unable to load', icon: 'fa-solid fa-gear' },
+            { label: 'Client Data Hub', value: '0', meta: 'Unable to load', icon: 'fa-solid fa-gear' },
             { label: 'Reports', value: '0', meta: 'Unable to load', icon: 'fa-solid fa-file-lines' },
           ])
         }
@@ -293,12 +300,21 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   )
 
   return (
-    <div className="ds-dashboard">
+    <div className={isSidebarCollapsed ? 'ds-dashboard ds-dashboard--sidebar-collapsed' : 'ds-dashboard'}>
       <aside className="ds-sidebar" aria-label="Droid Cloud navigation">
         <div className="ds-sidebar__brand">
           <div className="ds-sidebar__brand-mark">
             <img src={DROID_CLOUD_LOGO_URL} alt="Droid Cloud" className="ds-sidebar__logo-img" />
           </div>
+          <button
+            type="button"
+            className="ds-sidebar__collapse"
+            onClick={() => setIsSidebarCollapsed((value) => !value)}
+            aria-label={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            <i className={isSidebarCollapsed ? 'fa-solid fa-chevron-right' : 'fa-solid fa-chevron-left'} aria-hidden />
+          </button>
         </div>
 
         <nav className="ds-sidebar__nav">
@@ -318,6 +334,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                 }
                 setActiveId(item.id)
               }}
+              title={item.label}
             >
               <i className={item.icon} aria-hidden />
               <span>{item.label}</span>
@@ -411,7 +428,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                       <i className="fa-solid fa-location-dot" aria-hidden /> {project.location}
                     </p>
                     <p className="ds-project-card__meta">
-                      <i className="fa-regular fa-calendar" aria-hidden /> {project.date}
+                      <i className="fa-regular fa-calendar" aria-hidden /> {formatDisplayDate(project.date)}
                     </p>
                     <p className="ds-project-card__meta">
                       <i className="fa-solid fa-compass-drafting" aria-hidden /> {project.type}

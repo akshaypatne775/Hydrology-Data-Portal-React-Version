@@ -43,6 +43,7 @@ export type ProjectFile = {
   month?: string
   size_bytes: string
   status: string
+  updated_at?: string
   file_url: string
   layer_url: string
   file_path: string
@@ -164,6 +165,20 @@ export async function updateDatasetMetadata(
   })
   if (!res.ok) throw new Error(`Metadata update failed (${res.status})`)
   invalidateProjectDataCache(projectId)
+}
+
+export async function generateContours(
+  projectId: string,
+  payload: { dataset_id?: string; source_tif?: string; interval: number },
+): Promise<ProcessDatasetResponse> {
+  const res = await apiRequest(`/api/datasets/${encodeURIComponent(projectId)}/generate-contours`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(`Contour generation failed (${res.status})`)
+  invalidateProjectDataCache(projectId)
+  return (await res.json()) as ProcessDatasetResponse
 }
 
 export async function syncManualDatasetFolders(

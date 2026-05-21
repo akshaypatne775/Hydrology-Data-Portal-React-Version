@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { useUploadContext } from '../../context/UploadContext'
 import { useWorkspaceContext } from '../../context/WorkspaceContext'
-import { API_BASE } from '../../lib/apiBase'
+import { API_BASE, toSameOriginBackendUrl } from '../../lib/apiBase'
 import {
   deleteProjectFile,
   getProjectFiles,
   getProjectJobs,
+  generateContours,
   invalidateProjectDataCache,
   openManualDatasetFolder,
   readDatasetMetadata,
@@ -16,8 +17,8 @@ import {
 } from '../../services/datasetService'
 import './DatasetsPanel.css'
 
-const ALLOWED_EXTENSIONS = new Set(['las', 'laz', 'tif', 'tiff', 'csv', 'zip'])
-type DatasetType = 'Ortho' | 'DTM' | 'DSM' | 'Point Cloud' | '3D Model' | 'CSV'
+const ALLOWED_EXTENSIONS = new Set(['las', 'laz', 'tif', 'tiff', 'csv', 'zip', 'kml', 'geojson', 'dwg'])
+type DatasetType = 'Ortho' | 'DTM' | 'DSM' | 'Point Cloud' | '3D Model' | 'CSV' | 'Vector' | 'CAD'
 type DatasetStatus = 'Raw' | 'Processing' | 'Web-Ready'
 
 type DatasetRow = {
@@ -26,9 +27,10 @@ type DatasetRow = {
   type: DatasetType
   size: string
   status: DatasetStatus
+  uploadDate?: string
   filePath?: string
   relPath?: string
-  layerType?: 'cog' | 'pointcloud' | 'PointCloud' | '3DModel'
+  layerType?: 'cog' | 'pointcloud' | 'PointCloud' | '3DModel' | 'Vector' | 'CAD'
   layerUrl?: string
   datasetId?: string
   month?: string
@@ -48,12 +50,34 @@ type UploadFormState = {
 
 function inferDatasetType(fileName: string): DatasetType {
   const lowered = fileName.toLowerCase()
-  if (lowered.includes('dtm')) return 'DTM'
+  if (lowered.endsWith('.dwg')) return 'CAD'
+  if (lowered.endsWith('.kml') || lowered.endsWith('.geojson')) return 'Vector'
+  if (lowered.includes('dtm') || lowered.includes('dem')) return 'DTM'
   if (lowered.includes('dsm')) return 'DSM'
   if (lowered.endsWith('.csv')) return 'CSV'
   if (lowered.endsWith('.zip')) return '3D Model'
   if (lowered.includes('ortho') || lowered.endsWith('.tif') || lowered.endsWith('.tiff')) return 'Ortho'
   return 'Point Cloud'
+}
+
+function datasetTypeFromBackend(value?: string): DatasetType | undefined {
+  const normalized = (value || '').toLowerCase()
+  if (normalized === 'ortho' || normalized === 'orthomosaic') return 'Ortho'
+  if (normalized === 'dtm' || normalized === 'dem') return 'DTM'
+  if (normalized === 'dsm') return 'DSM'
+  if (normalized === 'csv') return 'CSV'
+  if (normalized === '3dmodel' || normalized === '3dtiles') return '3D Model'
+  if (normalized === 'pointcloud') return 'Point Cloud'
+  if (normalized === 'vector') return 'Vector'
+  if (normalized === 'cad') return 'CAD'
+  return undefined
+}
+
+function formatDisplayDate(dateValue?: string): string {
+  if (!dateValue) return '--'
+  const date = new Date(dateValue)
+  if (Number.isNaN(date.getTime())) return dateValue
+  return date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
 }
 
 function normalizeJobStatus(status: string): DatasetStatus {
@@ -72,22 +96,26 @@ function formatSize(sizeBytes: string): string {
 
 function mapProjectFile(file: ProjectFile): DatasetRow {
   const fileType = String(file.type).toLowerCase()
-  const type = file.type === '3DModel' ? '3D Model' : inferDatasetType(file.name)
+  const type = datasetTypeFromBackend(file.dataset_type) ||
+    (file.type === '3DModel' ? '3D Model' : fileType === 'vector' ? 'Vector' : fileType === 'cad' ? 'CAD' : inferDatasetType(file.name))
   const layerType =
     file.type === 'cog' ? 'cog' :
       fileType === 'pointcloud' ? 'pointcloud' :
         file.type === '3DModel' ? '3DModel' :
+          fileType === 'vector' ? 'Vector' :
+            fileType === 'cad' ? 'CAD' :
           undefined
   const layerUrl =
     layerType === '3DModel'
-      ? file.layer_url || `${API_BASE}/data/${file.rel_path.replace(/\/$/, '')}/tileset.json`
-      : file.layer_url || undefined
+      ? toSameOriginBackendUrl(file.layer_url) || `${API_BASE}/data/${file.rel_path.replace(/\/$/, '')}/tileset.json`
+      : toSameOriginBackendUrl(file.layer_url)
   return {
     id: `file-${file.rel_path}`,
     fileName: file.name,
     type,
     size: formatSize(file.size_bytes),
     status: normalizeJobStatus(file.status),
+    uploadDate: formatDisplayDate(file.updated_at),
     filePath: file.file_path || undefined,
     relPath: file.rel_path,
     layerType,
@@ -104,6 +132,8 @@ function toBackendDatasetType(type: DatasetType): string {
   if (type === 'DSM') return 'dsm'
   if (type === 'CSV') return 'csv'
   if (type === '3D Model') return '3dmodel'
+  if (type === 'Vector') return 'vector'
+  if (type === 'CAD') return 'cad'
   return 'pointcloud'
 }
 
@@ -189,7 +219,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         .map((task) => ({
           id: `live-${task.id}`,
           fileName: task.fileName,
-          type: inferDatasetType(task.fileName),
+          type: datasetTypeFromBackend(task.datasetType) || inferDatasetType(task.fileName),
           size: 'Uploading',
           status: 'Processing',
         } as DatasetRow))
@@ -231,11 +261,15 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   const submitUpload = useCallback(async () => {
     if (!projectId || !selectedFile || !uploadForm.name.trim()) return
     const ext = selectedFile.name.split('.').pop() || 'dat'
+    if (ext.toLowerCase() === 'zip' && uploadForm.type !== '3D Model') {
+      window.alert('ZIP upload is reserved for 3D Model tilesets. Upload DTM, DSM, and Ortho as .tif or .tiff so they open in Viewer (2D).')
+      return
+    }
     const renamed = new File([selectedFile], `${uploadForm.name.trim()}.${ext}`, {
       type: selectedFile.type,
       lastModified: selectedFile.lastModified,
     })
-    if (['tif', 'tiff', 'csv', 'zip'].includes(ext.toLowerCase())) {
+    if (['tif', 'tiff', 'csv', 'zip', 'kml', 'geojson', 'dwg'].includes(ext.toLowerCase())) {
       await startDatasetUpload(renamed, projectId, {
         datasetType: toBackendDatasetType(uploadForm.type),
         month: uploadForm.date.slice(0, 7),
@@ -251,8 +285,28 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     if (row.layerType === 'cog') return 'Show Ortho on Map'
     if (String(row.layerType).toLowerCase() === 'pointcloud') return 'Open Point Cloud'
     if (row.layerType === '3DModel') return 'Show 3D Model'
+    if (row.layerType === 'Vector') return 'Show Vector'
+    if (row.layerType === 'CAD') return 'CAD Asset'
     return 'Delete'
   }, [])
+
+  const onGenerateContours = useCallback(async (row: DatasetRow) => {
+    if (!projectId || !row.datasetId) return
+    const raw = window.prompt('Contour interval in meters', '5')
+    if (!raw) return
+    const interval = Number(raw)
+    if (!Number.isFinite(interval) || interval <= 0) {
+      window.alert('Please enter a valid contour interval.')
+      return
+    }
+    try {
+      await generateContours(projectId, { dataset_id: row.datasetId, interval })
+      invalidateProjectDataCache(projectId)
+      window.alert('Contour generation started. The Vector layer will appear when ready.')
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Contour generation failed')
+    }
+  }, [projectId])
 
   const onSyncManual = useCallback(async () => {
     if (!projectId || syncingManual) return
@@ -354,14 +408,14 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         <input
           ref={fileInputRef}
           type="file"
-          accept=".las,.laz,.tif,.tiff,.csv,.zip"
+          accept=".las,.laz,.tif,.tiff,.csv,.zip,.kml,.geojson,.dwg"
           className="gv-file-input"
           onChange={(event) => {
             const file = event.target.files?.[0]
             if (file) void prepareFile(file)
           }}
         />
-        <p className="dsp-dropzone__title">Drop or Select .las, .laz, .tif, .csv, .zip files</p>
+        <p className="dsp-dropzone__title">Drop or Select .las, .laz, .tif, .csv, .zip, .kml, .geojson, .dwg files</p>
         <p className="dsp-dropzone__meta">After select, fill details and start upload</p>
       </div>
 
@@ -386,6 +440,8 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
               <option value="CSV">CSV</option>
               <option value="3D Model">3D Model</option>
               <option value="Point Cloud">Point Cloud</option>
+              <option value="Vector">Vector</option>
+              <option value="CAD">CAD</option>
             </select>
           </label>
           <label>
@@ -404,17 +460,19 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
               placeholder="EPSG:32644"
             />
           </label>
-          <button
-            type="button"
-            className="dsp-action"
-            onClick={() => void onDetectEpsg()}
-            disabled={!projectId || !selectedFile || detectingEpsg}
-          >
-            {detectingEpsg ? 'Detecting EPSG...' : 'Auto Detect EPSG'}
-          </button>
-          <button type="button" className="dsp-action" onClick={() => void submitUpload()}>
-            Start Upload
-          </button>
+          <div className="dsp-form__actions">
+            <button
+              type="button"
+              className="dsp-action dsp-action--secondary"
+              onClick={() => void onDetectEpsg()}
+              disabled={!projectId || !selectedFile || detectingEpsg}
+            >
+              {detectingEpsg ? 'Detecting EPSG...' : 'Detect EPSG'}
+            </button>
+            <button type="button" className="dsp-action dsp-action--primary" onClick={() => void submitUpload()}>
+              Start Upload
+            </button>
+          </div>
         </div>
       ) : null}
 
@@ -437,6 +495,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
               <th>File Name</th>
               <th>Type</th>
               <th>Size</th>
+              <th>Upload Date</th>
               <th>Month</th>
               <th>Status</th>
               <th>Action</th>
@@ -445,7 +504,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
           <tbody>
             {loadingRows && datasets.length === 0 ? (
               <tr>
-                <td colSpan={6}>Loading datasets...</td>
+                <td colSpan={7}>Loading datasets...</td>
               </tr>
             ) : null}
             {datasets.map((row) => (
@@ -453,6 +512,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                 <td>{row.fileName}</td>
                 <td>{row.type}</td>
                 <td>{row.size}</td>
+                <td>{row.uploadDate || '--'}</td>
                 <td>
                   {row.datasetId ? (
                     <input
@@ -484,46 +544,53 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                   </span>
                 </td>
                 <td>
-                  {row.layerType && row.layerUrl ? (
-                    <button
-                      type="button"
-                      className="dsp-action"
-                      onClick={() => {
-                        if (!projectId || !row.layerType || !row.layerUrl) return
-                        toggleLayer({
-                          id: `${projectId}:${row.fileName}`,
-                          projectId,
-                          name: row.fileName,
-                          layerType: row.layerType,
-                          url: row.layerUrl,
-                          datasetId: row.datasetId,
-                          datasetType: row.datasetType || toBackendDatasetType(row.type),
-                          month: row.month,
-                        })
-                        setActiveId(row.layerType === 'cog' ? 'map' : 'globe')
-                      }}
-                    >
-                      {getActionLabel(row)}
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="dsp-action"
-                      onClick={async () => {
-                        if (!projectId || !row.relPath) return
-                        try {
-                          await deleteProjectFile(projectId, row.relPath)
-                          setDatasets((prev) => prev.filter((item) => item.id !== row.id))
-                          invalidateProjectDataCache(projectId)
-                        } catch {
-                          // keep UI stable on failure
-                        }
-                      }}
-                      disabled={!row.relPath}
-                    >
-                      Delete
-                    </button>
-                  )}
+                  <div className="dsp-action-group">
+                    {row.layerType && row.layerUrl ? (
+                      <button
+                        type="button"
+                        className="dsp-action"
+                        onClick={() => {
+                          if (!projectId || !row.layerType || !row.layerUrl) return
+                          toggleLayer({
+                            id: `${projectId}:${row.fileName}`,
+                            projectId,
+                            name: row.fileName,
+                            layerType: row.layerType,
+                            url: row.layerUrl,
+                            datasetId: row.datasetId,
+                            datasetType: row.datasetType || toBackendDatasetType(row.type),
+                            month: row.month,
+                          })
+                          setActiveId(row.layerType === 'cog' || row.layerType === 'Vector' ? 'map' : 'globe')
+                        }}
+                      >
+                        {getActionLabel(row)}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="dsp-action"
+                        onClick={async () => {
+                          if (!projectId || !row.relPath) return
+                          try {
+                            await deleteProjectFile(projectId, row.relPath)
+                            setDatasets((prev) => prev.filter((item) => item.id !== row.id))
+                            invalidateProjectDataCache(projectId)
+                          } catch {
+                            // keep UI stable on failure
+                          }
+                        }}
+                        disabled={!row.relPath}
+                      >
+                        Delete
+                      </button>
+                    )}
+                    {row.datasetId && ['DTM', 'DSM'].includes(row.type) ? (
+                      <button type="button" className="dsp-action" onClick={() => void onGenerateContours(row)}>
+                        Contours
+                      </button>
+                    ) : null}
+                  </div>
                 </td>
               </tr>
             ))}

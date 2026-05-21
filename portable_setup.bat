@@ -8,6 +8,7 @@ set "ROOT=%~dp0"
 set "BACKEND_DIR=%ROOT%backend"
 set "FRONTEND_DIR=%ROOT%frontend"
 set "PROJECT_DATA_DIR=%ROOT%Project_Data"
+set "PUBLIC_PORTAL_URL=https://portal.droidminingsolutions.com"
 
 echo.
 echo  ================================================================
@@ -173,13 +174,13 @@ if not exist "%BACKEND_ENV%" (
   >> "%BACKEND_ENV%" echo SESSION_TTL_SECONDS=604800
   for /f %%S in ('powershell -NoProfile -Command "[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(48))"') do set "SESSION_SECRET=%%S"
   >> "%BACKEND_ENV%" echo SESSION_SIGNING_SECRET=!SESSION_SECRET!
-  >> "%BACKEND_ENV%" echo FRONTEND_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+  >> "%BACKEND_ENV%" echo FRONTEND_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,%PUBLIC_PORTAL_URL%
   exit /b 0
 )
 
 copy "%BACKEND_ENV%" "%BACKEND_ENV%.before_portable_setup" >nul
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$p='%BACKEND_ENV%'; $local='%LOCAL_DATA_POSIX%'; $lines=Get-Content $p -ErrorAction SilentlyContinue; if(-not $lines){$lines=@()}; $keys=@('LOCAL_DATA_PATH','UPLOAD_DISK_HEADROOM_MB','SESSION_TTL_SECONDS','FRONTEND_ORIGINS'); function Set-Line($k,$v){ $script:lines=@($script:lines | Where-Object {$_ -notmatch ('^'+[regex]::Escape($k)+'=')}); $script:lines += ($k+'='+$v) }; Set-Line 'LOCAL_DATA_PATH' $local; if(-not ($lines -match '^UPLOAD_DISK_HEADROOM_MB=')){Set-Line 'UPLOAD_DISK_HEADROOM_MB' '512'}; if(-not ($lines -match '^SESSION_TTL_SECONDS=')){Set-Line 'SESSION_TTL_SECONDS' '604800'}; if(-not ($lines -match '^FRONTEND_ORIGINS=')){Set-Line 'FRONTEND_ORIGINS' 'http://localhost:5173,http://127.0.0.1:5173'}; if(-not ($lines -match '^SESSION_SIGNING_SECRET=')){Set-Line 'SESSION_SIGNING_SECRET' ([Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(48)))}; Set-Content -Path $p -Value $lines -Encoding UTF8"
+  "$p='%BACKEND_ENV%'; $local='%LOCAL_DATA_POSIX%'; $public='%PUBLIC_PORTAL_URL%'; $lines=Get-Content $p -ErrorAction SilentlyContinue; if(-not $lines){$lines=@()}; $keys=@('LOCAL_DATA_PATH','UPLOAD_DISK_HEADROOM_MB','SESSION_TTL_SECONDS','FRONTEND_ORIGINS'); function Set-Line($k,$v){ $script:lines=@($script:lines | Where-Object {$_ -notmatch ('^'+[regex]::Escape($k)+'=')}); $script:lines += ($k+'='+$v) }; Set-Line 'LOCAL_DATA_PATH' $local; if(-not ($lines -match '^UPLOAD_DISK_HEADROOM_MB=')){Set-Line 'UPLOAD_DISK_HEADROOM_MB' '512'}; if(-not ($lines -match '^SESSION_TTL_SECONDS=')){Set-Line 'SESSION_TTL_SECONDS' '604800'}; if(-not ($lines -match '^FRONTEND_ORIGINS=')){Set-Line 'FRONTEND_ORIGINS' ('http://localhost:5173,http://127.0.0.1:5173,'+$public)} elseif(-not (($lines | Where-Object {$_ -match '^FRONTEND_ORIGINS='}) -match [regex]::Escape($public))){ $orig=($lines | Where-Object {$_ -match '^FRONTEND_ORIGINS='} | Select-Object -First 1); Set-Line 'FRONTEND_ORIGINS' ($orig.Substring('FRONTEND_ORIGINS='.Length)+','+$public) }; if(-not ($lines -match '^SESSION_SIGNING_SECRET=')){Set-Line 'SESSION_SIGNING_SECRET' ([Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(48)))}; Set-Content -Path $p -Value $lines -Encoding UTF8"
 if errorlevel 1 (
   echo [ERROR] Failed to repair backend .env.
   exit /b 1
@@ -204,9 +205,8 @@ if not exist ".env.local" (
     copy ".env.example" ".env.local" >nul
     echo [OK] Created frontend .env.local from .env.example.
   ) else (
-    > ".env.local" echo VITE_API_BASE_URL=http://localhost:8000
-    >> ".env.local" echo VITE_S3_TILE_BASE_URL=http://localhost:8000/tiles
-    >> ".env.local" echo VITE_FLOOD_TILE_BASE_URL=http://localhost:8000/tiles/flood
+    > ".env.local" echo VITE_S3_TILE_BASE_URL=/tiles
+    >> ".env.local" echo VITE_FLOOD_TILE_BASE_URL=/tiles/flood
     echo [OK] Created frontend .env.local defaults.
   )
 ) else (

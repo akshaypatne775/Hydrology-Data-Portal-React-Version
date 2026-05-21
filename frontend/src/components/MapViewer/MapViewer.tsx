@@ -30,7 +30,7 @@ import {
 } from 'react-leaflet'
 import { createIssue, listIssues, type SavedIssue } from '../../services/issuesService'
 import { useWorkspaceContext } from '../../context/WorkspaceContext'
-import { API_BASE } from '../../lib/apiBase'
+import { API_BASE, toSameOriginBackendUrl } from '../../lib/apiBase'
 import {
   getProjectFiles,
   getDatasetCropMask,
@@ -236,6 +236,18 @@ function tileTemplateToStaticBase(url: string): string | null {
   const suffix = '{z}/{x}/{y}.png'
   if (!url.endsWith(suffix)) return null
   return url.slice(0, -suffix.length)
+}
+
+async function fetchStaticTileMeta(tileUrl: string): Promise<{ zoom_max?: number; zoom_min?: number } | null> {
+  const base = tileTemplateToStaticBase(tileUrl)
+  if (!base) return null
+  try {
+    const res = await fetch(`${base}tileset.json`, { credentials: 'include' })
+    if (!res.ok) return null
+    return (await res.json()) as { zoom_max?: number; zoom_min?: number }
+  } catch {
+    return null
+  }
 }
 
 function tileFolderFromTemplate(url: string): string | null {
@@ -570,6 +582,24 @@ function OrthomosaicTileLayerWithOptions({
 }) {
   const map = useMap()
   const paneName = 'orthomosaic-crop-pane'
+  const [nativeZoom, setNativeZoom] = useState(22)
+
+  useEffect(() => {
+    let cancelled = false
+    void fetchStaticTileMeta(tileUrl).then((meta) => {
+      if (cancelled) return
+      const zoomMax = Number(meta?.zoom_max)
+      if (Number.isFinite(zoomMax) && zoomMax >= 0) {
+        setNativeZoom(Math.max(0, Math.min(22, Math.round(zoomMax))))
+      } else {
+        setNativeZoom(22)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [tileUrl])
+
   useEffect(
     () => applyTileClip(map, map.getPane(paneName) ?? null, cropEnabled ? cropFootprint ?? null : null),
     [cropEnabled, cropFootprint, map],
@@ -582,7 +612,7 @@ function OrthomosaicTileLayerWithOptions({
         url={tileUrl}
         opacity={0.9}
         maxZoom={22}
-        maxNativeZoom={22}
+        maxNativeZoom={nativeZoom}
         bounds={bounds}
         noWrap
         updateWhenIdle
@@ -832,7 +862,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
         id: file.dataset_id || file.rel_path || file.name,
         projectId: projectId || '',
         name: file.name,
-        url: file.layer_url,
+        url: toSameOriginBackendUrl(file.layer_url) || file.layer_url,
         rawPath: file.raw_rel_path ? file.file_path : undefined,
         datasetId: file.dataset_id,
         datasetType: file.dataset_type,

@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import time
 import zipfile
+import io
 from pathlib import Path
 import sqlite3
 import json
@@ -35,6 +36,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 import laspy
+import numpy as np
 from PIL import Image
 from pydantic import BaseModel
 from titiler.core.factory import TilerFactory
@@ -68,6 +70,9 @@ POTREE_CONVERTER_EXE = os.getenv(
     r"C:\PotreeConverter\PotreeConverter.exe",
 ).strip()
 PROJECT_FILES_CACHE_TTL_SECONDS = float(os.getenv("PROJECT_FILES_CACHE_TTL_SECONDS", "4"))
+TIFF_TILE_BUDGET_MB = float(os.getenv("TIFF_TILE_BUDGET_MB", "100"))
+TIFF_TILE_MAX_ZOOM_LIMIT = int(os.getenv("TIFF_TILE_MAX_ZOOM_LIMIT", "20"))
+TIFF_TILE_SIZE = int(os.getenv("TIFF_TILE_SIZE", "256"))
 SESSION_COOKIE_NAME = "droid_cloud_session"
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "604800"))
 SESSION_SECRET_FILE = Path(LOCAL_DATA_PATH) / ".session_signing_secret"
@@ -276,6 +281,12 @@ class CompareVolumePayload(BaseModel):
     dataset_ids: list[str] = []
 
 
+class ContourGeneratePayload(BaseModel):
+    dataset_id: str = ""
+    source_tif: str = ""
+    interval: float = 5.0
+
+
 class DatasetMetaPayload(BaseModel):
     dataset_id: str
     month: str = ""
@@ -326,8 +337,8 @@ def _safe_dataset_upload_basename(filename: str) -> str:
     if "/" in base or "\\" in base or ".." in base:
         raise HTTPException(status_code=400, detail="Invalid filename")
     suffix = Path(base).suffix.lower()
-    if suffix not in (".tif", ".tiff", ".las", ".laz", ".csv", ".zip"):
-        raise HTTPException(status_code=400, detail="Only .tif/.tiff/.las/.laz/.csv/.zip files are supported")
+    if suffix not in (".tif", ".tiff", ".las", ".laz", ".csv", ".zip", ".kml", ".geojson", ".dwg"):
+        raise HTTPException(status_code=400, detail="Only .tif/.tiff/.las/.laz/.csv/.zip/.kml/.geojson/.dwg files are supported")
     return base
 
 
@@ -338,6 +349,10 @@ def _infer_dataset_type(name: str) -> str:
         return "csv"
     if suffix == ".zip":
         return "3dmodel"
+    if suffix in (".kml", ".geojson"):
+        return "vector"
+    if suffix == ".dwg":
+        return "cad"
     if "dtm" in lowered:
         return "dtm"
     if "dsm" in lowered:
@@ -364,6 +379,11 @@ def _normalize_dataset_type(value: str, fallback_name: str = "") -> str:
         "las": "pointcloud",
         "laz": "pointcloud",
         "csv": "csv",
+        "vector": "vector",
+        "kml": "vector",
+        "geojson": "vector",
+        "cad": "cad",
+        "dwg": "cad",
     }
     return aliases.get(normalized) or _infer_dataset_type(fallback_name)
 
@@ -616,13 +636,352 @@ def process_pointcloud_potree_job(
         _invalidate_project_files_cache(project_id)
 
 
+def process_contours_background(
+    project_id: str,
+    dataset_id: str,
+    input_tif: str,
+    output_geojson: str,
+    interval: float,
+    dataset_name: str,
+) -> None:
+    out_path = Path(output_geojson)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    command = (
+        f'call "{OSGEO4W_BAT}" gdal_contour -a elev -i {interval:g} '
+        f'"{input_tif}" "{output_geojson}"'
+    )
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            shell=True,
+            executable=os.environ.get("COMSPEC", "cmd.exe"),
+        )
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout or "").strip() or "gdal_contour failed")
+        rel = out_path.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+        _write_dataset_status(
+            project_id,
+            dataset_id,
+            {
+                "status": "WEB-READY",
+                "updated_at": _now_iso(),
+                "dataset_id": dataset_id,
+                "dataset_name": dataset_name,
+                "tile_folder": "",
+                "dataset_type": "vector",
+                "layer_type": "Vector",
+                "raw_rel_path": rel,
+                "vector_rel_path": rel,
+            },
+        )
+        _upsert_processing_job(
+            project_id,
+            {
+                "job_id": dataset_id,
+                "kind": "vector",
+                "file_name": dataset_name,
+                "status": "Completed",
+                "updated_at": _now_iso(),
+                "result_url": f"/data/{rel}",
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        _upsert_processing_job(
+            project_id,
+            {
+                "job_id": dataset_id,
+                "kind": "vector",
+                "file_name": dataset_name,
+                "status": "Failed",
+                "error": str(exc)[:8000],
+                "updated_at": _now_iso(),
+            },
+        )
+    finally:
+        _invalidate_project_files_cache(project_id)
+
+
+def _zoom_for_raster_resolution(ground_res_m: float, latitude: float) -> int:
+    if not math.isfinite(ground_res_m) or ground_res_m <= 0:
+        return min(TIFF_TILE_MAX_ZOOM_LIMIT, 18)
+    lat_factor = max(math.cos(math.radians(latitude)), 0.15)
+    for zoom in range(TIFF_TILE_MAX_ZOOM_LIMIT, -1, -1):
+        meters_per_pixel = 156543.03392 * lat_factor / (2**zoom)
+        if meters_per_pixel <= ground_res_m * 1.75:
+            return zoom
+    return 0
+
+
+def _save_png_tile(rgba: np.ndarray, out_path: Path) -> int:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    img = Image.fromarray(rgba, mode="RGBA")
+    best = b""
+    for level in (6, 8, 9):
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG", optimize=True, compress_level=level)
+        data = buffer.getvalue()
+        if not best or len(data) < len(best):
+            best = data
+    out_path.write_bytes(best)
+    return len(best)
+
+
+def _compact_tile_tasks(mercantile_module, bounds_wgs84: tuple[float, float, float, float], max_zoom: int):
+    west, south, east, north = bounds_wgs84
+    for zoom in range(0, max_zoom + 1):
+        for tile in mercantile_module.tiles(west, south, east, north, [zoom]):
+            yield zoom, tile.x, tile.y
+
+
+def _choose_compact_zoom(
+    mercantile_module,
+    bounds_wgs84: tuple[float, float, float, float],
+    desired_max_zoom: int,
+    dataset_type: str,
+) -> tuple[int, int]:
+    avg_kb = 70 if dataset_type in {"dtm", "dsm"} else 110
+    budget_tiles = max(1, int((TIFF_TILE_BUDGET_MB * 1024) / avg_kb))
+    chosen_zoom = 0
+    chosen_count = 1
+    for zoom in range(0, desired_max_zoom + 1):
+        count = 0
+        for z in range(0, zoom + 1):
+            count += sum(1 for _ in mercantile_module.tiles(*bounds_wgs84, [z]))
+        if count <= budget_tiles:
+            chosen_zoom = zoom
+            chosen_count = count
+        else:
+            break
+    return chosen_zoom, chosen_count
+
+
+def _sample_raster_percentiles(src, dataset_type: str) -> tuple[float, float] | None:
+    if dataset_type not in {"dtm", "dsm"}:
+        return None
+    samples: list[np.ndarray] = []
+    windows = [
+        (
+            max(0, src.width // 4),
+            max(0, src.height // 4),
+            max(1, src.width // 2),
+            max(1, src.height // 2),
+        ),
+        (0, 0, max(1, src.width // 3), max(1, src.height // 3)),
+        (
+            max(0, src.width - max(1, src.width // 3)),
+            max(0, src.height - max(1, src.height // 3)),
+            max(1, src.width // 3),
+            max(1, src.height // 3),
+        ),
+    ]
+    try:
+        from rasterio.windows import Window
+    except Exception:
+        return None
+    for col, row, width, height in windows:
+        block = src.read(1, window=Window(col, row, width, height), masked=False)
+        valid = np.isfinite(block)
+        if src.nodata is not None:
+            valid &= block != src.nodata
+        if np.any(valid):
+            samples.append(block[valid])
+    if not samples:
+        return None
+    values = np.concatenate(samples)
+    return float(np.percentile(values, 5)), float(np.percentile(values, 95))
+
+
+def _read_compact_ortho_tile(src, bounds_3857: tuple[float, float, float, float], zoom: int) -> np.ndarray:
+    import rasterio
+    from rasterio.crs import CRS
+    from rasterio.enums import Resampling
+    from rasterio.transform import from_bounds
+    from rasterio.warp import reproject
+
+    west, south, east, north = bounds_3857
+    transform = from_bounds(west, south, east, north, TIFF_TILE_SIZE, TIFF_TILE_SIZE)
+    dst = np.zeros((3, TIFF_TILE_SIZE, TIFF_TILE_SIZE), dtype=np.float32)
+    band_count = min(max(src.count, 1), 3)
+    resampling = Resampling.bilinear if zoom >= 17 else Resampling.nearest
+    for band in range(1, band_count + 1):
+        reproject(
+            source=rasterio.band(src, band),
+            destination=dst[band - 1],
+            src_transform=src.transform,
+            src_crs=src.crs,
+            src_nodata=src.nodata,
+            dst_transform=transform,
+            dst_crs=CRS.from_epsg(3857),
+            dst_nodata=0,
+            resampling=resampling,
+        )
+    if band_count == 1:
+        dst[1] = dst[0]
+        dst[2] = dst[0]
+    elif band_count == 2:
+        dst[2] = dst[1]
+
+    if max(float(np.nanmax(dst)), 0.0) > 255:
+        dst = np.clip(dst / 256.0, 0, 255)
+    rgb = np.clip(dst, 0, 255).astype(np.uint8)
+    rgba = np.zeros((TIFF_TILE_SIZE, TIFF_TILE_SIZE, 4), dtype=np.uint8)
+    rgba[:, :, :3] = np.moveaxis(rgb, 0, -1)
+    is_black = np.all(rgb < 8, axis=0)
+    band_min = rgb.min(axis=0)
+    band_max = rgb.max(axis=0)
+    is_white_pad = (band_min >= 248) & ((band_max - band_min) <= 12)
+    rgba[~(is_black | is_white_pad), 3] = 255
+    return rgba
+
+
+def _read_compact_dem_tile(
+    src,
+    bounds_3857: tuple[float, float, float, float],
+    vmin: float,
+    vmax: float,
+    zoom: int,
+) -> np.ndarray:
+    import rasterio
+    from rasterio.crs import CRS
+    from rasterio.enums import Resampling
+    from rasterio.transform import from_bounds
+    from rasterio.warp import reproject
+
+    west, south, east, north = bounds_3857
+    transform = from_bounds(west, south, east, north, TIFF_TILE_SIZE, TIFF_TILE_SIZE)
+    dst = np.full((TIFF_TILE_SIZE, TIFF_TILE_SIZE), np.nan, dtype=np.float32)
+    resampling = Resampling.bilinear if zoom >= 17 else Resampling.nearest
+    reproject(
+        source=rasterio.band(src, 1),
+        destination=dst,
+        src_transform=src.transform,
+        src_crs=src.crs,
+        src_nodata=src.nodata,
+        dst_transform=transform,
+        dst_crs=CRS.from_epsg(3857),
+        dst_nodata=np.nan,
+        resampling=resampling,
+    )
+    return _elevation_to_agisoft_rgba(dst, src.nodata, vmin, vmax, (abs(transform.a), abs(transform.e)))
+
+
+def _run_compact_rasterio_tiler(
+    input_tif: str,
+    output_dir: str,
+    project_id: str,
+    dataset_name: str,
+    dataset_type: str,
+) -> None:
+    try:
+        import mercantile
+        import rasterio
+        from rasterio.warp import transform_bounds
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "Compact TIFF tiler needs rasterio and mercantile installed. "
+            "Run backend dependency install once."
+        ) from exc
+
+    normalized_type = _normalize_dataset_type(dataset_type, dataset_name)
+    in_abs = Path(input_tif).resolve()
+    out_abs = Path(output_dir).resolve()
+    local_root = Path(LOCAL_DATA_PATH).resolve()
+    if local_root not in out_abs.parents:
+        raise RuntimeError("Refusing to write tiles outside Project_Data")
+    if out_abs.exists():
+        shutil.rmtree(out_abs)
+    out_abs.mkdir(parents=True, exist_ok=True)
+
+    with rasterio.open(in_abs) as src:
+        if not src.crs:
+            raise RuntimeError("TIFF has no CRS. Please export with EPSG/CRS before upload.")
+        bounds_wgs84_raw = transform_bounds(src.crs, "EPSG:4326", *src.bounds, densify_pts=21)
+        bounds_wgs84 = (
+            max(-180.0, bounds_wgs84_raw[0]),
+            max(-85.05112878, bounds_wgs84_raw[1]),
+            min(180.0, bounds_wgs84_raw[2]),
+            min(85.05112878, bounds_wgs84_raw[3]),
+        )
+        center_lat = (bounds_wgs84[1] + bounds_wgs84[3]) / 2.0
+        ground_res = min(abs(float(src.res[0])), abs(float(src.res[1])))
+        desired_zoom = _zoom_for_raster_resolution(ground_res, center_lat)
+        max_zoom, estimated_tiles = _choose_compact_zoom(
+            mercantile,
+            bounds_wgs84,
+            desired_zoom,
+            normalized_type,
+        )
+        dem_range = _sample_raster_percentiles(src, normalized_type)
+        if normalized_type in {"dtm", "dsm"} and dem_range is None:
+            raise RuntimeError("No valid elevation cells found in DEM TIFF.")
+
+        meta = {
+            "scheme": "xyz",
+            "crs": "EPSG:3857",
+            "source_crs": str(src.crs),
+            "bounds_wgs84": list(bounds_wgs84),
+            "zoom_min": 0,
+            "zoom_max": max_zoom,
+            "tile_size": TIFF_TILE_SIZE,
+            "dataset_type": normalized_type,
+            "dataset_name": dataset_name,
+            "tile_budget_mb": TIFF_TILE_BUDGET_MB,
+            "estimated_tile_count": estimated_tiles,
+        }
+        if dem_range:
+            meta["elevation_vmin"], meta["elevation_vmax"] = dem_range
+
+        bytes_written = 0
+        tiles_written = 0
+        started = time.time()
+        for zoom, x, y in _compact_tile_tasks(mercantile, bounds_wgs84, max_zoom):
+            tile_bounds = mercantile.xy_bounds(x, y, zoom)
+            bounds_3857 = (tile_bounds.left, tile_bounds.bottom, tile_bounds.right, tile_bounds.top)
+            if normalized_type in {"dtm", "dsm"}:
+                rgba = _read_compact_dem_tile(src, bounds_3857, dem_range[0], dem_range[1], zoom)  # type: ignore[index]
+            else:
+                rgba = _read_compact_ortho_tile(src, bounds_3857, zoom)
+            tile_path = out_abs / str(zoom) / str(x) / f"{y}.png"
+            bytes_written += _save_png_tile(rgba, tile_path)
+            tiles_written += 1
+
+    budget_bytes = int(TIFF_TILE_BUDGET_MB * 1024 * 1024)
+    while bytes_written > budget_bytes and max_zoom > 0:
+        zoom_dir = out_abs / str(max_zoom)
+        removed_bytes = sum(p.stat().st_size for p in zoom_dir.rglob("*.png")) if zoom_dir.is_dir() else 0
+        if zoom_dir.is_dir():
+            shutil.rmtree(zoom_dir)
+        bytes_written = max(0, bytes_written - int(removed_bytes))
+        max_zoom -= 1
+        meta["zoom_max"] = max_zoom
+        print(
+            f"Tile output exceeded {TIFF_TILE_BUDGET_MB:.0f} MB; "
+            f"trimmed highest zoom to 0-{max_zoom}."
+        )
+    (out_abs / "tileset.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    mb_written = bytes_written / (1024 * 1024)
+    print(
+        "Compact TIFF tiles ready: "
+        f"project={project_id}, dataset={dataset_name}, type={normalized_type}, "
+        f"zoom=0-{max_zoom}, tiles={tiles_written}, size={mb_written:.1f} MB, "
+        f"seconds={time.time() - started:.1f}"
+    )
+
+
 def _run_gdal2tiles_subprocess(
     input_tif: str,
     output_dir: str,
     project_id: str,
     dataset_name: str,
+    dataset_type: str = "",
 ) -> None:
     """Run gdal2tiles via QGIS OSGeo4W shell with an 8-bit fallback for DTM/DSM rasters."""
+    _run_compact_rasterio_tiler(input_tif, output_dir, project_id, dataset_name, dataset_type)
+    return
+
     in_abs = os.path.abspath(input_tif)
     out_abs = os.path.abspath(output_dir)
     os.makedirs(out_abs, exist_ok=True)
@@ -650,10 +1009,28 @@ def _run_gdal2tiles_subprocess(
         print(f"Tile stats: zoom_dirs={has_zoom_dirs}, png_count={png_count}")
         return False
 
+    def make_padding_transparent() -> None:
+        try:
+            for tile in Path(out_abs).rglob("*.png"):
+                img = Image.open(tile).convert("RGBA")
+                data = np.array(img)
+                rgb = data[:, :, :3]
+                is_black = np.all(rgb < 8, axis=2)
+                band_min = rgb.min(axis=2)
+                band_max = rgb.max(axis=2)
+                is_white_pad = (band_min >= 248) & ((band_max - band_min) <= 12)
+                transparent = is_black | is_white_pad
+                if np.any(transparent):
+                    data[transparent, 3] = 0
+                    Image.fromarray(data, mode="RGBA").save(tile, optimize=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Tile transparency cleanup skipped: {exc}")
+
     print(f"Starting GDAL processing for {dataset_name} in project {project_id}...")
     result = run_osgeo(f'gdal2tiles --xyz -z 1-22 -w none "{in_abs}" "{out_abs}"')
     if result.returncode == 0:
         if has_usable_tiles():
+            make_padding_transparent()
             return
         raise RuntimeError("gdal2tiles completed but produced no usable XYZ tiles.")
 
@@ -678,6 +1055,7 @@ def _run_gdal2tiles_subprocess(
         except OSError:
             pass
         if retry.returncode == 0 and has_usable_tiles():
+            make_padding_transparent()
             return
         retry_msg = (retry.stderr or retry.stdout or "").strip()
         raise RuntimeError(retry_msg or f"gdal2tiles failed after 8-bit scaling for {dataset_name} ({project_id})")
@@ -693,6 +1071,7 @@ async def process_tif_to_tiles(
     output_dir: str,
     project_id: str,
     dataset_name: str,
+    dataset_type: str = "",
 ) -> None:
     await asyncio.to_thread(
         _run_gdal2tiles_subprocess,
@@ -700,6 +1079,7 @@ async def process_tif_to_tiles(
         output_dir,
         project_id,
         dataset_name,
+        dataset_type,
     )
 
 
@@ -738,6 +1118,7 @@ async def process_dataset_background(
             tiles_dir,
             project_id,
             file_name or Path(input_tif).name,
+            str(common_status.get("dataset_type", "")),
         )
         tiles_rel = Path(tiles_dir).resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
         _upsert_processing_job(
@@ -837,6 +1218,92 @@ def _write_conversion_cache(data: dict[str, str]) -> None:
         pass
 
 
+_AGISOFT_DTM_STOPS = np.array(
+    [
+        [0.00, 30, 50, 200],
+        [0.25, 0, 225, 225],
+        [0.50, 0, 210, 0],
+        [0.75, 230, 230, 0],
+        [1.00, 230, 30, 30],
+    ],
+    dtype=np.float32,
+)
+_AGISOFT_DTM_LUT: np.ndarray | None = None
+
+
+def _agisoft_dtm_lut() -> np.ndarray:
+    global _AGISOFT_DTM_LUT
+    if _AGISOFT_DTM_LUT is not None:
+        return _AGISOFT_DTM_LUT
+    positions = _AGISOFT_DTM_STOPS[:, 0]
+    colors = _AGISOFT_DTM_STOPS[:, 1:4]
+    lut = np.zeros((256, 3), dtype=np.uint8)
+    for idx in range(256):
+        t = idx / 255.0
+        stop_idx = int(np.searchsorted(positions, t, side="right") - 1)
+        stop_idx = max(0, min(stop_idx, len(positions) - 2))
+        t0, t1 = positions[stop_idx], positions[stop_idx + 1]
+        frac = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+        rgb = colors[stop_idx] + frac * (colors[stop_idx + 1] - colors[stop_idx])
+        lut[idx] = np.clip(rgb, 0, 255).astype(np.uint8)
+    _AGISOFT_DTM_LUT = lut
+    return lut
+
+
+def _compute_tile_hillshade(
+    elev: np.ndarray,
+    valid: np.ndarray,
+    res_x: float,
+    res_y: float,
+    azimuth: float = 315.0,
+    altitude: float = 45.0,
+) -> np.ndarray:
+    if not np.any(valid):
+        return np.ones(elev.shape, dtype=np.float32)
+    fill_value = float(np.nanmedian(elev[valid]))
+    filled = np.where(valid, elev, fill_value)
+    dx = (np.roll(filled, -1, 1) - np.roll(filled, 1, 1)) / max(2.0 * res_x, 1e-6)
+    dy = (np.roll(filled, -1, 0) - np.roll(filled, 1, 0)) / max(2.0 * res_y, 1e-6)
+    if dx.shape[1] > 2:
+        dx[:, 0], dx[:, -1] = dx[:, 1], dx[:, -2]
+    if dy.shape[0] > 2:
+        dy[0, :], dy[-1, :] = dy[1, :], dy[-2, :]
+    slope = np.arctan(np.hypot(dx, dy))
+    aspect = np.arctan2(dy, -dx)
+    az = np.radians(azimuth)
+    alt = np.radians(altitude)
+    shade = np.sin(alt) * np.sin(slope) + np.cos(alt) * np.cos(slope) * np.cos(az - aspect)
+    return np.clip(((shade + 1.0) * 0.5).astype(np.float32), 0.0, 1.0)
+
+
+def _elevation_to_agisoft_rgba(
+    data: np.ndarray,
+    nodata: float | None,
+    vmin: float,
+    vmax: float,
+    pixel_size: tuple[float, float],
+) -> np.ndarray:
+    h, w = data.shape
+    out = np.zeros((h, w, 4), dtype=np.uint8)
+    valid = np.isfinite(data)
+    if nodata is not None:
+        valid &= data != nodata
+    if not np.any(valid):
+        return out
+
+    span = max(vmax - vmin, 1e-6)
+    norm = np.clip((data - vmin) / span, 0.0, 1.0)
+    lut = _agisoft_dtm_lut()
+    rgb = np.zeros((h, w, 3), dtype=np.float32)
+    rgb[valid] = lut[(norm[valid] * 255.0).astype(np.uint8)].astype(np.float32)
+
+    shade = _compute_tile_hillshade(data, valid, pixel_size[0], pixel_size[1])
+    rgb[valid] *= (0.62 + 0.38 * shade[valid, np.newaxis])
+    out[valid, :3] = np.clip(rgb[valid], 0, 255).astype(np.uint8)
+    out[valid, 3] = 255
+    return out
+
+
 def _safe_project_id(project_id: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,240}", project_id or ""):
         raise HTTPException(status_code=400, detail="Invalid project_id")
@@ -856,7 +1323,7 @@ def get_project_dirs(project_id: str) -> tuple[Path, Path]:
 
 def _dataset_type_folder(dataset_type: str) -> str:
     normalized = _normalize_dataset_type(dataset_type, "")
-    if normalized in {"ortho", "dtm", "dsm", "pointcloud", "csv", "3dmodel"}:
+    if normalized in {"ortho", "dtm", "dsm", "pointcloud", "csv", "3dmodel", "vector", "cad"}:
         return normalized
     return "other"
 
@@ -2275,8 +2742,8 @@ async def process_dataset(
     _ensure_project_owner(int(user["id"]), safe_project_id)
     safe_name = _safe_dataset_upload_basename(file.filename or "")
     ext = Path(safe_name).suffix.lower()
-    if ext not in (".tif", ".tiff", ".csv", ".zip"):
-        raise HTTPException(status_code=400, detail="Only .tif/.tiff/.csv/.zip dataset files are supported")
+    if ext not in (".tif", ".tiff", ".csv", ".zip", ".kml", ".geojson", ".dwg"):
+        raise HTTPException(status_code=400, detail="Only .tif/.tiff/.csv/.zip/.kml/.geojson/.dwg dataset files are supported")
     normalized_type = "3dmodel" if ext == ".zip" else _normalize_dataset_type(dataset_type, safe_name)
     normalized_month = _normalize_month(month)
 
@@ -2307,6 +2774,54 @@ async def process_dataset(
         await file.close()
 
     raw_rel = input_path.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+    if ext in (".kml", ".geojson", ".dwg"):
+        asset_type = "cad" if ext == ".dwg" else "vector"
+        asset_root = processed_dir / tile_output_folder
+        asset_root.mkdir(parents=True, exist_ok=True)
+        asset_path = asset_root / safe_name
+        try:
+            shutil.copyfile(input_path, asset_path)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to prepare vector asset: {exc}") from exc
+        asset_rel = asset_path.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+        _write_dataset_status(
+            safe_project_id,
+            dataset_id,
+            {
+                "status": "WEB-READY",
+                "updated_at": _now_iso(),
+                "dataset_id": dataset_id,
+                "dataset_name": safe_name,
+                "tile_folder": "",
+                "dataset_type": asset_type,
+                "layer_type": "CAD" if asset_type == "cad" else "Vector",
+                "month": normalized_month,
+                "raw_rel_path": raw_rel,
+                "vector_rel_path": asset_rel,
+            },
+        )
+        _upsert_processing_job(
+            safe_project_id,
+            {
+                "job_id": dataset_id,
+                "kind": asset_type,
+                "file_name": safe_name,
+                "status": "Completed",
+                "updated_at": _now_iso(),
+                "result_url": f"/data/{asset_rel}",
+            },
+        )
+        _invalidate_project_files_cache(safe_project_id)
+        return ProcessDatasetOut(
+            status="success",
+            message="CAD asset saved." if asset_type == "cad" else "Vector layer uploaded and ready.",
+            project_id=safe_project_id,
+            dataset_id=dataset_id,
+            dataset_name=safe_name,
+            cog_path="",
+            cog_tile_url_template=f"{str(request.base_url).rstrip('/')}/data/{asset_rel}",
+        )
+
     if ext == ".zip":
         print(f"Extracting 3D Tiles ZIP {safe_name}...")
         if output_tile_dir.exists():
@@ -2441,6 +2956,84 @@ async def process_dataset(
         dataset_name=safe_name,
         cog_path="",
         cog_tile_url_template=tile_template,
+    )
+
+
+@app.post("/api/datasets/{project_id}/generate-contours", response_model=ProcessDatasetOut)
+async def generate_contours(
+    project_id: str,
+    payload: ContourGeneratePayload,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> ProcessDatasetOut:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    if payload.interval <= 0:
+        raise HTTPException(status_code=400, detail="Contour interval must be greater than 0")
+    if payload.dataset_id:
+        source_path = _dataset_source_path(safe_project_id, payload.dataset_id)
+    else:
+        raw_rel = payload.source_tif.replace("\\", "/").lstrip("/")
+        if ".." in raw_rel:
+            raise HTTPException(status_code=400, detail="Invalid source_tif")
+        source_path = (Path(LOCAL_DATA_PATH) / raw_rel).resolve()
+        local_root = Path(LOCAL_DATA_PATH).resolve()
+        if local_root not in source_path.parents or not source_path.is_file():
+            raise HTTPException(status_code=404, detail="Source DEM .tif not found")
+    if source_path.suffix.lower() not in (".tif", ".tiff"):
+        raise HTTPException(status_code=400, detail="Source must be a DEM .tif/.tiff")
+
+    source_name = source_path.stem
+    dataset_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", f"{source_name}-contours-{payload.interval:g}m").strip("-")
+    dataset_id = _safe_dataset_id(f"{dataset_stem[:40]}-{secrets.token_hex(6)}")
+    _, processed_dir = get_project_dataset_type_dirs(safe_project_id, "vector")
+    output_dir = processed_dir / dataset_id
+    output_geojson = output_dir / f"{dataset_stem}.geojson"
+    rel = output_geojson.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+
+    _write_dataset_status(
+        safe_project_id,
+        dataset_id,
+        {
+            "status": "Processing",
+            "updated_at": _now_iso(),
+            "dataset_id": dataset_id,
+            "dataset_name": f"{source_name} contours",
+            "tile_folder": "",
+            "dataset_type": "vector",
+            "layer_type": "Vector",
+            "vector_rel_path": rel,
+        },
+    )
+    _upsert_processing_job(
+        safe_project_id,
+        {
+            "job_id": dataset_id,
+            "kind": "vector",
+            "file_name": f"{source_name} contours",
+            "status": "Processing",
+            "updated_at": _now_iso(),
+        },
+    )
+    _invalidate_project_files_cache(safe_project_id)
+    background_tasks.add_task(
+        process_contours_background,
+        safe_project_id,
+        dataset_id,
+        str(source_path),
+        str(output_geojson),
+        payload.interval,
+        f"{source_name} contours",
+    )
+    return ProcessDatasetOut(
+        status="success",
+        message="Contour generation started.",
+        project_id=safe_project_id,
+        dataset_id=dataset_id,
+        dataset_name=f"{source_name} contours",
+        cog_path="",
+        cog_tile_url_template=f"{str(request.base_url).rstrip('/')}/data/{rel}",
     )
 
 
@@ -3462,8 +4055,9 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                             "name": display_name,
                             "kind": "Analysis CSV",
                             "type": "csv",
-                            "size_bytes": str(csv_path.stat().st_size),
-                            "status": "Web-Ready",
+                    "size_bytes": str(csv_path.stat().st_size),
+                    "status": "Web-Ready",
+                    "updated_at": str(st.get("updated_at") or ""),
                             "file_url": f"{base_url}/data/{raw_rel_path}",
                             "layer_url": "",
                             "file_path": str(csv_path.resolve()),
@@ -3475,6 +4069,31 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                         },
                     )
                     listed_rel_paths.add(raw_rel_path)
+                continue
+            if str(st.get("dataset_type") or "").lower() in ("vector", "cad"):
+                vector_rel = str(st.get("vector_rel_path") or raw_rel_path).strip()
+                vector_path = Path(LOCAL_DATA_PATH) / vector_rel if vector_rel else None
+                if vector_path and vector_path.is_file():
+                    dtype = str(st.get("dataset_type") or "").lower()
+                    files.append(
+                        {
+                            "name": display_name,
+                            "kind": "CAD Asset" if dtype == "cad" else "Vector GIS Layer",
+                            "type": "CAD" if dtype == "cad" else "Vector",
+                            "size_bytes": str(vector_path.stat().st_size),
+                            "status": str(st.get("status") or "WEB-READY"),
+                            "updated_at": str(st.get("updated_at") or ""),
+                            "file_url": f"{base_url}/data/{vector_rel}",
+                            "layer_url": "" if dtype == "cad" else f"{base_url}/data/{vector_rel}",
+                            "file_path": str(vector_path.resolve()),
+                            "rel_path": vector_rel,
+                            "dataset_id": str(st.get("dataset_id") or job_dir.name),
+                            "dataset_type": dtype,
+                            "month": str(st.get("month") or ""),
+                            "raw_rel_path": raw_rel_path,
+                        },
+                    )
+                    listed_rel_paths.add(vector_rel)
                 continue
             if not tile_folder:
                 continue
@@ -3493,8 +4112,9 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                         "name": display_name,
                         "kind": "3D Photogrammetry Model",
                         "type": "3DModel",
-                        "size_bytes": str(tileset_path.stat().st_size),
-                        "status": jobs_by_file.get(display_name, {}).get("status", str(st.get("status") or "WEB-READY")),
+                    "size_bytes": str(tileset_path.stat().st_size),
+                    "status": jobs_by_file.get(display_name, {}).get("status", str(st.get("status") or "WEB-READY")),
+                    "updated_at": str(st.get("updated_at") or ""),
                         "file_url": f"{base_url}/data/{tileset_rel}",
                         "layer_url": f"{base_url}/data/{tileset_rel}",
                         "file_path": str(tileset_path.resolve()),
@@ -3523,6 +4143,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "type": "cog",
                     "size_bytes": _fast_tile_dir_size(tile_root),
                     "status": jobs_by_file.get(display_name, {}).get("status", "Web-Ready"),
+                    "updated_at": str(st.get("updated_at") or ""),
                     "file_url": f"{base_url}/data/{rel_base}",
                     "layer_url": layer_url,
                     "file_path": str(tile_root.resolve()),
@@ -3537,6 +4158,33 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
 
     # Include manual processed folders even when not synced/tracked yet.
     if processed_root.is_dir():
+        for vector_path in sorted(
+            [*processed_root.glob("*/*.kml"), *processed_root.glob("*/*.geojson")],
+            key=lambda p: p.name.lower(),
+        ):
+            rel = vector_path.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            if rel in listed_rel_paths:
+                continue
+            files.append(
+                {
+                    "name": vector_path.name,
+                    "kind": "Vector GIS Layer",
+                    "type": "Vector",
+                    "size_bytes": str(vector_path.stat().st_size),
+                    "status": "WEB-READY",
+                    "updated_at": datetime.fromtimestamp(vector_path.stat().st_mtime, timezone.utc).isoformat(),
+                    "file_url": f"{base_url}/data/{rel}",
+                    "layer_url": f"{base_url}/data/{rel}",
+                    "file_path": str(vector_path.resolve()),
+                    "rel_path": rel,
+                    "dataset_id": vector_path.parent.name,
+                    "dataset_type": "vector",
+                    "month": "",
+                    "raw_rel_path": "",
+                },
+            )
+            listed_rel_paths.add(rel)
+
         for potree_html in sorted(processed_root.glob("*/*.html"), key=lambda p: p.parent.name.lower()):
             rel = potree_html.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
             rel_base = potree_html.parent.relative_to(Path(LOCAL_DATA_PATH)).as_posix()

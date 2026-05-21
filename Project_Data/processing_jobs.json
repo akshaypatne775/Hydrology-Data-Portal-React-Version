@@ -1,89 +1,28 @@
 {
-  "proj_9b8098d17046469b": [
+  "proj_af421b0b468cbce1": [
     {
-      "job_id": "Auro-Point-Cloud-Cropped-b1d1f6bfb647",
-      "kind": "pointcloud",
-      "file_name": "Auro-Point Cloud Cropped new.las",
-      "status": "Completed",
-      "updated_at": "2026-05-19T08:45:24.987018+00:00",
-      "result_url": "/data/projects/proj_9b8098d17046469b/processed/Auro-Point-Cloud-Cropped-b1d1f6bfb647/Auro-Point-Cloud-Cropped-b1d1f6bfb647.html"
-    },
-    {
-      "job_id": "Scene-1045061a5f6e",
-      "kind": "dataset",
-      "file_name": "Scene.zip",
-      "status": "Completed",
-      "updated_at": "2026-05-18T11:40:07.790609+00:00",
-      "result_url": "/data/projects/proj_9b8098d17046469b/processed/3dmodel/Scene-61560662/Scene/tileset.json"
-    },
-    {
-      "job_id": "Auro_DTM_Crop-5e8c38124a26",
+      "job_id": "Auro_DTM_Crop-0054e44a5c28",
       "kind": "dataset",
       "file_name": "Auro_DTM_Crop.tif",
       "status": "Completed",
-      "updated_at": "2026-05-03T06:46:14.532421+00:00",
-      "result_url": "/data/projects/proj_9b8098d17046469b/processed/dtm/Auro_DTM_Crop-d380aba0"
+      "updated_at": "2026-05-20T13:15:01.458313+00:00",
+      "result_url": "/data/projects/proj_af421b0b468cbce1/processed/dtm/Auro_DTM_Crop-2c173df7"
     },
     {
-      "job_id": "Auro_DTM_Crop-ca972a01a828",
+      "job_id": "Auro_DTM_Crop-0621013e757c",
       "kind": "dataset",
       "file_name": "Auro_DTM_Crop.tif",
-      "status": "Failed",
-      "error": "Usage: gdal2tiles [options] input_file [output]\n\ngdal2tiles: error: Please convert this file to 8-bit and run gdal2tiles on the result.\n\n\nTo scale pixel values you can use:\ngdal_translate -of VRT -ot Byte -scale D:\\1_Portal_Workflows_development\\Hydrology Data Portal React Version\\Project_Data\\projects\\proj_9b8098d17046469b\\raw\\dtm\\Auro_DTM_Crop-8690267b.tif temp.vrt\nthen run:\ngdal2tiles temp.vrt",
-      "updated_at": "2026-05-03T06:30:07.564796+00:00"
-    },
-    {
-      "job_id": "manual-AuroTiles-2-472ead51",
-      "kind": "dataset",
-      "file_name": "AuroTiles-2",
       "status": "Completed",
-      "updated_at": "2026-04-30T10:04:24.682590+00:00",
-      "result_url": "/data/projects/proj_9b8098d17046469b/processed/AuroTiles-2"
+      "updated_at": "2026-05-20T13:09:23.771316+00:00",
+      "result_url": "/data/projects/proj_af421b0b468cbce1/processed/dtm/Auro_DTM_Crop-b03e59f2"
     },
     {
-      "job_id": "manual-AuroTiles-74b0848b",
+      "job_id": "Aditya-Aluminium-38f6f8c0ff02",
       "kind": "dataset",
-      "file_name": "AuroTiles",
+      "file_name": "Aditya Aluminium.zip",
       "status": "Completed",
-      "updated_at": "2026-04-30T10:04:24.678585+00:00",
-      "result_url": "/data/projects/proj_9b8098d17046469b/processed/AuroTiles"
-    },
-    {
-      "job_id": "AuroTrimmed-d5cae17065a4",
-      "kind": "dataset",
-      "file_name": "AuroTrimmed.tif",
-      "status": "Processing",
-      "updated_at": "2026-04-30T10:00:21.009760+00:00"
-    },
-    {
-      "job_id": "AuroTrimmed-e197cbdaa1f5",
-      "kind": "dataset",
-      "file_name": "AuroTrimmed.tif",
-      "status": "Processing",
-      "updated_at": "2026-04-30T09:58:28.768289+00:00"
-    },
-    {
-      "job_id": "AuroTrimmed-c9da8c7135a0",
-      "kind": "dataset",
-      "file_name": "AuroTrimmed.tif",
-      "status": "Processing",
-      "updated_at": "2026-04-30T08:13:13.321847+00:00"
-    },
-    {
-      "job_id": "AuroTrimmed-578401489fa8",
-      "kind": "dataset",
-      "file_name": "AuroTrimmed.tif",
-      "status": "Failed",
-      "error": "'\"C:\\Program Files\\QGIS 3.44.8\\bin\\gdal2tiles.bat\"' is not recognized as an internal or external command,\noperable program or batch file.",
-      "updated_at": "2026-04-30T07:49:47.887919+00:00"
-    },
-    {
-      "job_id": "AuroTrimmed-effbc6e6e46c",
-      "kind": "dataset",
-      "file_name": "AuroTrimmed.tif",
-      "status": "Completed",
-      "updated_at": "2026-04-30T06:22:15.109953+00:00",
-      "result_url": "/data/projects/proj_9b8098d17046469b/processed/AuroTrimmed-d5da99c9"
+      "updated_at": "2026-05-20T13:00:12.238661+00:00",
+      "result_url": "/data/projects/proj_af421b0b468cbce1/processed/3dmodel/Aditya-Aluminium-0bcf284f/Scene/tileset.json"
     }
   ]
 }

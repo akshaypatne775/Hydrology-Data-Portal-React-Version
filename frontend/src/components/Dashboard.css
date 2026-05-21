@@ -24,9 +24,11 @@
   top: 0;
   height: 100dvh;
   z-index: 40;
+  transition: width 0.2s ease;
 }
 
 .ds-sidebar__brand {
+  position: relative;
   padding: 1.25rem 1.25rem 1rem;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
   background: linear-gradient(
@@ -186,6 +188,22 @@
   column-gap: 0.45rem;
   row-gap: 0.15rem;
   min-width: 0;
+}
+
+.ds-sidebar__collapse {
+  position: absolute;
+  right: 0.65rem;
+  bottom: 0.55rem;
+  width: 1.8rem;
+  height: 1.8rem;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .ds-topbar__label {
@@ -951,7 +969,7 @@
     padding: 0.75rem;
   }
 
-  .ds-sidebar__footer {
+.ds-sidebar__footer {
     display: none;
   }
 
@@ -967,6 +985,47 @@
   .ds-module-grid {
     grid-template-columns: 1fr;
   }
+}
+
+.ds-dashboard--sidebar-collapsed .ds-sidebar {
+  width: 60px;
+}
+
+.ds-dashboard--sidebar-collapsed .ds-sidebar__brand {
+  padding: 0.75rem 0.4rem 2.4rem;
+}
+
+.ds-dashboard--sidebar-collapsed .ds-sidebar__logo-img {
+  width: 2.1rem;
+}
+
+.ds-dashboard--sidebar-collapsed .ds-sidebar__collapse {
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+}
+
+.ds-dashboard--sidebar-collapsed .ds-sidebar__nav {
+  padding: 0.75rem 0.45rem;
+  align-items: center;
+}
+
+.ds-dashboard--sidebar-collapsed .ds-sidebar__link {
+  width: 2.65rem;
+  height: 2.65rem;
+  padding: 0;
+  justify-content: center;
+  border-radius: 12px;
+}
+
+.ds-dashboard--sidebar-collapsed .ds-sidebar__link span,
+.ds-dashboard--sidebar-collapsed .ds-sidebar__footer {
+  display: none;
+}
+
+.ds-dashboard--sidebar-collapsed .ds-sidebar__link i {
+  width: auto;
+  font-size: 0.95rem;
 }
 
 @media (max-width: 640px) {

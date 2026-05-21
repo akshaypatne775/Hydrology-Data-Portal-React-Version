@@ -19,6 +19,7 @@ export type UploadTask = {
   kind: 'dataset' | 'pointcloud'
   projectId: string
   fileName: string
+  datasetType?: string
   progressPercent: number
   statusText: string
   state: 'uploading' | 'processing' | 'success' | 'error'
@@ -157,6 +158,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
         kind: 'dataset',
         projectId,
         fileName: file.name,
+        datasetType: metadata?.datasetType,
         progressPercent: 10,
         statusText: `Uploading ${file.name}...`,
         state: 'uploading',
@@ -166,6 +168,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
         const lowerFileName = file.name.toLowerCase()
         const isCsv = lowerFileName.endsWith('.csv')
         const isZip = lowerFileName.endsWith('.zip')
+        const is3DModel = (metadata?.datasetType || '').toLowerCase() === '3dmodel'
         const form = new FormData()
         form.append('project_id', projectId)
         form.append('file', file)
@@ -178,7 +181,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
           state: 'processing',
           statusText: isCsv
             ? `Preparing ${file.name} for compare...`
-            : isZip
+            : isZip && is3DModel
               ? `Extracting ${file.name} as 3D model...`
               : `Converting ${file.name} to COG...`,
         })
@@ -195,13 +198,13 @@ export function UploadProvider({ children }: PropsWithChildren) {
         while (Date.now() - start < 2 * 60 * 60 * 1000) {
           const status = await getDatasetStatus(projectId, created.dataset_id)
           if (status.status === 'Web-Ready') {
-            if (!isZip && status.cog_tile_url_template) {
+            if (!(isZip && is3DModel) && status.cog_tile_url_template) {
               saveWebReadyCogLayer(projectId, created.dataset_id, file.name, status.cog_tile_url_template)
             }
             upsertTask(id, {
               state: 'success',
               progressPercent: 100,
-              statusText: isZip ? `${file.name} 3D model is ready.` : `${file.name} is Web-Ready.`,
+              statusText: isZip && is3DModel ? `${file.name} 3D model is ready.` : `${file.name} is Web-Ready.`,
               resultUrl: status.cog_tile_url_template,
             })
             return
@@ -212,7 +215,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
           upsertTask(id, {
             state: 'processing',
             progressPercent: 60,
-            statusText: isZip ? `Extracting ${file.name} as 3D model...` : `Converting ${file.name} to COG...`,
+            statusText: isZip && is3DModel ? `Extracting ${file.name} as 3D model...` : `Converting ${file.name} to COG...`,
           })
           await new Promise((resolve) => window.setTimeout(resolve, 2000))
         }

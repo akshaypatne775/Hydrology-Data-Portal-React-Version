@@ -33,20 +33,32 @@
 }
 
 .mv-chrome {
+  position: absolute;
+  top: 0.85rem;
+  right: 0.85rem;
+  width: min(330px, calc(100% - 1.7rem));
+  max-height: calc(100% - 1.7rem);
+  overflow: auto;
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  flex-wrap: nowrap;
   align-items: flex-start;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 0.75rem;
-  padding: 0.65rem 0.75rem;
-  background: #fafbfc;
-  border-bottom: 1px solid #e2e8f0;
-  z-index: 400;
+  padding: 0.85rem;
+  background: linear-gradient(145deg, rgba(14, 62, 73, 0.78), rgba(3, 16, 20, 0.62));
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 14px;
+  box-shadow: 0 12px 30px rgba(2, 6, 23, 0.28);
+  backdrop-filter: blur(12px);
+  z-index: 700;
+  color: #f8fafc;
 }
 
 .mv-panel {
-  min-width: 220px;
-  max-width: min(360px, 100%);
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
 }
 
 .mv-panel--layers {
@@ -86,7 +98,7 @@
   align-items: center;
   gap: 0.45rem;
   font-size: 0.75rem;
-  color: #334155;
+  color: #e6fbff;
   cursor: pointer;
   margin-bottom: 0.25rem;
 }
@@ -109,11 +121,13 @@
 
 .mv-toolbar {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  flex-wrap: nowrap;
   align-items: center;
   align-content: flex-start;
   gap: 0.4rem;
   min-height: 2.25rem;
+  width: 100%;
 }
 
 .mv-tool {
@@ -133,6 +147,7 @@
   cursor: pointer;
   line-height: 1;
   white-space: nowrap;
+  width: 100%;
   transform: translateZ(0);
   transition:
     background 0.12s ease,
@@ -163,7 +178,7 @@
 
 .mv-tool--ghost {
   border-style: dashed;
-  color: #64748b;
+  color: #ccfbf1;
 }
 
 .mv-layer-type {
@@ -181,17 +196,17 @@
 }
 
 .mv-toolbar__context {
-  display: inline-flex;
+  display: flex;
+  flex-direction: column;
   align-items: center;
   gap: 0.4rem;
-  min-width: 18rem;
+  min-width: 0;
+  width: 100%;
   min-height: 2.05rem;
 }
 
 .mv-toolbar__placeholder {
-  display: inline-block;
-  width: 9.8rem;
-  min-height: 2.05rem;
+  display: none;
   pointer-events: none;
 }
 
@@ -251,7 +266,7 @@
 }
 
 .mv-analysis-card__close:hover {
-  color: #0e3e49;
+  color: #f8fafc;
   border-color: #0e3e49;
 }
 
@@ -414,6 +429,7 @@
 }
 
 .mv-select {
+  width: 100%;
   pointer-events: auto;
   font-family: inherit;
   font-size: 0.6875rem;

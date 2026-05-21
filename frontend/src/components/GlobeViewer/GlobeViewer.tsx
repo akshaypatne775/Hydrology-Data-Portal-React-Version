@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as Cesium from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
-import { API_BASE } from '../../lib/apiBase'
+import { API_BASE, toSameOriginBackendUrl } from '../../lib/apiBase'
 import { useUploadContext } from '../../context/UploadContext'
 import { useWorkspaceContext } from '../../context/WorkspaceContext'
 import { getPointCloudStatus } from '../../services/pointCloudService'
@@ -46,6 +46,20 @@ type ViewerDataOption = {
   name: string
   kind: ViewerLayerKind
   url: string
+}
+
+type DrawMode = 'none' | 'point' | 'polyline'
+
+type DrawPoint = {
+  lat: number
+  lng: number
+  height: number
+}
+
+type DrawGeometry = {
+  id: string
+  type: 'Point' | 'LineString'
+  points: DrawPoint[]
 }
 
 const TILESET_MAX_WAIT_MS = 2 * 60 * 60 * 1000
@@ -150,6 +164,24 @@ function formatMeasureDistance(meters: number): string {
   return `${meters.toFixed(2)} m`
 }
 
+function escapeXml(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+async function fetchImageryTileMeta(tileUrl: string): Promise<{ zoom_max?: number } | null> {
+  const suffix = '{z}/{x}/{y}.png'
+  if (!tileUrl.endsWith(suffix)) return null
+  try {
+    const res = await fetch(`${tileUrl.slice(0, -suffix.length)}tileset.json`, {
+      credentials: 'include',
+    })
+    if (!res.ok) return null
+    return (await res.json()) as { zoom_max?: number }
+  } catch {
+    return null
+  }
+}
+
 function projectFileToViewerOption(file: ProjectFile): ViewerDataOption | null {
   if (!file.layer_url) return null
   const fileType = String(file.type).toLowerCase()
@@ -158,7 +190,7 @@ function projectFileToViewerOption(file: ProjectFile): ViewerDataOption | null {
       id: `model:${file.dataset_id || file.rel_path}`,
       name: file.name,
       kind: 'model',
-      url: file.layer_url,
+      url: toSameOriginBackendUrl(file.layer_url) || file.layer_url,
     }
   }
   if (fileType === 'pointcloud' && !file.layer_url.toLowerCase().endsWith('.html')) {
@@ -166,7 +198,7 @@ function projectFileToViewerOption(file: ProjectFile): ViewerDataOption | null {
       id: `pointcloud:${file.dataset_id || file.rel_path}`,
       name: file.name,
       kind: 'pointcloud',
-      url: file.layer_url,
+      url: toSameOriginBackendUrl(file.layer_url) || file.layer_url,
     }
   }
   return null
@@ -185,12 +217,18 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
   const modelTilesetsRef = useRef<Map<string, ModelTilesetEntry>>(new Map())
   const modelHeightOffsetRef = useRef(0)
   const orthomosaicLayerRef = useRef<Cesium.ImageryLayer | null>(null)
+  const vectorSourcesRef = useRef<Map<string, Cesium.DataSource>>(new Map())
   const measurePointsRef = useRef<Cesium.Cartesian3[]>([])
   const measureEntityIdsRef = useRef<string[]>([])
+  const drawEntityIdsRef = useRef<string[]>([])
+  const draftLinePointsRef = useRef<DrawPoint[]>([])
   const [pointSize, setPointSize] = useState(3)
   const [colorMode, setColorMode] = useState<ColorMode>('RGB')
   const [imageryMode, setImageryMode] = useState<ImageryMode>('earth')
   const [distanceMeasureActive, setDistanceMeasureActive] = useState(false)
+  const [drawMode, setDrawMode] = useState<DrawMode>('none')
+  const [drawnGeometries, setDrawnGeometries] = useState<DrawGeometry[]>([])
+  const [draftLineCount, setDraftLineCount] = useState(0)
   const [measureDistanceM, setMeasureDistanceM] = useState(0)
   const [viewerReady, setViewerReady] = useState(false)
   const [modelHeightOffset, setModelHeightOffset] = useState(0)
@@ -231,6 +269,13 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
           layer.projectId === projectId &&
           String(layer.layerType).toLowerCase() === 'pointcloud' &&
           !layer.url.toLowerCase().endsWith('.html'),
+      ),
+    [activeLayers, projectId],
+  )
+  const activeVectorLayers = useMemo(
+    () =>
+      activeLayers.filter(
+        (layer) => layer.projectId === projectId && layer.layerType === 'Vector' && Boolean(layer.url),
       ),
     [activeLayers, projectId],
   )
@@ -323,6 +368,114 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     }
     viewer.scene.requestRender()
   }, [])
+
+  const addDrawPointEntity = useCallback((point: DrawPoint) => {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    const entity = viewer.entities.add({
+      id: `draw-point-${Date.now()}-${drawEntityIdsRef.current.length}`,
+      position: Cesium.Cartesian3.fromDegrees(point.lng, point.lat, point.height),
+      point: {
+        pixelSize: 10,
+        color: Cesium.Color.fromCssColorString('#f8fafc'),
+        outlineColor: Cesium.Color.fromCssColorString('#0e3e49'),
+        outlineWidth: 3,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      },
+    })
+    drawEntityIdsRef.current.push(entity.id)
+  }, [])
+
+  const redrawDraftLine = useCallback((points: DrawPoint[]) => {
+    const viewer = viewerRef.current
+    if (!viewer) return
+    const oldDraft = viewer.entities.getById('draw-draft-line')
+    if (oldDraft) viewer.entities.remove(oldDraft)
+    if (points.length < 2) return
+    viewer.entities.add({
+      id: 'draw-draft-line',
+      polyline: {
+        positions: points.map((point) => Cesium.Cartesian3.fromDegrees(point.lng, point.lat, point.height)),
+        width: 3,
+        material: Cesium.Color.fromCssColorString('#ccfbf1'),
+        clampToGround: true,
+      },
+    })
+  }, [])
+
+  const clearDrawings = useCallback(() => {
+    const viewer = viewerRef.current
+    if (viewer) {
+      for (const id of drawEntityIdsRef.current) {
+        const entity = viewer.entities.getById(id)
+        if (entity) viewer.entities.remove(entity)
+      }
+      const draft = viewer.entities.getById('draw-draft-line')
+      if (draft) viewer.entities.remove(draft)
+    }
+    drawEntityIdsRef.current = []
+    draftLinePointsRef.current = []
+    setDraftLineCount(0)
+    setDrawnGeometries([])
+  }, [])
+
+  const finishDraftLine = useCallback(() => {
+    const points = draftLinePointsRef.current
+    if (points.length < 2) return
+    const viewer = viewerRef.current
+    const lineId = `draw-line-${Date.now()}`
+    if (viewer) {
+      const draft = viewer.entities.getById('draw-draft-line')
+      if (draft) viewer.entities.remove(draft)
+      const entity = viewer.entities.add({
+        id: lineId,
+        polyline: {
+          positions: points.map((point) => Cesium.Cartesian3.fromDegrees(point.lng, point.lat, point.height)),
+          width: 4,
+          material: Cesium.Color.fromCssColorString('#14b8a6'),
+          clampToGround: true,
+        },
+      })
+      drawEntityIdsRef.current.push(entity.id)
+    }
+    setDrawnGeometries((prev) => [...prev, { id: lineId, type: 'LineString', points: [...points] }])
+    draftLinePointsRef.current = []
+    setDraftLineCount(0)
+  }, [])
+
+  const downloadTextFile = useCallback((filename: string, content: string, type: string) => {
+    const blob = new Blob([content], { type })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  }, [])
+
+  const exportDrawingsKml = useCallback(() => {
+    const placemarks = drawnGeometries.map((geom, index) => {
+      const coords = geom.points.map((point) => `${point.lng},${point.lat},${point.height || 0}`).join(' ')
+      if (geom.type === 'Point') {
+        const point = geom.points[0]
+        return `<Placemark><name>${escapeXml(`Point ${index + 1}`)}</name><Point><coordinates>${point?.lng},${point?.lat},${point?.height || 0}</coordinates></Point></Placemark>`
+      }
+      return `<Placemark><name>${escapeXml(`Line ${index + 1}`)}</name><LineString><tessellate>1</tessellate><coordinates>${coords}</coordinates></LineString></Placemark>`
+    }).join('\n')
+    downloadTextFile('droid-drawings.kml', `<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2"><Document>${placemarks}</Document></kml>`, 'application/vnd.google-earth.kml+xml')
+  }, [downloadTextFile, drawnGeometries])
+
+  const exportDrawingsCsv = useCallback(() => {
+    const rows = ['id,type,vertex,lat,lng,height']
+    drawnGeometries.forEach((geom) => {
+      geom.points.forEach((point, index) => {
+        rows.push(`${geom.id},${geom.type},${index + 1},${point.lat},${point.lng},${point.height}`)
+      })
+    })
+    downloadTextFile('droid-drawings.csv', rows.join('\n'), 'text/csv')
+  }, [downloadTextFile, drawnGeometries])
 
   const applyImageryMode = useCallback((mode: ImageryMode) => {
     const viewer = viewerRef.current
@@ -497,13 +650,18 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     }
     const tileUrl = layerConfig.url
 
-    try {
+    void (async () => {
+      try {
+        const meta = await fetchImageryTileMeta(tileUrl)
+        const zoomMax = Number(meta?.zoom_max)
+        const maximumLevel = Number.isFinite(zoomMax) ? Math.max(0, Math.min(22, Math.round(zoomMax))) : 22
+
       if (orthomosaicLayerRef.current) {
         viewer.imageryLayers.remove(orthomosaicLayerRef.current, true)
       }
       const imageryProvider = new Cesium.UrlTemplateImageryProvider({
         url: tileUrl,
-        maximumLevel: 22,
+        maximumLevel,
         hasAlphaChannel: true,
       })
       const layer = new Cesium.ImageryLayer(imageryProvider)
@@ -527,12 +685,13 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
           console.error('Failed to fetch static bounds for zoom', e)
         }
       })()
-    } catch (error) {
+      } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Failed to load orthomosaic layer'
       setViewerError(message)
       console.error('Orthomosaic load failed:', error)
-    }
+      }
+    })()
   }, [])
 
   const load3DModel = useCallback(async (layer: { id: string; url: string; name: string }) => {
@@ -818,6 +977,72 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
   }, [distanceMeasureActive, refreshDistanceMeasurement, viewerReady])
 
   useEffect(() => {
+    if (!viewerReady || drawMode === 'none') return
+    const viewer = viewerRef.current
+    if (!viewer) return
+    const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas)
+    handler.setInputAction((click: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
+      let picked: Cesium.Cartesian3 | undefined
+      if (viewer.scene.pickPositionSupported) picked = viewer.scene.pickPosition(click.position)
+      if (!picked) picked = viewer.camera.pickEllipsoid(click.position, viewer.scene.globe.ellipsoid) ?? undefined
+      if (!picked) return
+      const cartographic = Cesium.Cartographic.fromCartesian(picked)
+      const point = {
+        lat: Cesium.Math.toDegrees(cartographic.latitude),
+        lng: Cesium.Math.toDegrees(cartographic.longitude),
+        height: cartographic.height || 0,
+      }
+      addDrawPointEntity(point)
+      if (drawMode === 'point') {
+        setDrawnGeometries((prev) => [...prev, { id: `draw-${Date.now()}`, type: 'Point', points: [point] }])
+        return
+      }
+      draftLinePointsRef.current = [...draftLinePointsRef.current, point]
+      setDraftLineCount(draftLinePointsRef.current.length)
+      redrawDraftLine(draftLinePointsRef.current)
+    }, Cesium.ScreenSpaceEventType.LEFT_CLICK)
+    handler.setInputAction(() => {
+      finishDraftLine()
+    }, Cesium.ScreenSpaceEventType.RIGHT_CLICK)
+    return () => handler.destroy()
+  }, [addDrawPointEntity, drawMode, finishDraftLine, redrawDraftLine, viewerReady])
+
+  useEffect(() => {
+    if (!viewerReady) return
+    const viewer = viewerRef.current
+    if (!viewer) return
+    const activeIds = new Set(activeVectorLayers.map((layer) => layer.id))
+    for (const [id, source] of vectorSourcesRef.current.entries()) {
+      if (!activeIds.has(id)) {
+        viewer.dataSources.remove(source, true)
+        vectorSourcesRef.current.delete(id)
+      }
+    }
+    activeVectorLayers.forEach((layer) => {
+      if (vectorSourcesRef.current.has(layer.id)) return
+      void (async () => {
+        try {
+          const lowerUrl = layer.url.toLowerCase()
+          const ds = lowerUrl.endsWith('.kml')
+            ? await Cesium.KmlDataSource.load(layer.url, { clampToGround: true })
+            : await Cesium.GeoJsonDataSource.load(layer.url, {
+              clampToGround: true,
+              stroke: Cesium.Color.fromCssColorString('#0e3e49'),
+              fill: Cesium.Color.fromCssColorString('#14b8a633'),
+              strokeWidth: 2.5,
+            })
+          await viewer.dataSources.add(ds)
+          vectorSourcesRef.current.set(layer.id, ds)
+          viewer.flyTo(ds)
+        } catch (error) {
+          console.error('Vector layer load failed:', error)
+          setViewerError(error instanceof Error ? error.message : 'Failed to load vector layer')
+        }
+      })()
+    })
+  }, [activeVectorLayers, viewerReady])
+
+  useEffect(() => {
     const host = containerRef.current
     if (!host) return
     if (viewerRef.current) return
@@ -898,6 +1123,7 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     }
 
     const modelTilesets = modelTilesetsRef.current
+    const vectorSources = vectorSourcesRef.current
     return () => {
       handler?.destroy()
       if (pointCloudRef.current) {
@@ -912,6 +1138,10 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
         viewer?.imageryLayers.remove(orthomosaicLayerRef.current, true)
         orthomosaicLayerRef.current = null
       }
+      for (const source of vectorSources.values()) {
+        viewer?.dataSources.remove(source, true)
+      }
+      vectorSources.clear()
       for (const id of measureEntityIdsRef.current) {
         const entity = viewer?.entities.getById(id)
         if (entity) viewer?.entities.remove(entity)
@@ -1123,8 +1353,43 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
         >
           Measure Distance
         </button>
+        <button
+          type="button"
+          className={drawMode === 'point' ? 'gv-tool-button gv-tool-button--active' : 'gv-tool-button'}
+          onClick={() => setDrawMode((mode) => (mode === 'point' ? 'none' : 'point'))}
+        >
+          Point
+        </button>
+        <button
+          type="button"
+          className={drawMode === 'polyline' ? 'gv-tool-button gv-tool-button--active' : 'gv-tool-button'}
+          onClick={() => setDrawMode((mode) => (mode === 'polyline' ? 'none' : 'polyline'))}
+        >
+          Polyline
+        </button>
+        <button type="button" className="gv-tool-button" disabled={draftLineCount < 2} onClick={finishDraftLine}>
+          Finish Line
+        </button>
+        <select
+          className="gv-tool-select"
+          value=""
+          onChange={(event) => {
+            if (event.target.value === 'kml') exportDrawingsKml()
+            if (event.target.value === 'csv') exportDrawingsCsv()
+            event.currentTarget.value = ''
+          }}
+          aria-label="Export drawings"
+          disabled={drawnGeometries.length === 0}
+        >
+          <option value="">Export</option>
+          <option value="kml">Export as KML</option>
+          <option value="csv">Export as CSV</option>
+        </select>
         <button type="button" className="gv-tool-button gv-tool-button--ghost" onClick={clearDistanceMeasurement}>
           Clear
+        </button>
+        <button type="button" className="gv-tool-button gv-tool-button--ghost" onClick={clearDrawings}>
+          Clear Drawings
         </button>
       </section>
 

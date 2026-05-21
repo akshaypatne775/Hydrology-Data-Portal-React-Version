@@ -32,8 +32,11 @@
 .gv-panel {
   position: absolute;
   top: 1rem;
-  left: 1rem;
-  width: min(320px, calc(100% - 2rem));
+  right: 1rem;
+  left: auto;
+  width: min(300px, calc(100% - 2rem));
+  max-height: min(58vh, 560px);
+  overflow: auto;
   padding: 1rem;
   border-radius: 14px;
   border: 1px solid rgba(255, 255, 255, 0.2);
@@ -159,7 +162,7 @@
 .gv-tools-panel {
   position: absolute;
   right: 1rem;
-  top: 4.5rem;
+  bottom: 3.8rem;
   z-index: 22;
   width: min(260px, calc(100% - 2rem));
   padding: 0.85rem;
@@ -206,6 +209,20 @@
   font-size: 0.76rem;
   font-weight: 800;
   cursor: pointer;
+}
+
+.gv-tool-select {
+  width: 100%;
+  min-height: 2.15rem;
+  margin-top: 0.45rem;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 9px;
+  background: rgba(244, 250, 251, 0.92);
+  color: #0e3e49;
+  font-family: 'Montserrat', sans-serif;
+  font-size: 0.76rem;
+  font-weight: 800;
+  padding: 0 0.55rem;
 }
 
 .gv-tool-button:hover,

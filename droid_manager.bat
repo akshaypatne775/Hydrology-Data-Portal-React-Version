@@ -10,6 +10,7 @@ set "ROOT=%~dp0"
 set "BACKEND_DIR=%ROOT%backend"
 set "FRONTEND_DIR=%ROOT%frontend"
 set "PROJECT_DATA_DIR=%ROOT%Project_Data"
+set "PUBLIC_PORTAL_URL=https://portal.droidminingsolutions.com"
 
 color 0B
 title DROID CLOUD MASTER TOOL
@@ -133,7 +134,7 @@ if not exist ".env" (
   >> ".env" echo SESSION_TTL_SECONDS=604800
   for /f %%S in ('powershell -NoProfile -Command "[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(48))"') do set "SESSION_SECRET=%%S"
   >> ".env" echo SESSION_SIGNING_SECRET=!SESSION_SECRET!
-  >> ".env" echo FRONTEND_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+  >> ".env" echo FRONTEND_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,%PUBLIC_PORTAL_URL%
 ) else (
   echo [OK] Backend .env already exists. Keeping it unchanged.
 )
@@ -261,6 +262,17 @@ echo [INFO] Frontend packages are auto-saved to package.json by npm.
 pause
 goto menu
 
+:ensure_backend_public_origin
+set "BACKEND_ENV=%BACKEND_DIR%\.env"
+if not exist "%BACKEND_ENV%" exit /b 0
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$p='%BACKEND_ENV%'; $public='%PUBLIC_PORTAL_URL%'; $lines=Get-Content $p -ErrorAction SilentlyContinue; if(-not $lines){$lines=@()}; function Set-Line($k,$v){ $script:lines=@($script:lines | Where-Object {$_ -notmatch ('^'+[regex]::Escape($k)+'=')}); $script:lines += ($k+'='+$v) }; $origin=($lines | Where-Object {$_ -match '^FRONTEND_ORIGINS='} | Select-Object -First 1); if(-not $origin){Set-Line 'FRONTEND_ORIGINS' ('http://localhost:5173,http://127.0.0.1:5173,'+$public)} elseif($origin -notmatch [regex]::Escape($public)){Set-Line 'FRONTEND_ORIGINS' ($origin.Substring('FRONTEND_ORIGINS='.Length)+','+$public)}; Set-Content -Path $p -Value $lines -Encoding UTF8"
+if errorlevel 1 (
+  echo [ERROR] Could not update backend FRONTEND_ORIGINS.
+  exit /b 1
+)
+exit /b 0
+
 :start_portal
 cls
 echo [INFO] Starting Droid Cloud Portal...
@@ -285,11 +297,18 @@ if errorlevel 1 (
   goto menu
 )
 
+call :ensure_backend_public_origin
+if errorlevel 1 (
+  pause
+  goto menu
+)
+
 start "Droid Cloud - Backend" cmd /k "cd /d ""%BACKEND_DIR%"" && call venv\Scripts\activate.bat && uvicorn app.main:app --reload --host 0.0.0.0 --port 8000"
 start "Droid Cloud - Frontend" cmd /k "cd /d ""%FRONTEND_DIR%"" && npm run dev"
 
 echo [SUCCESS] Backend and frontend windows launched.
 echo [URL] Frontend: http://localhost:5173
+echo [URL] Public:   %PUBLIC_PORTAL_URL%
 echo [URL] Backend:  http://localhost:8000/health
 pause
 goto menu

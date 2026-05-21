@@ -1,10 +1,11 @@
 .dsp-root {
   display: grid;
-  gap: 0.9rem;
+  gap: 0.85rem;
   padding: 0.95rem;
   background: #fff;
   height: 100%;
   min-height: 0;
+  align-content: start;
 }
 
 .dsp-head {
@@ -34,9 +35,12 @@
 
 .dsp-dropzone {
   border: 1px dashed rgba(14, 62, 73, 0.42);
-  border-radius: 12px;
-  padding: 0.95rem;
+  border-radius: 8px;
+  padding: 0.9rem 1rem;
   background: linear-gradient(145deg, rgba(14, 62, 73, 0.07), rgba(14, 62, 73, 0.02));
+  min-height: 6.5rem;
+  display: grid;
+  align-content: start;
 }
 
 .dsp-dropzone--dragging {
@@ -63,10 +67,11 @@
 
 .dsp-form {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 0.65rem;
+  grid-template-columns: repeat(4, minmax(150px, 1fr)) auto;
+  align-items: end;
+  gap: 0.75rem;
   border: 1px solid #dbe4ee;
-  border-radius: 12px;
+  border-radius: 8px;
   background: #f8fafb;
   padding: 0.8rem;
 }
@@ -83,10 +88,20 @@
 .dsp-form input,
 .dsp-form select {
   border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  height: 2rem;
+  border-radius: 6px;
+  height: 2.15rem;
   padding: 0 0.55rem;
   font-size: 0.75rem;
+  background: #fff;
+  min-width: 0;
+}
+
+.dsp-form__actions {
+  display: flex;
+  align-items: end;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  min-width: max-content;
 }
 
 .dsp-progress {
@@ -117,8 +132,9 @@
 
 .dsp-table-wrap {
   border: 1px solid #dbe4ee;
-  border-radius: 12px;
+  border-radius: 8px;
   overflow: auto;
+  min-height: 9rem;
 }
 
 .dsp-table {
@@ -182,14 +198,52 @@
 }
 
 .dsp-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid rgba(14, 62, 73, 0.22);
   background: #fff;
   color: #0e3e49;
-  border-radius: 999px;
-  padding: 0.3rem 0.7rem;
+  border-radius: 6px;
+  min-height: 2rem;
+  padding: 0 0.7rem;
   font-size: 0.68rem;
   font-weight: 700;
   cursor: pointer;
+  line-height: 1;
+  white-space: nowrap;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.dsp-action:hover:not(:disabled) {
+  border-color: #0e3e49;
+  background: #edf7f8;
+}
+
+.dsp-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.dsp-action--primary {
+  border-color: #0e3e49;
+  background: #0e3e49;
+  color: #fff;
+}
+
+.dsp-action--primary:hover:not(:disabled) {
+  background: #145461;
+  color: #fff;
+}
+
+.dsp-action--secondary {
+  background: #fff;
+}
+
+.dsp-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
 }
 
 .dsp-action--sync {
@@ -197,6 +251,33 @@
   color: #0e3e49;
   background: #f8fbfc;
   white-space: nowrap;
+}
+
+@media (max-width: 1100px) {
+  .dsp-form {
+    grid-template-columns: repeat(2, minmax(150px, 1fr));
+  }
+
+  .dsp-form__actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 640px) {
+  .dsp-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .dsp-head__actions,
+  .dsp-form__actions {
+    flex-wrap: wrap;
+  }
+
+  .dsp-form {
+    grid-template-columns: 1fr;
+  }
 }
 
 .dsp-state {
