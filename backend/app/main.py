@@ -473,6 +473,17 @@ def _infer_dataset_type(name: str) -> str:
     return "dataset"
 
 
+def _raster_layer_type(dataset_type: str, name: str = "") -> str:
+    normalized = _normalize_dataset_type(dataset_type, name)
+    if normalized == "dtm":
+        return "DTM"
+    if normalized == "dsm":
+        return "DSM"
+    if normalized == "ortho":
+        return "Ortho"
+    return "cog"
+
+
 def _normalize_dataset_type(value: str, fallback_name: str = "") -> str:
     normalized = (value or "").strip().lower().replace(" ", "")
     aliases = {
@@ -820,7 +831,7 @@ def _zoom_for_raster_resolution(ground_res_m: float, latitude: float) -> int:
         meters_per_pixel = 156543.03392 * lat_factor / (2**zoom)
         if meters_per_pixel <= ground_res_m * 1.75:
             return zoom
-    return 0
+    return TIFF_TILE_MAX_ZOOM_LIMIT
 
 
 def _save_png_tile(rgba: np.ndarray, out_path: Path) -> int:
@@ -1745,8 +1756,6 @@ def _fast_tile_dir_size(tile_root: Path) -> str:
 def _looks_like_cesium_tileset_json(path: Path) -> bool:
     if not path.is_file() or path.suffix.lower() != ".json":
         return False
-    if path.name.lower() == "tileset.json":
-        return True
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
@@ -3378,6 +3387,10 @@ async def process_dataset(
     if ext not in (".tif", ".tiff", ".csv", ".zip", ".kml", ".geojson", ".dwg"):
         raise HTTPException(status_code=400, detail="Only .tif/.tiff/.csv/.zip/.kml/.geojson/.dwg dataset files are supported")
     normalized_type = _normalize_dataset_type(dataset_type, safe_name)
+    if ext in (".tif", ".tiff") and normalized_type == "3dmodel":
+        normalized_type = _infer_dataset_type(safe_name)
+        if normalized_type == "3dmodel":
+            normalized_type = "ortho"
     if ext == ".zip" and normalized_type != "3dmodel":
         raise HTTPException(
             status_code=400,
@@ -3559,6 +3572,7 @@ async def process_dataset(
             "dataset_name": safe_name,
             "tile_folder": tile_output_folder,
             "dataset_type": normalized_type,
+            "layer_type": _raster_layer_type(normalized_type, safe_name),
             "month": normalized_month,
             "raw_rel_path": raw_rel,
         },
@@ -3715,12 +3729,15 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
 
     found_new = 0
     candidates: list[tuple[Path, str, str]] = [
-        *[(item, "cog", _infer_dataset_type(item.name)) for item in _candidate_processed_tile_dirs(processed_dir)],
+        *[(item, _raster_layer_type(_infer_dataset_type(item.name), item.name), _infer_dataset_type(item.name)) for item in _candidate_processed_tile_dirs(processed_dir)],
         *[(item, "3DModel", "3dmodel") for item in _candidate_processed_model_dirs(processed_dir)],
     ]
     for item, layer_kind, dataset_type in candidates:
         rel_path = item.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
         folder_name = _display_model_folder_name(item, processed_dir) if layer_kind == "3DModel" else item.name
+        if layer_kind != "3DModel":
+            dataset_type = _normalize_dataset_type(dataset_type, folder_name)
+            layer_kind = _raster_layer_type(dataset_type, folder_name)
         if folder_name in tracked_folders or rel_path in tracked_folders:
             continue
 
@@ -4863,7 +4880,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                 continue
             tiles_rel_path = str(st.get("tiles_rel_path") or "").strip()
             tile_root = Path(LOCAL_DATA_PATH) / tiles_rel_path if tiles_rel_path else processed_root / tile_folder
-            if str(st.get("dataset_type") or "").lower() in ("3dmodel", "3dtiles") or _is_3d_model_dataset(tile_root):
+            if str(st.get("dataset_type") or "").lower() in ("3dmodel", "3dtiles"):
                 tileset_path = _find_tileset_json(tile_root)
                 if not tileset_path:
                     continue
@@ -4905,6 +4922,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "name": display_name,
                     "kind": "Web-Optimized Data",
                     "type": "cog",
+                    "layer_type": _raster_layer_type(str(st.get("dataset_type") or ""), display_name),
                     "size_bytes": _fast_tile_dir_size(tile_root),
                     "status": str(st.get("status") or jobs_by_file.get(display_name, {}).get("status", "Web-Ready")),
                     "updated_at": str(st.get("updated_at") or ""),
@@ -5025,6 +5043,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "name": tile_root.name,
                     "kind": "Web-Optimized Data",
                     "type": "cog",
+                    "layer_type": _raster_layer_type(_infer_dataset_type(tile_root.name), tile_root.name),
                     "size_bytes": _fast_tile_dir_size(tile_root),
                     "status": "Web-Ready",
                     "file_url": f"{base_url}/data/{rel_base}",

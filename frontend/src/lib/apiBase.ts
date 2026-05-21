@@ -66,6 +66,8 @@ export function toSameOriginBackendUrl(url: string | undefined): string | undefi
       parsed.pathname.startsWith('/tiles/')
     ) {
       return `${parsed.pathname}${parsed.search}${parsed.hash}`
+        .replace(/%7B/gi, '{')
+        .replace(/%7D/gi, '}')
     }
   } catch {
     // Keep the original value when it is not URL-like.

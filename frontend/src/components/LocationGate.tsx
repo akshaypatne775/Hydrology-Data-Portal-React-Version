@@ -1,13 +1,14 @@
-import { useEffect, useState, type PropsWithChildren } from 'react'
+import { useState, type PropsWithChildren } from 'react'
 import './Auth/AuthScreen.css'
 
 type LocationState = 'checking' | 'granted' | 'blocked'
 
 export default function LocationGate({ children }: PropsWithChildren) {
-  const [state, setState] = useState<LocationState>('checking')
-  const [message, setMessage] = useState('Location access is required to open the portal.')
+  const [state, setState] = useState<LocationState>('blocked')
+  const [message, setMessage] = useState('Location access is required to open the portal. Click Allow Location when you are ready.')
 
   const requestLocation = () => {
+    setState('checking')
     if (!navigator.geolocation) {
       setMessage('This browser does not support location access. Use Chrome, Edge, or another supported browser.')
       setState('blocked')
@@ -33,10 +34,6 @@ export default function LocationGate({ children }: PropsWithChildren) {
       { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 },
     )
   }
-
-  useEffect(() => {
-    requestLocation()
-  }, [])
 
   if (state === 'granted') return <>{children}</>
 

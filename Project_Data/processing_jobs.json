@@ -1,6 +1,14 @@
 {
   "proj_af421b0b468cbce1": [
     {
+      "job_id": "Auro_DTM-95dbc870f73b",
+      "kind": "dataset",
+      "file_name": "Auro_DTM.tif",
+      "status": "Completed",
+      "updated_at": "2026-05-21T11:53:27.346297+00:00",
+      "result_url": "/data/projects/proj_af421b0b468cbce1/processed/dtm/Auro_DTM-fc7b6d0a"
+    },
+    {
       "job_id": "Auro_DTM-aa18b68da350",
       "kind": "dataset",
       "file_name": "Auro_DTM.tif",

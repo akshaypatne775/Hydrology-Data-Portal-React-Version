@@ -134,12 +134,26 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
       ),
     [activeLayers, selectedProject?.id],
   )
-  const activeWorkspaceLayer = useMemo(
-    () => activeLayers.find((layer) => layer.projectId === selectedProject?.id) ?? null,
+  const selectedProjectActiveLayers = useMemo(
+    () => activeLayers.filter((layer) => layer.projectId === selectedProject?.id),
     [activeLayers, selectedProject?.id],
+  )
+  const is3DView = useMemo(
+    () =>
+      selectedProjectActiveLayers.some((layer) => (
+        layer.layerType === '3DModel' ||
+        layer.layerType === 'PointCloud' ||
+        String(layer.layerType).toLowerCase() === 'pointcloud'
+      )),
+    [selectedProjectActiveLayers],
+  )
+  const activeWorkspaceLayer = useMemo(
+    () => selectedProjectActiveLayers[0] ?? null,
+    [selectedProjectActiveLayers],
   )
   const routedViewerId = useMemo(() => {
     if (activeId !== 'map' && activeId !== 'globe') return activeId
+    if (is3DView) return 'globe'
     const layerType = String(activeWorkspaceLayer?.layerType || '').toLowerCase()
     const datasetType = String(activeWorkspaceLayer?.datasetType || '').toLowerCase()
     const url = String(activeWorkspaceLayer?.url || '').toLowerCase()
@@ -154,13 +168,16 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     }
     if (
       layerType === 'cog' ||
+      layerType === 'ortho' ||
+      layerType === 'dtm' ||
+      layerType === 'dsm' ||
       layerType === 'vector' ||
       ['ortho', 'orthomosaic', 'dtm', 'dem', 'dsm', 'vector'].includes(datasetType)
     ) {
       return 'map'
     }
     return activeId
-  }, [activeId, activeWorkspaceLayer])
+  }, [activeId, activeWorkspaceLayer, is3DView])
 
   const handleShare = useCallback(async () => {
     const url = `${window.location.origin}${window.location.pathname}`

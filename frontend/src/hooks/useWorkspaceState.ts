@@ -15,7 +15,7 @@ export type ActiveLayerConfig = {
   id: string
   projectId: string
   name: string
-  layerType: 'cog' | 'pointcloud' | 'PointCloud' | '3DModel' | 'Vector' | 'CAD'
+  layerType: 'cog' | 'Ortho' | 'DTM' | 'DSM' | 'pointcloud' | 'PointCloud' | '3DModel' | 'Vector' | 'CAD'
   url: string
   rawPath?: string
   datasetId?: string
@@ -45,7 +45,12 @@ export function useWorkspaceState() {
       if (exists) {
         return prev.filter((layer) => layer.id !== layerConfig.id)
       }
-      return [layerConfig, ...prev]
+      const is3DLayer = ['3dmodel', 'pointcloud'].includes(String(layerConfig.layerType).toLowerCase())
+      const compatible = prev.filter((layer) => {
+        const existingIs3D = ['3dmodel', 'pointcloud'].includes(String(layer.layerType).toLowerCase())
+        return existingIs3D === is3DLayer
+      })
+      return [layerConfig, ...compatible]
     })
   }, [])
 

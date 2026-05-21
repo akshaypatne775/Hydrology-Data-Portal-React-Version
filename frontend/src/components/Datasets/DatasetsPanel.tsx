@@ -33,7 +33,7 @@ type DatasetRow = {
   uploadDate?: string
   filePath?: string
   relPath?: string
-  layerType?: 'cog' | 'pointcloud' | 'PointCloud' | '3DModel' | 'Vector' | 'CAD'
+  layerType?: 'cog' | 'Ortho' | 'DTM' | 'DSM' | 'pointcloud' | 'PointCloud' | '3DModel' | 'Vector' | 'CAD'
   layerUrl?: string
   datasetId?: string
   month?: string
@@ -101,8 +101,10 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
   const fileType = String(file.type).toLowerCase()
   const type = datasetTypeFromBackend(file.dataset_type) ||
     (file.type === '3DModel' ? '3D Model' : fileType === 'vector' ? 'Vector' : fileType === 'cad' ? 'CAD' : inferDatasetType(file.name))
+  const backendLayerType = String(file.layer_type || '')
   const layerType =
-    file.type === 'cog' ? 'cog' :
+    ['Ortho', 'DTM', 'DSM'].includes(backendLayerType) ? backendLayerType as 'Ortho' | 'DTM' | 'DSM' :
+    file.type === 'cog' ? (['Ortho', 'DTM', 'DSM'].includes(type) ? type as 'Ortho' | 'DTM' | 'DSM' : 'cog') :
       fileType === 'pointcloud' ? 'pointcloud' :
         file.type === '3DModel' ? '3DModel' :
           fileType === 'vector' ? 'Vector' :
@@ -111,7 +113,9 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
   const layerUrl =
     layerType === '3DModel'
       ? toSameOriginBackendUrl(file.layer_url) || `${API_BASE}/data/${file.rel_path.replace(/\/$/, '')}/tileset.json`
-      : toSameOriginBackendUrl(file.layer_url)
+      : (file.layer_url || '').toLowerCase().endsWith('tileset.json')
+        ? `${API_BASE}/data/${file.rel_path.replace(/\/tileset\.json$/i, '').replace(/\/$/, '')}/{z}/{x}/{y}.png`
+        : toSameOriginBackendUrl(file.layer_url)
   return {
     id: `file-${file.rel_path}`,
     fileName: file.name,
@@ -287,7 +291,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   }, [modal, projectId, selectedFile, startDatasetUpload, startPointCloudUpload, uploadForm.date, uploadForm.name, uploadForm.type])
 
   const getActionLabel = useCallback((row: DatasetRow) => {
-    if (row.layerType === 'cog') return `Show ${row.type} on Map`
+    if (['cog', 'Ortho', 'DTM', 'DSM'].includes(String(row.layerType))) return `Show ${row.type} on Map`
     if (String(row.layerType).toLowerCase() === 'pointcloud') return 'Open Point Cloud'
     if (row.layerType === '3DModel') return 'Show 3D Model'
     if (row.layerType === 'Vector') return 'Show Vector'
@@ -607,7 +611,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                             datasetType: row.datasetType || toBackendDatasetType(row.type),
                             month: row.month,
                           })
-                          setActiveId(row.layerType === 'cog' || row.layerType === 'Vector' ? 'map' : 'globe')
+                          setActiveId(['cog', 'Ortho', 'DTM', 'DSM', 'Vector'].includes(String(row.layerType)) ? 'map' : 'globe')
                         }}
                       >
                         {getActionLabel(row)}

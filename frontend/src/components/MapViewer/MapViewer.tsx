@@ -239,13 +239,19 @@ function tileTemplateToStaticBase(url: string): string | null {
   return url.slice(0, -suffix.length)
 }
 
-async function fetchStaticTileMeta(tileUrl: string): Promise<{ zoom_max?: number; zoom_min?: number } | null> {
+type StaticTileMeta = {
+  zoom_max?: number
+  zoom_min?: number
+  bounds_wgs84?: [number, number, number, number]
+}
+
+async function fetchStaticTileMeta(tileUrl: string): Promise<StaticTileMeta | null> {
   const base = tileTemplateToStaticBase(tileUrl)
   if (!base) return null
   try {
     const res = await fetch(`${base}tileset.json`, { credentials: 'include' })
     if (!res.ok) return null
-    return (await res.json()) as { zoom_max?: number; zoom_min?: number }
+    return (await res.json()) as StaticTileMeta
   } catch {
     return null
   }
@@ -391,6 +397,18 @@ function MapController({
             )
             return
           }
+        }
+        const meta = await fetchStaticTileMeta(tileUrl)
+        if (meta?.bounds_wgs84 && meta.bounds_wgs84.length === 4) {
+          const [west, south, east, north] = meta.bounds_wgs84
+          map.fitBounds(
+            [
+              [south, west],
+              [north, east],
+            ],
+            { padding: [24, 24] },
+          )
+          return
         }
         const kmlRes = await fetch(`${base}doc.kml`, { credentials: 'include' })
         if (kmlRes.ok) {
@@ -672,6 +690,18 @@ export type MapViewerProps = {
 export function MapViewer({ projectId }: MapViewerProps) {
   const modal = useModal()
   const { activeLayers } = useWorkspaceContext()
+  const is3DView = useMemo(
+    () =>
+      activeLayers.some((layer) => (
+        layer.projectId === projectId &&
+        (
+          layer.layerType === '3DModel' ||
+          layer.layerType === 'PointCloud' ||
+          String(layer.layerType).toLowerCase() === 'pointcloud'
+        )
+      )),
+    [activeLayers, projectId],
+  )
   const center = useMemo(() => getDefaultMapCenter(), [])
   const zoom = useMemo(() => getDefaultZoom(), [])
 
@@ -904,13 +934,17 @@ export function MapViewer({ projectId }: MapViewerProps) {
         projectId: projectId || '',
         name: file.name,
         url: toSameOriginBackendUrl(file.layer_url) || file.layer_url,
-        rawPath: file.raw_rel_path ? file.file_path : undefined,
+        rawPath: undefined,
         datasetId: file.dataset_id,
         datasetType: file.dataset_type,
         month: file.month,
       }))
     const fromContext = activeLayers
-      .filter((item) => item.projectId === projectId && item.layerType === 'cog' && Boolean(item.url))
+      .filter((item) => (
+        item.projectId === projectId &&
+        ['cog', 'Ortho', 'DTM', 'DSM'].includes(String(item.layerType)) &&
+        Boolean(item.url)
+      ))
       .map((item) => ({
         id: item.id,
         projectId: item.projectId,
@@ -1228,6 +1262,10 @@ export function MapViewer({ projectId }: MapViewerProps) {
   }, [cogTileUrl, projectId])
 
   const activeCogLayers = projectCogLayers
+
+  if (is3DView) {
+    return <div className="mv-root" aria-hidden="true" />
+  }
 
   return (
     <div className="mv-root">

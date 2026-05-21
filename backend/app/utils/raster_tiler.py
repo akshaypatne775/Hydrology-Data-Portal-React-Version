@@ -54,7 +54,7 @@ def _zoom_for_raster_resolution(ground_res_m: float, latitude: float, max_zoom_l
         meters_per_pixel = 156543.03392 * lat_factor / (2**zoom)
         if meters_per_pixel <= ground_res_m * 1.75:
             return zoom
-    return 0
+    return max_zoom_limit
 
 
 def _save_png_tile(rgba: np.ndarray, out_path: Path) -> int:
