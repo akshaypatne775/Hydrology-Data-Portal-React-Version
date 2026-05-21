@@ -210,6 +210,24 @@
   pointer-events: none;
 }
 
+.mv-export-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+  width: 100%;
+}
+
+.mv-export-actions .mv-tool {
+  min-width: 0;
+  padding-inline: 0.5rem;
+}
+
+.mv-root i[class^="fa-"],
+.mv-root i[class*=" fa-"] {
+  font-family: "Font Awesome 6 Free", "Font Awesome 6 Brands";
+  font-style: normal;
+}
+
 .mv-hud {
   position: absolute;
   left: 50%;

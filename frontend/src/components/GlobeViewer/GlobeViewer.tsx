@@ -1088,7 +1088,7 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       if (viewer.scene.moon) viewer.scene.moon.show = true
       viewer.scene.skyBox = Cesium.SkyBox.createEarthSkyBox()
       viewer.scene.globe.enableLighting = false
-      viewer.scene.globe.depthTestAgainstTerrain = false
+      viewer.scene.globe.depthTestAgainstTerrain = true
       viewer.scene.highDynamicRange = false
       viewer.scene.backgroundColor = Cesium.Color.BLACK
 

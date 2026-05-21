@@ -749,6 +749,45 @@ export function MapViewer({ projectId }: MapViewerProps) {
     setAnalysisError(null)
   }, [])
 
+  const downloadTextFile = useCallback((filename: string, content: string, type: string) => {
+    const blob = new Blob([content], { type })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  }, [])
+
+  const exportCurrentDrawingKml = useCallback(async () => {
+    if (points.length === 0) {
+      await modal.alert('No drawing found', 'Draw a distance line or area polygon before exporting.')
+      return
+    }
+    const coords = points.map((point) => `${point.lng},${point.lat},0`).join(' ')
+    const isPolygon = ['area', 'volume-area'].includes(measureMode) && points.length >= 3
+    const geometry = isPolygon
+      ? `<Polygon><outerBoundaryIs><LinearRing><coordinates>${coords} ${points[0]!.lng},${points[0]!.lat},0</coordinates></LinearRing></outerBoundaryIs></Polygon>`
+      : `<LineString><tessellate>1</tessellate><coordinates>${coords}</coordinates></LineString>`
+    downloadTextFile(
+      'droid-drawing.kml',
+      `<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2"><Document><Placemark><name>Droid Drawing</name>${geometry}</Placemark></Document></kml>`,
+      'application/vnd.google-earth.kml+xml',
+    )
+  }, [downloadTextFile, measureMode, modal, points])
+
+  const exportCurrentDrawingCsv = useCallback(async () => {
+    if (points.length === 0) {
+      await modal.alert('No drawing found', 'Draw a distance line or area polygon before exporting.')
+      return
+    }
+    const rows = ['vertex,lat,lng']
+    points.forEach((point, index) => rows.push(`${index + 1},${point.lat},${point.lng}`))
+    downloadTextFile('droid-drawing-coordinates.csv', rows.join('\n'), 'text/csv')
+  }, [downloadTextFile, modal, points])
+
   const setTool = useCallback((mode: MeasureMode) => {
     setIssueMode(false)
     setElevationMode(false)
@@ -1435,6 +1474,26 @@ export function MapViewer({ projectId }: MapViewerProps) {
             >
               Clear drawing
             </button>
+            <div className="mv-export-actions" aria-label="Export drawings">
+              <button
+                type="button"
+                className="mv-tool mv-tool--ghost"
+                onClick={() => void exportCurrentDrawingKml()}
+                disabled={points.length === 0 || splitView}
+              >
+                <i className="fa-solid fa-file-export" aria-hidden />
+                Export KML
+              </button>
+              <button
+                type="button"
+                className="mv-tool mv-tool--ghost"
+                onClick={() => void exportCurrentDrawingCsv()}
+                disabled={points.length === 0 || splitView}
+              >
+                <i className="fa-solid fa-table" aria-hidden />
+                Export CSV
+              </button>
+            </div>
           </div>
         </div>
       </div>

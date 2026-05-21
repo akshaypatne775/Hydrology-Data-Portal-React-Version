@@ -89,19 +89,18 @@ export async function updateAdminDatasetMetadata(
   projectId: string,
   payload: AdminDatasetMetadataPayload,
 ): Promise<void> {
-  const res = await apiRequest(`/api/admin/datasets/${encodeURIComponent(projectId)}/metadata`, {
-    method: 'PATCH',
+  const { dataset_id: datasetKey, ...body } = payload
+  const res = await apiRequest(`/api/admin/projects/${encodeURIComponent(projectId)}/datasets/${encodeURIComponent(datasetKey)}`, {
+    method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
   })
   if (!res.ok) throw new Error(`Admin metadata update failed (${res.status})`)
 }
 
-export async function forceDeleteAdminDataset(projectId: string, relPath: string): Promise<void> {
-  const res = await apiRequest(`/api/admin/projects/${encodeURIComponent(projectId)}/files`, {
+export async function forceDeleteAdminDataset(projectId: string, datasetKey: string): Promise<void> {
+  const res = await apiRequest(`/api/admin/projects/${encodeURIComponent(projectId)}/datasets/${encodeURIComponent(datasetKey)}`, {
     method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rel_path: relPath }),
   })
   if (!res.ok) throw new Error(`Force delete failed (${res.status})`)
 }

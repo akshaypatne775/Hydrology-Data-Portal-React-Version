@@ -287,7 +287,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   }, [modal, projectId, selectedFile, startDatasetUpload, startPointCloudUpload, uploadForm.date, uploadForm.name, uploadForm.type])
 
   const getActionLabel = useCallback((row: DatasetRow) => {
-    if (row.layerType === 'cog') return 'Show Ortho on Map'
+    if (row.layerType === 'cog') return `Show ${row.type} on Map`
     if (String(row.layerType).toLowerCase() === 'pointcloud') return 'Open Point Cloud'
     if (row.layerType === '3DModel') return 'Show 3D Model'
     if (row.layerType === 'Vector') return 'Show Vector'
@@ -339,14 +339,14 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   }, [loadRows, modal, projectId])
 
   const onAdminForceDelete = useCallback(async (row: DatasetRow) => {
-    if (!projectId || !row.relPath) return
+    if (!projectId || !row.datasetId) return
     const confirmed = await modal.confirm(
       'Force delete dataset',
       `Force delete ${row.fileName}? This removes the selected dataset path from local storage.`,
     )
     if (!confirmed) return
     try {
-      await forceDeleteAdminDataset(projectId, row.relPath)
+      await forceDeleteAdminDataset(projectId, row.datasetId)
       invalidateProjectDataCache(projectId)
       setDatasets((prev) => prev.filter((item) => item.id !== row.id))
     } catch (error) {
@@ -645,7 +645,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                         Edit Metadata
                       </button>
                     ) : null}
-                    {isAdmin && row.relPath ? (
+                    {isAdmin && row.datasetId ? (
                       <button
                         type="button"
                         className="dsp-action dsp-action--danger"

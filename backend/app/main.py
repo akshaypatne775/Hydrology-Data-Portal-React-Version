@@ -47,6 +47,7 @@ from pydantic import BaseModel
 from titiler.core.factory import TilerFactory
 
 from app.core.database import configure_database, ensure_tables, get_db_connection
+from app.utils.raster_tiler import run_rasterio_tiler
 
 # Project_Data lives beside backend/ and frontend/ (repo root).
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -378,6 +379,14 @@ class AdminProjectPatchPayload(BaseModel):
 
 class AdminDatasetMetaPayload(BaseModel):
     dataset_id: str
+    name: str | None = None
+    date: str | None = None
+    status: str | None = None
+    dataset_type: str | None = None
+    month: str | None = None
+
+
+class AdminDatasetPathMetaPayload(BaseModel):
     name: str | None = None
     date: str | None = None
     status: str | None = None
@@ -1174,12 +1183,16 @@ async def process_tif_to_tiles(
     dataset_type: str = "",
 ) -> None:
     await asyncio.to_thread(
-        _run_gdal2tiles_subprocess,
+        run_rasterio_tiler,
         input_tif,
         output_dir,
         project_id,
         dataset_name,
         dataset_type,
+        LOCAL_DATA_PATH,
+        TIFF_TILE_BUDGET_MB,
+        TIFF_TILE_MAX_ZOOM_LIMIT,
+        TIFF_TILE_SIZE,
     )
 
 
@@ -1411,7 +1424,7 @@ def _safe_project_id(project_id: str) -> str:
 
 
 def get_project_dirs(project_id: str) -> tuple[Path, Path]:
-    """Per-project raw uploads and gdal2tiles output under Project_Data/projects."""
+    """Per-project raw uploads and Python Rasterio XYZ output under Project_Data/projects."""
     safe = _safe_project_id(project_id)
     project_dir = Path(LOCAL_DATA_PATH) / "projects" / safe
     raw_dir = project_dir / "raw"
@@ -1996,7 +2009,7 @@ def _get_crop_mask(project_id: str, tile_folder: str) -> dict[str, str] | None:
 def _is_valid_tile_dataset(folder: Path) -> bool:
     """
     Accept either:
-    - classical gdal2tiles metadata (`tilemapresource.xml`), OR
+    - classical tiled-raster metadata (`tilemapresource.xml`), OR
     - plain XYZ output where only zoom folders + PNG tiles exist.
     """
     if not folder.is_dir():
@@ -3578,7 +3591,7 @@ async def process_dataset(
     )
     return ProcessDatasetOut(
         status="success",
-        message="Dataset uploaded. gdal2tiles XYZ generation started in background.",
+        message="Dataset uploaded. Python Rasterio XYZ tiling started in background.",
         project_id=safe_project_id,
         dataset_id=dataset_id,
         dataset_name=safe_name,
@@ -4440,6 +4453,99 @@ def admin_update_dataset_metadata(
     _write_dataset_status(safe_project_id, dataset_id, st)
     _invalidate_project_files_cache(safe_project_id)
     return {"status": "success"}
+
+
+def _admin_dataset_status_by_key(project_id: str, dataset_key: str) -> tuple[str, dict[str, str]]:
+    clean_key = dataset_key.strip().strip("/")
+    if not clean_key or ".." in clean_key or "\\" in clean_key:
+        raise HTTPException(status_code=400, detail="Invalid dataset_name")
+    decoded = clean_key
+    for st in _project_dataset_statuses(project_id):
+        dataset_id = str(st.get("dataset_id") or "")
+        dataset_name = str(st.get("dataset_name") or "")
+        tile_folder = str(st.get("tile_folder") or "")
+        candidates = {
+            dataset_id,
+            dataset_name,
+            Path(dataset_name).stem,
+            tile_folder,
+            Path(tile_folder).name,
+        }
+        if decoded in candidates:
+            return dataset_id, st
+    raise HTTPException(status_code=404, detail="Dataset not found")
+
+
+def _remove_processing_job(project_id: str, dataset_id: str) -> None:
+    jobs = _read_processing_jobs()
+    current = jobs.get(project_id, [])
+    jobs[project_id] = [item for item in current if str(item.get("job_id")) != dataset_id]
+    _write_processing_jobs(jobs)
+
+
+def _safe_remove_dataset_path(path: Path) -> int:
+    local_root = Path(LOCAL_DATA_PATH).resolve()
+    target = path.resolve()
+    if target == local_root or not target.is_relative_to(local_root):
+        raise HTTPException(status_code=400, detail="Invalid dataset target path")
+    if not target.exists():
+        return 0
+    if target.is_dir():
+        shutil.rmtree(target)
+        return 1
+    target.unlink(missing_ok=True)
+    return 1
+
+
+@app.put("/api/admin/projects/{project_id}/datasets/{dataset_name:path}")
+def admin_update_dataset_metadata_by_name(
+    project_id: str,
+    dataset_name: str,
+    payload: AdminDatasetPathMetaPayload,
+    request: Request,
+) -> dict[str, str]:
+    _require_admin(request)
+    safe_project_id = _safe_project_id(project_id)
+    dataset_id, st = _admin_dataset_status_by_key(safe_project_id, dataset_name)
+    if payload.name is not None and payload.name.strip():
+        st["dataset_name"] = payload.name.strip()
+    next_month = payload.month if payload.month is not None else payload.date
+    if next_month is not None:
+        st["month"] = _normalize_month(next_month)
+    if payload.status is not None and payload.status.strip():
+        st["status"] = payload.status.strip()
+    if payload.dataset_type is not None and payload.dataset_type.strip():
+        st["dataset_type"] = _normalize_dataset_type(payload.dataset_type, st.get("dataset_name", ""))
+    st["updated_at"] = _now_iso()
+    _write_dataset_status(safe_project_id, dataset_id, st)
+    _invalidate_project_files_cache(safe_project_id)
+    return {"status": "success", "dataset_id": dataset_id}
+
+
+@app.delete("/api/admin/projects/{project_id}/datasets/{dataset_name:path}")
+def admin_delete_dataset_by_name(
+    project_id: str,
+    dataset_name: str,
+    request: Request,
+) -> dict[str, str | int]:
+    _require_admin(request)
+    safe_project_id = _safe_project_id(project_id)
+    dataset_id, st = _admin_dataset_status_by_key(safe_project_id, dataset_name)
+    removed = 0
+    for key in ("raw_rel_path", "tiles_rel_path", "vector_rel_path", "model_rel_path"):
+        rel = str(st.get(key) or "").strip().replace("\\", "/").lstrip("/")
+        if rel and ".." not in rel:
+            removed += _safe_remove_dataset_path(Path(LOCAL_DATA_PATH) / rel)
+    tile_folder = str(st.get("tile_folder") or "").strip()
+    if tile_folder:
+        _, processed_root = get_project_dirs(safe_project_id)
+        candidate = processed_root / tile_folder
+        if candidate.exists():
+            removed += _safe_remove_dataset_path(candidate)
+    _safe_remove_dataset_path(_dataset_dir(safe_project_id, dataset_id))
+    _remove_processing_job(safe_project_id, dataset_id)
+    _invalidate_project_files_cache(safe_project_id)
+    return {"status": "success", "dataset_id": dataset_id, "removed_paths": removed}
 
 
 @app.get("/api/analysis/{project_id}/elevation")

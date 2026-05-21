@@ -134,6 +134,33 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
       ),
     [activeLayers, selectedProject?.id],
   )
+  const activeWorkspaceLayer = useMemo(
+    () => activeLayers.find((layer) => layer.projectId === selectedProject?.id) ?? null,
+    [activeLayers, selectedProject?.id],
+  )
+  const routedViewerId = useMemo(() => {
+    if (activeId !== 'map' && activeId !== 'globe') return activeId
+    const layerType = String(activeWorkspaceLayer?.layerType || '').toLowerCase()
+    const datasetType = String(activeWorkspaceLayer?.datasetType || '').toLowerCase()
+    const url = String(activeWorkspaceLayer?.url || '').toLowerCase()
+    if (
+      layerType === '3dmodel' ||
+      layerType === 'pointcloud' ||
+      datasetType === '3dmodel' ||
+      datasetType === 'pointcloud' ||
+      url.endsWith('tileset.json')
+    ) {
+      return 'globe'
+    }
+    if (
+      layerType === 'cog' ||
+      layerType === 'vector' ||
+      ['ortho', 'orthomosaic', 'dtm', 'dem', 'dsm', 'vector'].includes(datasetType)
+    ) {
+      return 'map'
+    }
+    return activeId
+  }, [activeId, activeWorkspaceLayer])
 
   const handleShare = useCallback(async () => {
     const url = `${window.location.origin}${window.location.pathname}`
@@ -552,16 +579,16 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
           ) : (
             <div
               className={
-                activeId === 'map'
+                routedViewerId === 'map'
                   ? 'ds-map-shell ds-map-shell--viewer ds-map-shell--analysis'
                   : 'ds-map-shell ds-map-shell--viewer'
               }
             >
               <div className="ds-map-toolbar">
                 <h2 className="ds-map-toolbar__title">
-                  {activeId === 'map'
+                  {routedViewerId === 'map'
                     ? 'WORKSPACE - 2D/3D VIEWER'
-                    : activeId === 'globe'
+                    : routedViewerId === 'globe'
                       ? 'WORKSPACE - 2D/3D VIEWER'
                     : activeId === 'datasets'
                       ? 'Data Catalog'
@@ -570,9 +597,9 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                       : 'Data Downloads'}
                 </h2>
                 <span className="ds-map-toolbar__badge">
-                  {activeId === 'map'
-                    ? 'Leaflet · 2D'
-                    : activeId === 'globe'
+                  {routedViewerId === 'map'
+                    ? 'Leaflet - 2D GIS'
+                    : routedViewerId === 'globe'
                       ? activePointCloudLayer?.url
                         ? 'Droid 3D Point Cloud'
                         : '3D Model Viewer'
@@ -583,7 +610,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                       : 'Export Center'}
                 </span>
               </div>
-              {activeId === 'map' ? (
+              {routedViewerId === 'map' ? (
                 <div
                   className="ds-map-body"
                   role="region"
@@ -593,7 +620,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                     <MapViewer projectId={selectedProject!.id} />
                   </Suspense>
                 </div>
-              ) : activeId === 'globe' ? (
+              ) : routedViewerId === 'globe' ? (
                 <div
                   className="ds-map-body ds-map-body--globe"
                   role="region"
