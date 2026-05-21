@@ -4,6 +4,7 @@ import type { Project } from '../services/projectService'
 export type WorkspaceTabId =
   | 'dashboard'
   | 'projects'
+  | 'admin'
   | 'datasets'
   | 'map'
   | 'globe'
@@ -25,6 +26,7 @@ export type ActiveLayerConfig = {
 export function useWorkspaceState() {
   const [activeId, setActiveId] = useState<WorkspaceTabId>('projects')
   const [selectedProject, setSelectedProject] = useState<Project | null>(null)
+  const [managedUser, setManagedUser] = useState<{ userId: number; email: string } | null>(null)
   const [floodSimulationLevel, setFloodSimulationLevel] = useState(0)
   const [showCreateProject, setShowCreateProject] = useState(false)
   const [createForm, setCreateForm] = useState({
@@ -53,6 +55,8 @@ export function useWorkspaceState() {
       setActiveId,
       selectedProject,
       setSelectedProject,
+      managedUser,
+      setManagedUser,
       floodSimulationLevel,
       setFloodSimulationLevel,
       showCreateProject,
@@ -67,6 +71,7 @@ export function useWorkspaceState() {
     [
       activeId,
       selectedProject,
+      managedUser,
       floodSimulationLevel,
       showCreateProject,
       createForm,

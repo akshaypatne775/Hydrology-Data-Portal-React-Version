@@ -4,6 +4,7 @@ import 'cesium/Build/Cesium/Widgets/widgets.css'
 import { API_BASE, toSameOriginBackendUrl } from '../../lib/apiBase'
 import { useUploadContext } from '../../context/UploadContext'
 import { useWorkspaceContext } from '../../context/WorkspaceContext'
+import { useModal } from '../../context/ModalContext'
 import { getPointCloudStatus } from '../../services/pointCloudService'
 import { getProjectFiles, type ProjectFile } from '../../services/datasetService'
 import './GlobeViewer.css'
@@ -209,6 +210,7 @@ type GlobeViewerProps = {
 }
 
 export function GlobeViewer({ projectId }: GlobeViewerProps) {
+  const modal = useModal()
   const { tasks } = useUploadContext()
   const { activeLayers } = useWorkspaceContext()
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -557,7 +559,7 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
   const saveCurrentCamera = useCallback(async () => {
     const viewer = viewerRef.current
     if (!viewer) return
-    const name = window.prompt('Camera point name', `View ${cameraViews.length + 1}`)
+    const name = await modal.prompt('Save camera point', 'Camera point name', `View ${cameraViews.length + 1}`)
     if (!name?.trim()) return
     const cartographic = viewer.camera.positionCartographic
     try {
@@ -575,7 +577,7 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     } catch (error) {
       setViewerError(error instanceof Error ? error.message : 'Failed to save camera point')
     }
-  }, [cameraViews.length, projectId])
+  }, [cameraViews.length, modal, projectId])
 
   const deleteSelectedCamera = useCallback(async () => {
     if (!selectedCameraViewId) return

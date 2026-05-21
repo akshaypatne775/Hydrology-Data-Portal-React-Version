@@ -4,6 +4,7 @@ import { logout } from '../services/authService'
 import type { Project } from '../services/projectService'
 import { getProjectFiles, getProjectJobs } from '../services/datasetService'
 import { useWorkspaceContext } from '../context/WorkspaceContext'
+import { useModal } from '../context/ModalContext'
 import './Dashboard.css'
 
 const MapViewer = lazy(() =>
@@ -14,6 +15,7 @@ const PotreeViewer = lazy(() => import('./GlobeViewer/PotreeViewer'))
 const DatasetsPanel = lazy(() => import('./Datasets/DatasetsPanel'))
 const DownloadsPanel = lazy(() => import('./Downloads/DownloadsPanel'))
 const ComparePanel = lazy(() => import('./Compare/ComparePanel'))
+const AdminDashboard = lazy(() => import('./Admin/AdminDashboard'))
 
 const DROID_CLOUD_LOGO_URL =
   'https://www.droidminingsolutions.com/wp-content/uploads/2026/04/ChatGPT-Image-Apr-25-2026-04_33_45-PM.png'
@@ -21,6 +23,7 @@ const DROID_CLOUD_LOGO_URL =
 const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: 'fa-solid fa-house' },
   { id: 'projects', label: 'Projects', icon: 'fa-solid fa-folder-tree' },
+  { id: 'admin', label: 'Admin Control', icon: 'fa-solid fa-shield-halved' },
   { id: 'datasets', label: 'Data Catalog', icon: 'fa-solid fa-database' },
   { id: 'map', label: 'Viewer (2D)', icon: 'fa-solid fa-map' },
   { id: 'globe', label: 'Viewer (3D)', icon: 'fa-solid fa-earth-americas' },
@@ -71,17 +74,30 @@ function formatDisplayDate(dateValue: string): string {
   return date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
 }
 
+function initialsFromEmail(email: string): string {
+  const local = email.split('@')[0] || 'U'
+  return local
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join('') || 'U'
+}
+
 type DashboardProps = {
-  user: { id: number; email: string }
+  user: { id: number; email: string; role?: string }
   onLogout: () => void
 }
 
 export function Dashboard({ user, onLogout }: DashboardProps) {
+  const modal = useModal()
   const {
     activeId,
     setActiveId,
     selectedProject,
     setSelectedProject,
+    managedUser,
+    setManagedUser,
     showCreateProject,
     setShowCreateProject,
     createForm,
@@ -90,7 +106,8 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     setShareCopied,
     activeLayers,
   } = useWorkspaceContext()
-  const { projects, loading: projectsLoading, error: projectsError, addProject, renameProject } = useProjects()
+  const isAdmin = user.role === 'admin'
+  const { projects, loading: projectsLoading, error: projectsError, addProject, renameProject } = useProjects(managedUser?.userId)
   const [createProjectError, setCreateProjectError] = useState<string | null>(null)
   const [renamingProject, setRenamingProject] = useState(false)
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
@@ -103,8 +120,9 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
 
   const visibleNavItems = useMemo(
     () =>
-      selectedProject ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.id === 'projects'),
-    [selectedProject],
+      (selectedProject ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.id === 'projects' || item.id === 'admin'))
+        .filter((item) => item.id !== 'admin' || isAdmin),
+    [isAdmin, selectedProject],
   )
   const activePointCloudLayer = useMemo(
     () =>
@@ -117,20 +135,23 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     [activeLayers, selectedProject?.id],
   )
 
-  const handleShare = useCallback(() => {
+  const handleShare = useCallback(async () => {
     const url = `${window.location.origin}${window.location.pathname}`
     const flashCopied = () => {
       setShareCopied(true)
       window.setTimeout(() => setShareCopied(false), 2200)
     }
-    if (navigator.clipboard?.writeText) {
-      void navigator.clipboard.writeText(url).then(flashCopied).catch(() => {
-        window.prompt('Copy white-label link:', url)
-      })
-    } else {
-      window.prompt('Copy white-label link:', url)
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url)
+        flashCopied()
+        return
+      }
+      throw new Error('Clipboard unavailable')
+    } catch {
+      await modal.prompt('Copy share link', 'Clipboard access is blocked. Copy this link manually.', url)
     }
-  }, [setShareCopied])
+  }, [modal, setShareCopied])
 
   const openProject = useCallback(
     (project: Project) => {
@@ -220,18 +241,18 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
 
   const handleRenameProject = useCallback(async () => {
     if (!selectedProject) return
-    const name = window.prompt('Project name', selectedProject.name)
+    const name = await modal.prompt('Rename project', 'Project name', selectedProject.name)
     if (!name?.trim() || name.trim() === selectedProject.name) return
     setRenamingProject(true)
     try {
       const updated = await renameProject(selectedProject.id, name.trim())
       setSelectedProject(updated)
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : 'Project rename failed')
+      await modal.alert('Project rename failed', error instanceof Error ? error.message : 'Project rename failed')
     } finally {
       setRenamingProject(false)
     }
-  }, [renameProject, selectedProject, setSelectedProject])
+  }, [modal, renameProject, selectedProject, setSelectedProject])
 
   const createProjectForm = useMemo(
     () => (
@@ -323,13 +344,18 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
               key={item.id}
               href={`#${item.id}`}
               className={
-                activeId === item.id
-                  ? 'ds-sidebar__link ds-sidebar__link--active'
-                  : 'ds-sidebar__link'
+                [
+                  'ds-sidebar__link',
+                  activeId === item.id ? 'ds-sidebar__link--active' : '',
+                  item.id === 'admin' ? 'ds-sidebar__link--admin' : '',
+                ].filter(Boolean).join(' ')
               }
               onClick={(e) => {
                 e.preventDefault()
                 if (item.id === 'projects') {
+                  setSelectedProject(null)
+                }
+                if (item.id === 'admin') {
                   setSelectedProject(null)
                 }
                 setActiveId(item.id)
@@ -353,7 +379,13 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
           <div className="ds-topbar__project">
             <span className="ds-topbar__label">Project</span>
             <h1 className="ds-topbar__name">
-              {selectedProject ? selectedProject.name : 'Select Project'}
+              {activeId === 'admin'
+                ? 'Admin Control Panel'
+                : selectedProject
+                  ? selectedProject.name
+                  : managedUser
+                    ? `Managing ${managedUser.email}`
+                    : 'Select Project'}
             </h1>
             {selectedProject ? (
               <button
@@ -376,19 +408,19 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                   ? 'ds-share ds-share--copied'
                   : 'ds-share'
               }
-              onClick={handleShare}
+              onClick={() => void handleShare()}
               title="Copy white-label link to this view"
             >
               <i className="fa-solid fa-link" aria-hidden />
               {shareCopied ? 'Copied' : 'Share'}
             </button>
-            <div className="ds-profile" role="group" aria-label="User profile">
+            <div className={isAdmin ? 'ds-profile ds-profile--admin' : 'ds-profile'} role="group" aria-label="User profile">
               <div className="ds-profile__avatar" aria-hidden>
-                DC
+                {isAdmin ? 'AD' : initialsFromEmail(user.email)}
               </div>
               <div className="ds-profile__meta">
                 <span className="ds-profile__name">{user.email}</span>
-                <span className="ds-profile__role">Droid Cloud User</span>
+                <span className="ds-profile__role">{isAdmin ? 'Droid Cloud Admin' : 'Droid Cloud User'}</span>
               </div>
             </div>
             <button type="button" className="ds-share" onClick={() => void handleLogout()}>
@@ -398,17 +430,36 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
         </header>
 
         <main className="ds-content">
-          {activeId === 'projects' && !selectedProject ? (
+          {activeId === 'admin' && isAdmin ? (
+            <Suspense fallback={<div className="ds-panel-loading">Loading admin panel...</div>}>
+              <AdminDashboard />
+            </Suspense>
+          ) : activeId === 'projects' && !selectedProject ? (
             <section className="ds-projects" aria-label="Projects list">
               <header className="ds-projects__header">
                 <p className="ds-projects__kicker">
                   <i className="fa-solid fa-folder-tree" aria-hidden /> Project Directory
                 </p>
-                <h2 className="ds-projects__title">Select a project workspace</h2>
+                <h2 className="ds-projects__title">
+                  {managedUser ? `Managing ${managedUser.email}` : 'Select a project workspace'}
+                </h2>
+                {managedUser ? (
+                  <button
+                    type="button"
+                    className="ds-project-card__open"
+                    onClick={() => {
+                      setManagedUser(null)
+                      setSelectedProject(null)
+                    }}
+                  >
+                    Exit God Mode
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className="ds-project-card__open"
                   onClick={() => setShowCreateProject(true)}
+                  disabled={Boolean(managedUser)}
                 >
                   <i className="fa-solid fa-plus" aria-hidden /> Add Project
                 </button>

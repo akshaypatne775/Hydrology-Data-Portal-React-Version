@@ -47,6 +47,41 @@ def ensure_tables() -> None:
             )
             """
         )
+        user_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(users)").fetchall()
+        }
+        had_approval_status = "approval_status" in user_columns
+        if "role" not in user_columns:
+            connection.execute(
+                "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'"
+            )
+        if had_approval_status:
+            connection.execute(
+                "UPDATE users SET role = 'user' WHERE role IS NULL OR role = ''"
+            )
+        else:
+            connection.execute(
+                "UPDATE users SET role = 'user' WHERE role IS NULL OR role = '' OR role = 'admin'"
+            )
+        if "approval_status" not in user_columns:
+            connection.execute(
+                "ALTER TABLE users ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'"
+            )
+        if "requested_role" not in user_columns:
+            connection.execute(
+                "ALTER TABLE users ADD COLUMN requested_role TEXT NOT NULL DEFAULT 'user'"
+            )
+        if "approved_at" not in user_columns:
+            connection.execute("ALTER TABLE users ADD COLUMN approved_at TEXT")
+        if "approval_token_hash" not in user_columns:
+            connection.execute("ALTER TABLE users ADD COLUMN approval_token_hash TEXT")
+        connection.execute(
+            "UPDATE users SET approval_status = 'approved' WHERE approval_status IS NULL OR approval_status = ''"
+        )
+        connection.execute(
+            "UPDATE users SET requested_role = role WHERE requested_role IS NULL OR requested_role = ''"
+        )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS projects (
@@ -103,6 +138,47 @@ def ensure_tables() -> None:
                 FOREIGN KEY(owner_user_id) REFERENCES users(id),
                 FOREIGN KEY(project_id) REFERENCES projects(id)
             )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS activity_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                ip_address TEXT NOT NULL,
+                method TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                device_label TEXT NOT NULL DEFAULT '',
+                latitude REAL,
+                longitude REAL,
+                location_accuracy REAL,
+                accessed_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
+        activity_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(activity_logs)").fetchall()
+        }
+        if "device_label" not in activity_columns:
+            connection.execute("ALTER TABLE activity_logs ADD COLUMN device_label TEXT NOT NULL DEFAULT ''")
+        if "latitude" not in activity_columns:
+            connection.execute("ALTER TABLE activity_logs ADD COLUMN latitude REAL")
+        if "longitude" not in activity_columns:
+            connection.execute("ALTER TABLE activity_logs ADD COLUMN longitude REAL")
+        if "location_accuracy" not in activity_columns:
+            connection.execute("ALTER TABLE activity_logs ADD COLUMN location_accuracy REAL")
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_activity_logs_user_time
+            ON activity_logs(user_id, accessed_at)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_activity_logs_accessed_at
+            ON activity_logs(accessed_at)
             """
         )
         connection.commit()

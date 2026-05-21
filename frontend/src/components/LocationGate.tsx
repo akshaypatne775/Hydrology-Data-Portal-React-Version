@@ -1,0 +1,57 @@
+import { useEffect, useState, type PropsWithChildren } from 'react'
+import './Auth/AuthScreen.css'
+
+type LocationState = 'checking' | 'granted' | 'blocked'
+
+export default function LocationGate({ children }: PropsWithChildren) {
+  const [state, setState] = useState<LocationState>('checking')
+  const [message, setMessage] = useState('Location access is required to open the portal.')
+
+  const requestLocation = () => {
+    if (!navigator.geolocation) {
+      setMessage('This browser does not support location access. Use Chrome, Edge, or another supported browser.')
+      setState('blocked')
+      return
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        window.localStorage.setItem(
+          'droid:location',
+          JSON.stringify({
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+            accuracy: pos.coords.accuracy,
+            capturedAt: new Date().toISOString(),
+          }),
+        )
+        setState('granted')
+      },
+      () => {
+        setMessage('Please allow location permission. Portal access is blocked until location is allowed.')
+        setState('blocked')
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 },
+    )
+  }
+
+  useEffect(() => {
+    requestLocation()
+  }, [])
+
+  if (state === 'granted') return <>{children}</>
+
+  return (
+    <div className="auth-root">
+      <div className="auth-card" role="alertdialog" aria-label="Location required">
+        <div className="auth-header">
+          <p className="auth-kicker">Droid Cloud Security</p>
+          <h1>Location Required</h1>
+          <p>{message}</p>
+        </div>
+        <button type="button" className="auth-submit" onClick={requestLocation}>
+          {state === 'checking' ? 'Checking Location...' : 'Allow Location'}
+        </button>
+      </div>
+    </div>
+  )
+}

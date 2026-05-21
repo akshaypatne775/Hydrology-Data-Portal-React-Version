@@ -10,6 +10,7 @@ import type { AuthUser } from '../services/authService'
 type AuthContextValue = {
   loading: boolean
   user: AuthUser | null
+  isAdmin: boolean
   setUser: (user: AuthUser | null) => void
 }
 
@@ -17,10 +18,11 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 
 export function AuthProvider({ children }: PropsWithChildren) {
   const { loading, user, setUser } = useAuthSession()
+  const isAdmin = user?.role === 'admin'
 
   const value = useMemo<AuthContextValue>(
-    () => ({ loading, user, setUser }),
-    [loading, user, setUser],
+    () => ({ loading, user, isAdmin, setUser }),
+    [isAdmin, loading, user, setUser],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

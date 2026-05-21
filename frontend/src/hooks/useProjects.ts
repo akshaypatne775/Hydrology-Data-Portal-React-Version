@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   createProject,
+  listAdminUserProjects,
   listProjects,
   updateProjectName,
   type CreateProjectPayload,
   type Project,
 } from '../services/projectService'
 
-export function useProjects() {
+export function useProjects(managedUserId?: number) {
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -16,7 +17,7 @@ export function useProjects() {
     setLoading(true)
     setError(null)
     try {
-      const rows = await listProjects()
+      const rows = managedUserId ? await listAdminUserProjects(managedUserId) : await listProjects()
       setProjects(rows)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load projects')
@@ -24,7 +25,7 @@ export function useProjects() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [managedUserId])
 
   useEffect(() => {
     void refresh()

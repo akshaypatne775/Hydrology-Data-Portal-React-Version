@@ -13,6 +13,7 @@ import subprocess
 import time
 import zipfile
 import io
+import smtplib
 from pathlib import Path
 import sqlite3
 import json
@@ -20,6 +21,10 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from importlib.util import find_spec
 from urllib.parse import quote
+from urllib.parse import urlencode
+from urllib.request import Request as UrlRequest, urlopen
+from urllib.error import URLError
+from email.message import EmailMessage
 
 from fastapi import (
     BackgroundTasks,
@@ -45,6 +50,28 @@ from app.core.database import configure_database, ensure_tables, get_db_connecti
 
 # Project_Data lives beside backend/ and frontend/ (repo root).
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
+
+
+def _load_local_env_file() -> None:
+    env_path = BASE_DIR / "backend" / ".env"
+    if not env_path.is_file():
+        return
+    try:
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except OSError as exc:
+        print(f"Could not load backend .env: {exc}")
+
+
+_load_local_env_file()
+
 _DEFAULT_PROJECT_DATA = BASE_DIR / "Project_Data"
 LOCAL_DATA_PATH = os.getenv("LOCAL_DATA_PATH", str(_DEFAULT_PROJECT_DATA))
 
@@ -76,6 +103,9 @@ TIFF_TILE_SIZE = int(os.getenv("TIFF_TILE_SIZE", "256"))
 SESSION_COOKIE_NAME = "droid_cloud_session"
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "604800"))
 SESSION_SECRET_FILE = Path(LOCAL_DATA_PATH) / ".session_signing_secret"
+OWNER_APPROVAL_EMAIL = os.getenv("OWNER_APPROVAL_EMAIL", "akshaydroid123@gmail.com").strip()
+ADMIN_ALERT_PHONE = os.getenv("ADMIN_ALERT_PHONE", "+917057723981").strip()
+PUBLIC_PORTAL_URL = os.getenv("PUBLIC_PORTAL_URL", "https://portal.droidminingsolutions.com").strip()
 
 
 def _load_persistent_session_secret() -> str:
@@ -141,6 +171,51 @@ class Debug404Middleware(BaseHTTPMiddleware):
         return response
 
 
+class ActivityTrackingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/api/auth/logout":
+            return response
+        try:
+            user = _get_optional_user(request)
+            forwarded_for = request.headers.get("x-forwarded-for", "")
+            forwarded_ip = forwarded_for.split(",", 1)[0].strip()
+            ip_address = forwarded_ip or (request.client.host if request.client else "unknown")
+            device_label = request.headers.get("x-droid-device", "").strip()[:160]
+            lat_raw = request.headers.get("x-droid-lat", "").strip()
+            lng_raw = request.headers.get("x-droid-lng", "").strip()
+            accuracy_raw = request.headers.get("x-droid-location-accuracy", "").strip()
+            latitude = float(lat_raw) if lat_raw else None
+            longitude = float(lng_raw) if lng_raw else None
+            location_accuracy = float(accuracy_raw) if accuracy_raw else None
+            with get_db_connection() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO activity_logs (
+                        user_id, ip_address, method, endpoint, device_label,
+                        latitude, longitude, location_accuracy, accessed_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(user["id"]) if user else None,
+                        ip_address,
+                        request.method,
+                        request.url.path,
+                        device_label,
+                        latitude,
+                        longitude,
+                        location_accuracy,
+                        _now_iso(),
+                    ),
+                )
+                connection.commit()
+        except Exception as exc:  # noqa: BLE001
+            print(f"Activity tracking failed: {exc}")
+        return response
+
+
+app.add_middleware(ActivityTrackingMiddleware)
 app.add_middleware(Debug404Middleware)
 app.add_middleware(
     CORSMiddleware,
@@ -291,6 +366,31 @@ class DatasetMetaPayload(BaseModel):
     dataset_id: str
     month: str = ""
     dataset_type: str = ""
+
+
+class AdminProjectPatchPayload(BaseModel):
+    name: str | None = None
+    location: str | None = None
+    date: str | None = None
+    status: str | None = None
+    type: str | None = None
+
+
+class AdminDatasetMetaPayload(BaseModel):
+    dataset_id: str
+    name: str | None = None
+    date: str | None = None
+    status: str | None = None
+    dataset_type: str | None = None
+    month: str | None = None
+
+
+class AdminUserApprovalPayload(BaseModel):
+    role: str = "user"
+
+
+class AdminUserRolePayload(BaseModel):
+    role: str
 
 
 class CameraViewPayload(BaseModel):
@@ -1983,6 +2083,99 @@ def _token_hash(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
 
+def _send_owner_sms(message: str) -> None:
+    sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+    token = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+    from_number = os.getenv("TWILIO_FROM_NUMBER", "").strip()
+    to_number = os.getenv("ADMIN_ALERT_PHONE", ADMIN_ALERT_PHONE).strip()
+    if not (sid and token and from_number and to_number):
+        print(f"[SMS pending configuration] {message}")
+        return
+    payload = urlencode({"From": from_number, "To": to_number, "Body": message}).encode("utf-8")
+    req = UrlRequest(
+        f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
+        data=payload,
+        method="POST",
+    )
+    auth = base64.b64encode(f"{sid}:{token}".encode("utf-8")).decode("ascii")
+    req.add_header("Authorization", f"Basic {auth}")
+    try:
+        with urlopen(req, timeout=8) as response:
+            response.read()
+    except URLError as exc:
+        print(f"SMS send failed: {exc}")
+
+
+def _send_email(to_email: str, subject: str, body: str) -> None:
+    host = os.getenv("SMTP_HOST", "").strip()
+    port = int(os.getenv("SMTP_PORT", "587"))
+    username = os.getenv("SMTP_USERNAME", "").strip()
+    password = os.getenv("SMTP_PASSWORD", "").strip().replace(" ", "")
+    from_email = os.getenv("SMTP_FROM_EMAIL", username or OWNER_APPROVAL_EMAIL).strip()
+    if not (host and from_email):
+        print(f"[Email pending configuration] To: {to_email}\nSubject: {subject}\n{body}")
+        return
+    msg = EmailMessage()
+    msg["From"] = from_email
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content(body)
+    try:
+        with smtplib.SMTP(host, port, timeout=10) as server:
+            server.starttls()
+            if username and password:
+                server.login(username, password)
+            server.send_message(msg)
+    except OSError as exc:
+        print(f"Email send failed: {exc}")
+
+
+def _approval_url(request: Request, token: str) -> str:
+    base = str(request.base_url).rstrip("/")
+    return f"{base}/api/approvals/approve?token={quote(token)}"
+
+
+def _create_pending_user(email: str, password: str, requested_role: str, request: Request) -> dict[str, str]:
+    normalized_email = email.strip().lower()
+    if "@" not in normalized_email:
+        raise HTTPException(status_code=400, detail="Invalid email")
+    role = "admin" if requested_role == "admin" else "user"
+    password_hash = _hash_password(password)
+    created_at = _now_iso()
+    approval_token = secrets.token_urlsafe(40)
+    approval_hash = _token_hash(approval_token)
+    try:
+        with get_db_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO users (
+                    email, password_hash, created_at, role, approval_status,
+                    requested_role, approval_token_hash
+                )
+                VALUES (?, ?, ?, 'user', 'pending', ?, ?)
+                """,
+                (normalized_email, password_hash, created_at, role, approval_hash),
+            )
+            connection.commit()
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Email already registered") from exc
+
+    approve_link = _approval_url(request, approval_token)
+    _send_email(
+        OWNER_APPROVAL_EMAIL,
+        f"Droid Cloud approval request: {normalized_email}",
+        (
+            f"New {role} access request for Droid Cloud.\n\n"
+            f"Email: {normalized_email}\n"
+            f"Requested role: {role}\n"
+            f"Approve here: {approve_link}\n\n"
+            "Only approve this request if you recognize the person."
+        ),
+    )
+    _send_owner_sms(f"Droid Cloud approval request: {normalized_email} requested {role} access.")
+    return {"status": "pending", "email": normalized_email, "requested_role": role}
+
+
 def _set_session_cookie(response: Response, raw_token: str) -> None:
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
@@ -2009,7 +2202,7 @@ def _require_user(request: Request) -> dict[str, str | int]:
     with get_db_connection() as connection:
         row = connection.execute(
             """
-            SELECT u.id AS user_id, u.email
+            SELECT u.id AS user_id, u.email, u.role, u.approval_status
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.token_hash = ? AND s.expires_at >= ?
@@ -2018,10 +2211,48 @@ def _require_user(request: Request) -> dict[str, str | int]:
         ).fetchone()
     if not row:
         raise HTTPException(status_code=401, detail="Session expired")
-    return {"id": int(row["user_id"]), "email": str(row["email"])}
+    if str(row["approval_status"] or "pending").lower() != "approved":
+        raise HTTPException(status_code=403, detail="Account approval is pending")
+    return {
+        "id": int(row["user_id"]),
+        "email": str(row["email"]),
+        "role": str(row["role"] or "user"),
+        "approval_status": str(row["approval_status"] or "pending"),
+    }
+
+
+def _get_optional_user(request: Request) -> dict[str, str | int] | None:
+    try:
+        return _require_user(request)
+    except HTTPException:
+        return None
+
+
+def _require_admin(request: Request) -> dict[str, str | int]:
+    user = _require_user(request)
+    if str(user.get("role", "")).lower() != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+
+def _is_admin_user_id(user_id: int) -> bool:
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT role FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+    return bool(row and str(row["role"]).lower() == "admin")
 
 
 def _ensure_project_owner(user_id: int, project_id: str) -> None:
+    if _is_admin_user_id(user_id):
+        with get_db_connection() as connection:
+            row = connection.execute(
+                "SELECT id FROM projects WHERE id = ?",
+                (project_id,),
+            ).fetchone()
+        if row:
+            return
     with get_db_connection() as connection:
         row = connection.execute(
             "SELECT id FROM projects WHERE id = ? AND owner_user_id = ?",
@@ -2128,33 +2359,13 @@ def startup() -> None:
 
 
 @app.post("/api/auth/signup")
-def auth_signup(payload: AuthPayload, response: Response) -> dict[str, str]:
-    email = payload.email.strip().lower()
-    if "@" not in email:
-        raise HTTPException(status_code=400, detail="Invalid email")
-    password_hash = _hash_password(payload.password)
-    created_at = _now_iso()
-    try:
-        with get_db_connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
-                (email, password_hash, created_at),
-            )
-            user_id = int(cursor.lastrowid)
-            connection.commit()
-    except sqlite3.IntegrityError as exc:
-        raise HTTPException(status_code=409, detail="Email already registered") from exc
+def auth_signup(payload: AuthPayload, request: Request) -> dict[str, str]:
+    return _create_pending_user(payload.email, payload.password, "user", request)
 
-    raw_token = secrets.token_urlsafe(48)
-    expires_at = int(datetime.now(timezone.utc).timestamp()) + SESSION_TTL_SECONDS
-    with get_db_connection() as connection:
-        connection.execute(
-            "INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
-            (_token_hash(raw_token), user_id, expires_at, created_at),
-        )
-        connection.commit()
-    _set_session_cookie(response, raw_token)
-    return {"status": "success", "email": email}
+
+@app.post("/api/auth/request-admin")
+def auth_request_admin(payload: AuthPayload, request: Request) -> dict[str, str]:
+    return _create_pending_user(payload.email, payload.password, "admin", request)
 
 
 @app.post("/api/auth/login")
@@ -2164,11 +2375,13 @@ def auth_login(payload: AuthPayload, response: Response) -> dict[str, str]:
         raise HTTPException(status_code=400, detail="Invalid email")
     with get_db_connection() as connection:
         row = connection.execute(
-            "SELECT id, password_hash FROM users WHERE email = ?",
+            "SELECT id, password_hash, role, approval_status FROM users WHERE email = ?",
             (email,),
         ).fetchone()
     if not row or not _verify_password(payload.password, str(row["password_hash"])):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    if str(row["approval_status"] or "pending").lower() != "approved":
+        raise HTTPException(status_code=403, detail="Account approval is pending")
 
     raw_token = secrets.token_urlsafe(48)
     now_ts = int(datetime.now(timezone.utc).timestamp())
@@ -2181,6 +2394,7 @@ def auth_login(payload: AuthPayload, response: Response) -> dict[str, str]:
         )
         connection.commit()
     _set_session_cookie(response, raw_token)
+    _send_owner_sms(f"Droid Cloud login: {email} logged in as {str(row['role'] or 'user')}.")
     return {"status": "success", "email": email}
 
 
@@ -2190,16 +2404,422 @@ def auth_logout(request: Request, response: Response) -> dict[str, str]:
     raw = _unsign_session_token(signed) if signed else None
     if raw:
         with get_db_connection() as connection:
+            row = connection.execute(
+                "SELECT user_id FROM sessions WHERE token_hash = ?",
+                (_token_hash(raw),),
+            ).fetchone()
             connection.execute("DELETE FROM sessions WHERE token_hash = ?", (_token_hash(raw),))
+            if row:
+                connection.execute(
+                    """
+                    INSERT INTO activity_logs (user_id, ip_address, method, endpoint, device_label, accessed_at)
+                    VALUES (?, ?, 'LOGOUT', '/api/auth/logout', ?, ?)
+                    """,
+                    (
+                        int(row["user_id"]),
+                        request.client.host if request.client else "unknown",
+                        request.headers.get("x-droid-device", "").strip()[:160],
+                        _now_iso(),
+                    ),
+                )
             connection.commit()
     _clear_session_cookie(response)
     return {"status": "success"}
 
 
+@app.get("/api/approvals/approve")
+def approve_access_request(token: str) -> Response:
+    token_hash = _token_hash(token)
+    with get_db_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT id, email, requested_role
+            FROM users
+            WHERE approval_token_hash = ? AND approval_status = 'pending'
+            """,
+            (token_hash,),
+        ).fetchone()
+        if not row:
+            return Response(
+                "Approval link is invalid or this request was already handled.",
+                media_type="text/plain",
+                status_code=404,
+            )
+        role = "admin" if str(row["requested_role"]).lower() == "admin" else "user"
+        approved_at = _now_iso()
+        connection.execute(
+            """
+            UPDATE users
+            SET approval_status = 'approved',
+                role = ?,
+                approved_at = ?,
+                approval_token_hash = NULL
+            WHERE id = ?
+            """,
+            (role, approved_at, int(row["id"])),
+        )
+        connection.commit()
+    user_email = str(row["email"])
+    _send_email(
+        user_email,
+        "Droid Cloud access approved",
+        (
+            "Your Droid Cloud access has been approved.\n\n"
+            f"Approved role: {role}\n"
+            f"You can now login here: {PUBLIC_PORTAL_URL}\n\n"
+            "You are approved for this role and can manage data according to your permissions."
+        ),
+    )
+    _send_owner_sms(f"Droid Cloud approved: {user_email} is now {role}.")
+    return Response(
+        f"Approved {user_email} as {role}. The user has been notified.",
+        media_type="text/plain",
+    )
+
+
 @app.get("/api/auth/me")
 def auth_me(request: Request) -> dict[str, str | int]:
     user = _require_user(request)
-    return {"id": int(user["id"]), "email": str(user["email"])}
+    return {
+        "id": int(user["id"]),
+        "email": str(user["email"]),
+        "role": str(user.get("role", "user")),
+        "approval_status": str(user.get("approval_status", "approved")),
+    }
+
+
+@app.get("/api/admin/users/activity")
+def admin_user_activity(request: Request) -> dict[str, list[dict[str, str | int]]]:
+    _require_admin(request)
+    now = datetime.now(timezone.utc)
+    active_cutoff = now.timestamp() - 15 * 60
+    with get_db_connection() as connection:
+        users = connection.execute(
+            """
+            SELECT id, email, role, requested_role, approval_status, created_at
+            FROM users
+            ORDER BY created_at ASC
+            """
+        ).fetchall()
+        activity_rows = connection.execute(
+            """
+            SELECT user_id, ip_address, method, endpoint, device_label,
+                   latitude, longitude, location_accuracy, accessed_at
+            FROM activity_logs
+            WHERE user_id IS NOT NULL
+            ORDER BY accessed_at DESC
+            """
+        ).fetchall()
+
+    by_user: dict[int, list[sqlite3.Row]] = {}
+    for row in activity_rows:
+        by_user.setdefault(int(row["user_id"]), []).append(row)
+
+    result: list[dict[str, str | int]] = []
+    for user_row in users:
+        user_id = int(user_row["id"])
+        rows = by_user.get(user_id, [])
+        latest = rows[0] if rows else None
+        last_seen = str(latest["accessed_at"]) if latest else ""
+        last_seen_ts = 0.0
+        if last_seen:
+            try:
+                last_seen_ts = datetime.fromisoformat(last_seen).timestamp()
+            except ValueError:
+                last_seen_ts = 0.0
+        result.append(
+            {
+                "user_id": user_id,
+                "email": str(user_row["email"]),
+                "role": str(user_row["role"] or "user"),
+                "requested_role": str(user_row["requested_role"] or user_row["role"] or "user"),
+                "approval_status": str(user_row["approval_status"] or "pending"),
+                "status": (
+                    "Offline"
+                    if latest and str(latest["method"]).upper() == "LOGOUT"
+                    else "Active" if last_seen_ts >= active_cutoff else "Offline"
+                ),
+                "current_ip": str(latest["ip_address"]) if latest else "",
+                "device_label": str(latest["device_label"] or "") if latest else "",
+                "location": (
+                    f"{float(latest['latitude']):.5f}, {float(latest['longitude']):.5f}"
+                    if latest and latest["latitude"] is not None and latest["longitude"] is not None
+                    else ""
+                ),
+                "location_accuracy_m": (
+                    int(float(latest["location_accuracy"]))
+                    if latest and latest["location_accuracy"] is not None
+                    else 0
+                ),
+                "unique_ip_count": len({str(row["ip_address"]) for row in rows}),
+                "last_accessed_data": (
+                    f"{latest['method']} {latest['endpoint']}" if latest else ""
+                ),
+                "last_seen_at": last_seen,
+            },
+        )
+    return {"users": result}
+
+
+@app.get("/api/admin/users/{user_id}/projects")
+def admin_user_projects(user_id: int, request: Request) -> dict[str, list[ProjectOut]]:
+    _require_admin(request)
+    with get_db_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, name, location, date, status, type
+            FROM projects
+            WHERE owner_user_id = ?
+            ORDER BY created_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+    return {
+        "projects": [
+            ProjectOut(
+                id=str(row["id"]),
+                name=str(row["name"]),
+                location=str(row["location"]),
+                date=str(row["date"]),
+                status=str(row["status"]),
+                type=str(row["type"]),
+            )
+            for row in rows
+        ],
+    }
+
+
+@app.post("/api/admin/users/{user_id}/approve")
+def admin_approve_user(
+    user_id: int,
+    payload: AdminUserApprovalPayload,
+    request: Request,
+) -> dict[str, str]:
+    _require_admin(request)
+    role = "admin" if payload.role.strip().lower() == "admin" else "user"
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT email FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+        connection.execute(
+            """
+            UPDATE users
+            SET role = ?,
+                requested_role = ?,
+                approval_status = 'approved',
+                approved_at = ?,
+                approval_token_hash = NULL
+            WHERE id = ?
+            """,
+            (role, role, _now_iso(), user_id),
+        )
+        connection.commit()
+    _send_email(
+        str(row["email"]),
+        "Droid Cloud access approved",
+        (
+            f"Your Droid Cloud {role} access has been approved.\n\n"
+            f"You can now login here: {PUBLIC_PORTAL_URL}\n"
+        ),
+    )
+    return {"status": "success"}
+
+
+@app.patch("/api/admin/users/{user_id}/role")
+def admin_assign_user_role(
+    user_id: int,
+    payload: AdminUserRolePayload,
+    request: Request,
+) -> dict[str, str]:
+    _require_admin(request)
+    role = "admin" if payload.role.strip().lower() == "admin" else "user"
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT email FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+        connection.execute(
+            """
+            UPDATE users
+            SET role = ?,
+                requested_role = ?,
+                approval_status = 'approved',
+                approved_at = COALESCE(approved_at, ?)
+            WHERE id = ?
+            """,
+            (role, role, _now_iso(), user_id),
+        )
+        connection.commit()
+    _send_email(
+        str(row["email"]),
+        "Droid Cloud role updated",
+        f"Your Droid Cloud role is now: {role}.\n\nLogin: {PUBLIC_PORTAL_URL}\n",
+    )
+    return {"status": "success", "role": role}
+
+
+@app.post("/api/admin/users/{user_id}/disapprove")
+def admin_disapprove_user(user_id: int, request: Request) -> dict[str, str]:
+    _require_admin(request)
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT email FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+        connection.execute(
+            """
+            UPDATE users
+            SET approval_status = 'rejected',
+                approval_token_hash = NULL
+            WHERE id = ?
+            """,
+            (user_id,),
+        )
+        connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        connection.commit()
+    _send_email(
+        str(row["email"]),
+        "Droid Cloud access request update",
+        "Your Droid Cloud access request was not approved. Contact the owner for more details.",
+    )
+    return {"status": "success"}
+
+
+@app.delete("/api/admin/users/{user_id}")
+def admin_delete_user(user_id: int, request: Request) -> dict[str, str]:
+    _require_admin(request)
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT id FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+        connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        try:
+            connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        except sqlite3.IntegrityError:
+            connection.execute(
+                """
+                UPDATE users
+                SET email = ?,
+                    role = 'user',
+                    requested_role = 'user',
+                    approval_status = 'deleted',
+                    approval_token_hash = NULL
+                WHERE id = ?
+                """,
+                (f"deleted-user-{user_id}@local.invalid", user_id),
+            )
+        connection.commit()
+    return {"status": "success"}
+
+
+@app.delete("/api/admin/users/{user_id}/advanced")
+def admin_advanced_delete_user(user_id: int, request: Request) -> dict[str, str | int]:
+    _require_admin(request)
+    with get_db_connection() as connection:
+        user_row = connection.execute(
+            "SELECT id FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not user_row:
+            raise HTTPException(status_code=404, detail="User not found")
+        project_rows = connection.execute(
+            "SELECT id FROM projects WHERE owner_user_id = ?",
+            (user_id,),
+        ).fetchall()
+        project_ids = [str(row["id"]) for row in project_rows]
+
+    local_root = Path(LOCAL_DATA_PATH).resolve()
+    for project_id in project_ids:
+        safe_project_id = _safe_project_id(project_id)
+        for target in (
+            local_root / "projects" / safe_project_id,
+            local_root / "datasets" / safe_project_id,
+            local_root / "pointclouds" / safe_project_id,
+        ):
+            resolved = target.resolve()
+            if resolved.exists() and local_root in resolved.parents:
+                shutil.rmtree(resolved, ignore_errors=True)
+
+    with get_db_connection() as connection:
+        for project_id in project_ids:
+            connection.execute("DELETE FROM camera_views WHERE project_id = ?", (project_id,))
+            connection.execute("DELETE FROM dataset_crop_masks WHERE project_id = ?", (project_id,))
+            connection.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            _invalidate_project_files_cache(project_id)
+        connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        connection.execute("DELETE FROM activity_logs WHERE user_id = ?", (user_id,))
+        connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        connection.commit()
+    return {"status": "success", "deleted_projects": len(project_ids)}
+
+
+@app.get("/api/admin/override/project/{project_id}")
+def admin_get_project_override(project_id: str, request: Request) -> dict[str, object]:
+    _require_admin(request)
+    safe_project_id = _safe_project_id(project_id)
+    with get_db_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT p.id, p.name, p.location, p.date, p.status, p.type,
+                   u.id AS owner_user_id, u.email AS owner_email
+            FROM projects p
+            JOIN users u ON u.id = p.owner_user_id
+            WHERE p.id = ?
+            """,
+            (safe_project_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {
+        "project": {
+            "id": str(row["id"]),
+            "name": str(row["name"]),
+            "location": str(row["location"]),
+            "date": str(row["date"]),
+            "status": str(row["status"]),
+            "type": str(row["type"]),
+            "owner_user_id": int(row["owner_user_id"]),
+            "owner_email": str(row["owner_email"]),
+        },
+    }
+
+
+@app.patch("/api/admin/override/project/{project_id}")
+def admin_patch_project_override(
+    project_id: str,
+    payload: AdminProjectPatchPayload,
+    request: Request,
+) -> dict[str, object]:
+    _require_admin(request)
+    safe_project_id = _safe_project_id(project_id)
+    updates: dict[str, str] = {}
+    for key in ("name", "location", "date", "status", "type"):
+        value = getattr(payload, key)
+        if value is not None:
+            updates[key] = value.strip()
+    if not updates:
+        return admin_get_project_override(safe_project_id, request)
+    assignments = ", ".join(f"{key} = ?" for key in updates)
+    values = [*updates.values(), safe_project_id]
+    with get_db_connection() as connection:
+        cursor = connection.execute(
+            f"UPDATE projects SET {assignments} WHERE id = ?",
+            values,
+        )
+        connection.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return admin_get_project_override(safe_project_id, request)
 
 
 @app.get("/api/projects")
@@ -2744,7 +3364,15 @@ async def process_dataset(
     ext = Path(safe_name).suffix.lower()
     if ext not in (".tif", ".tiff", ".csv", ".zip", ".kml", ".geojson", ".dwg"):
         raise HTTPException(status_code=400, detail="Only .tif/.tiff/.csv/.zip/.kml/.geojson/.dwg dataset files are supported")
-    normalized_type = "3dmodel" if ext == ".zip" else _normalize_dataset_type(dataset_type, safe_name)
+    normalized_type = _normalize_dataset_type(dataset_type, safe_name)
+    if ext == ".zip" and normalized_type != "3dmodel":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "ZIP uploads are supported only for 3D Model tilesets. "
+                "Upload DTM, DSM, and Ortho datasets as .tif or .tiff files."
+            ),
+        )
     normalized_month = _normalize_month(month)
 
     dataset_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(safe_name).stem).strip("-") or "dataset"
@@ -3784,6 +4412,36 @@ def update_dataset_metadata(project_id: str, payload: DatasetMetaPayload, reques
     return {"status": "success"}
 
 
+@app.patch("/api/admin/datasets/{project_id}/metadata")
+def admin_update_dataset_metadata(
+    project_id: str,
+    payload: AdminDatasetMetaPayload,
+    request: Request,
+) -> dict[str, str]:
+    _require_admin(request)
+    safe_project_id = _safe_project_id(project_id)
+    dataset_id = _safe_dataset_id(payload.dataset_id)
+    st = _read_dataset_status(safe_project_id, dataset_id)
+    if not st:
+        raise HTTPException(status_code=404, detail="Dataset status not found")
+    if payload.name is not None and payload.name.strip():
+        st["dataset_name"] = payload.name.strip()
+    next_month = payload.month if payload.month is not None else payload.date
+    if next_month is not None:
+        st["month"] = _normalize_month(next_month)
+    if payload.status is not None and payload.status.strip():
+        st["status"] = payload.status.strip()
+    if payload.dataset_type is not None and payload.dataset_type.strip():
+        st["dataset_type"] = _normalize_dataset_type(
+            payload.dataset_type,
+            st.get("dataset_name", ""),
+        )
+    st["updated_at"] = _now_iso()
+    _write_dataset_status(safe_project_id, dataset_id, st)
+    _invalidate_project_files_cache(safe_project_id)
+    return {"status": "success"}
+
+
 @app.get("/api/analysis/{project_id}/elevation")
 def analysis_elevation(
     project_id: str,
@@ -4113,7 +4771,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                         "kind": "3D Photogrammetry Model",
                         "type": "3DModel",
                     "size_bytes": str(tileset_path.stat().st_size),
-                    "status": jobs_by_file.get(display_name, {}).get("status", str(st.get("status") or "WEB-READY")),
+                    "status": str(st.get("status") or jobs_by_file.get(display_name, {}).get("status", "WEB-READY")),
                     "updated_at": str(st.get("updated_at") or ""),
                         "file_url": f"{base_url}/data/{tileset_rel}",
                         "layer_url": f"{base_url}/data/{tileset_rel}",
@@ -4142,7 +4800,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "kind": "Web-Optimized Data",
                     "type": "cog",
                     "size_bytes": _fast_tile_dir_size(tile_root),
-                    "status": jobs_by_file.get(display_name, {}).get("status", "Web-Ready"),
+                    "status": str(st.get("status") or jobs_by_file.get(display_name, {}).get("status", "Web-Ready")),
                     "updated_at": str(st.get("updated_at") or ""),
                     "file_url": f"{base_url}/data/{rel_base}",
                     "layer_url": layer_url,
@@ -4379,6 +5037,31 @@ def delete_project_file(project_id: str, payload: FileDeletePayload, request: Re
     if target.is_dir():
         raise HTTPException(status_code=400, detail="Only file deletion is supported")
     target.unlink(missing_ok=True)
+    _invalidate_project_files_cache(safe_project_id)
+    return {"status": "success"}
+
+
+@app.delete("/api/admin/projects/{project_id}/files")
+def admin_force_delete_project_file(
+    project_id: str,
+    payload: FileDeletePayload,
+    request: Request,
+) -> dict[str, str]:
+    _require_admin(request)
+    safe_project_id = _safe_project_id(project_id)
+    rel = (payload.rel_path or "").replace("\\", "/").lstrip("/")
+    if ".." in rel:
+        raise HTTPException(status_code=400, detail="Invalid rel_path")
+    target = (Path(LOCAL_DATA_PATH) / rel).resolve()
+    local_root = Path(LOCAL_DATA_PATH).resolve()
+    if local_root not in target.parents and target != local_root:
+        raise HTTPException(status_code=400, detail="Invalid target path")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    if target.is_dir():
+        shutil.rmtree(target)
+    else:
+        target.unlink(missing_ok=True)
     _invalidate_project_files_cache(safe_project_id)
     return {"status": "success"}
 

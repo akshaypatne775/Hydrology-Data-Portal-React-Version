@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { useUploadContext } from '../../context/UploadContext'
 import { useWorkspaceContext } from '../../context/WorkspaceContext'
+import { useAuthContext } from '../../context/AuthContext'
+import { useModal } from '../../context/ModalContext'
 import { API_BASE, toSameOriginBackendUrl } from '../../lib/apiBase'
+import { forceDeleteAdminDataset, updateAdminDatasetMetadata } from '../../services/adminService'
 import {
   deleteProjectFile,
   getProjectFiles,
@@ -140,6 +143,8 @@ function toBackendDatasetType(type: DatasetType): string {
 export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   const { tasks, startDatasetUpload, startPointCloudUpload } = useUploadContext()
   const { setActiveId, toggleLayer } = useWorkspaceContext()
+  const { isAdmin } = useAuthContext()
+  const modal = useModal()
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [datasets, setDatasets] = useState<DatasetRow[]>([])
@@ -262,7 +267,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     if (!projectId || !selectedFile || !uploadForm.name.trim()) return
     const ext = selectedFile.name.split('.').pop() || 'dat'
     if (ext.toLowerCase() === 'zip' && uploadForm.type !== '3D Model') {
-      window.alert('ZIP upload is reserved for 3D Model tilesets. Upload DTM, DSM, and Ortho as .tif or .tiff so they open in Viewer (2D).')
+      await modal.alert('Upload type mismatch', 'ZIP upload is reserved for 3D Model tilesets. Upload DTM, DSM, and Ortho as .tif or .tiff so they open in Viewer (2D).')
       return
     }
     const renamed = new File([selectedFile], `${uploadForm.name.trim()}.${ext}`, {
@@ -279,7 +284,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     }
     invalidateProjectDataCache(projectId)
     setSelectedFile(null)
-  }, [projectId, selectedFile, startDatasetUpload, startPointCloudUpload, uploadForm.date, uploadForm.name, uploadForm.type])
+  }, [modal, projectId, selectedFile, startDatasetUpload, startPointCloudUpload, uploadForm.date, uploadForm.name, uploadForm.type])
 
   const getActionLabel = useCallback((row: DatasetRow) => {
     if (row.layerType === 'cog') return 'Show Ortho on Map'
@@ -292,50 +297,91 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
 
   const onGenerateContours = useCallback(async (row: DatasetRow) => {
     if (!projectId || !row.datasetId) return
-    const raw = window.prompt('Contour interval in meters', '5')
+    const raw = await modal.prompt('Generate contours', 'Contour interval in meters', '5')
     if (!raw) return
     const interval = Number(raw)
     if (!Number.isFinite(interval) || interval <= 0) {
-      window.alert('Please enter a valid contour interval.')
+      await modal.alert('Invalid interval', 'Please enter a valid contour interval.')
       return
     }
     try {
       await generateContours(projectId, { dataset_id: row.datasetId, interval })
       invalidateProjectDataCache(projectId)
-      window.alert('Contour generation started. The Vector layer will appear when ready.')
+      await modal.alert('Contours started', 'Contour generation started. The Vector layer will appear when ready.')
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : 'Contour generation failed')
+      await modal.alert('Contour generation failed', error instanceof Error ? error.message : 'Contour generation failed')
     }
-  }, [projectId])
+  }, [modal, projectId])
+
+  const onAdminEditMetadata = useCallback(async (row: DatasetRow) => {
+    if (!projectId || !row.datasetId) return
+    const name = await modal.prompt('Edit metadata', 'Dataset name', row.fileName)
+    if (name === null) return
+    const date = await modal.prompt('Edit metadata', 'Dataset month/date (YYYY-MM or YYYY-MM-DD)', row.month || '')
+    if (date === null) return
+    const status = await modal.prompt('Edit metadata', 'Dataset status', row.status)
+    if (status === null) return
+    try {
+      await updateAdminDatasetMetadata(projectId, {
+        dataset_id: row.datasetId,
+        name: name.trim() || row.fileName,
+        date: date.trim(),
+        status: status.trim() || row.status,
+        dataset_type: row.datasetType || toBackendDatasetType(row.type),
+      })
+      invalidateProjectDataCache(projectId)
+      const cacheKey = `datasets:rows:${projectId}`
+      setLoadingRows(true)
+      await loadRows(projectId, cacheKey, () => false)
+    } catch (error) {
+      await modal.alert('Admin metadata update failed', error instanceof Error ? error.message : 'Admin metadata update failed')
+    }
+  }, [loadRows, modal, projectId])
+
+  const onAdminForceDelete = useCallback(async (row: DatasetRow) => {
+    if (!projectId || !row.relPath) return
+    const confirmed = await modal.confirm(
+      'Force delete dataset',
+      `Force delete ${row.fileName}? This removes the selected dataset path from local storage.`,
+    )
+    if (!confirmed) return
+    try {
+      await forceDeleteAdminDataset(projectId, row.relPath)
+      invalidateProjectDataCache(projectId)
+      setDatasets((prev) => prev.filter((item) => item.id !== row.id))
+    } catch (error) {
+      await modal.alert('Admin force delete failed', error instanceof Error ? error.message : 'Admin force delete failed')
+    }
+  }, [modal, projectId])
 
   const onSyncManual = useCallback(async () => {
     if (!projectId || syncingManual) return
     setSyncingManual(true)
     try {
       const res = await syncManualDatasetFolders(projectId)
-      window.alert(res.message || `Found ${res.new_count} manual datasets`)
+      await modal.alert('Manual sync complete', res.message || `Found ${res.new_count} manual datasets`)
       const cacheKey = `datasets:rows:${projectId}`
       setLoadingRows(true)
       await loadRows(projectId, cacheKey, () => false)
     } catch (err) {
-      window.alert(err instanceof Error ? err.message : 'Manual sync failed')
+      await modal.alert('Manual sync failed', err instanceof Error ? err.message : 'Manual sync failed')
     } finally {
       setSyncingManual(false)
     }
-  }, [loadRows, projectId, syncingManual])
+  }, [loadRows, modal, projectId, syncingManual])
 
   const onOpenManualFolder = useCallback(async () => {
     if (!projectId || openingManualFolder) return
     setOpeningManualFolder(true)
     try {
       const res = await openManualDatasetFolder(projectId)
-      window.alert(res.message)
+      await modal.alert('Manual folder', res.message)
     } catch (err) {
-      window.alert(err instanceof Error ? err.message : 'Cannot open manual folder')
+      await modal.alert('Cannot open manual folder', err instanceof Error ? err.message : 'Cannot open manual folder')
     } finally {
       setOpeningManualFolder(false)
     }
-  }, [openingManualFolder, projectId])
+  }, [modal, openingManualFolder, projectId])
 
   const onDetectEpsg = useCallback(async () => {
     if (!projectId || !selectedFile || detectingEpsg) return
@@ -347,14 +393,14 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       const meta = await readDatasetMetadata(form)
       setUploadForm((s) => ({ ...s, epsg: meta.epsg || '' }))
       if (!meta.epsg) {
-        window.alert('EPSG auto detect failed. Please enter it manually if known.')
+        await modal.alert('EPSG not found', 'EPSG auto detect failed. Please enter it manually if known.')
       }
     } catch {
-      window.alert('EPSG detect failed. Please enter manually.')
+      await modal.alert('EPSG detect failed', 'EPSG detect failed. Please enter manually.')
     } finally {
       setDetectingEpsg(false)
     }
-  }, [detectingEpsg, projectId, selectedFile])
+  }, [detectingEpsg, modal, projectId, selectedFile])
 
   return (
     <section className="dsp-root">
@@ -588,6 +634,24 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                     {row.datasetId && ['DTM', 'DSM'].includes(row.type) ? (
                       <button type="button" className="dsp-action" onClick={() => void onGenerateContours(row)}>
                         Contours
+                      </button>
+                    ) : null}
+                    {isAdmin && row.datasetId ? (
+                      <button
+                        type="button"
+                        className="dsp-action dsp-action--secondary"
+                        onClick={() => void onAdminEditMetadata(row)}
+                      >
+                        Edit Metadata
+                      </button>
+                    ) : null}
+                    {isAdmin && row.relPath ? (
+                      <button
+                        type="button"
+                        className="dsp-action dsp-action--danger"
+                        onClick={() => void onAdminForceDelete(row)}
+                      >
+                        Force Delete
                       </button>
                     ) : null}
                   </div>

@@ -13,6 +13,7 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [info, setInfo] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
   const title = useMemo(
@@ -22,16 +23,19 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
 
   const submit = async () => {
     setError(null)
+    setInfo(null)
     setSubmitting(true)
     try {
       const endpoint = mode === 'login' ? '/api/auth/login' : '/api/auth/signup'
       if (endpoint.includes('login')) {
         await login(email, password)
+        const me = await getCurrentUser()
+        onAuthenticated(me)
       } else {
         await signup(email, password)
+        setMode('login')
+        setInfo('Approval request sent. You can login after the owner approves your account.')
       }
-      const me = await getCurrentUser()
-      onAuthenticated(me)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Authentication failed')
     } finally {
@@ -78,8 +82,16 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps) {
           <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" />
         </label>
         {error ? <p className="auth-error">{error}</p> : null}
+        {info ? <p className="auth-info">{info}</p> : null}
         <button type="submit" className="auth-submit" disabled={submitting}>
           {submitting ? 'Please wait...' : mode === 'login' ? 'Login' : 'Create Account'}
+        </button>
+        <button
+          type="button"
+          className="auth-tab"
+          onClick={() => { window.location.href = '/admin' }}
+        >
+          Request Admin Access
         </button>
       </form>
     </div>

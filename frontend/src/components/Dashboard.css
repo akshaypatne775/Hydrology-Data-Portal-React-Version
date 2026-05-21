@@ -123,6 +123,17 @@
   box-shadow: 0 6px 16px rgba(14, 62, 73, 0.2);
 }
 
+.ds-sidebar__link--admin {
+  color: #fecaca;
+}
+
+.ds-sidebar__link--admin.ds-sidebar__link--active {
+  background: #b91c1c;
+  color: #fff;
+  border-color: rgba(254, 202, 202, 0.75);
+  box-shadow: 0 8px 22px rgba(185, 28, 28, 0.32);
+}
+
 .ds-sidebar__link i {
   width: 1.25rem;
   text-align: center;
@@ -985,6 +996,20 @@
   .ds-module-grid {
     grid-template-columns: 1fr;
   }
+}
+
+.ds-profile--admin {
+  border-color: rgba(248, 113, 113, 0.55);
+  background: rgba(127, 29, 29, 0.32);
+}
+
+.ds-profile--admin .ds-profile__avatar {
+  background: linear-gradient(135deg, #fecaca 0%, #dc2626 100%);
+  color: #fff;
+}
+
+.ds-profile--admin .ds-profile__role {
+  color: #fecaca;
 }
 
 .ds-dashboard--sidebar-collapsed .ds-sidebar {

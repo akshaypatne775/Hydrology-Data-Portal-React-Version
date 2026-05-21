@@ -16,6 +16,13 @@ export async function listProjects(): Promise<Project[]> {
   return data.projects ?? []
 }
 
+export async function listAdminUserProjects(userId: number): Promise<Project[]> {
+  const data = await apiRequestJson<{ projects: Project[] }>(
+    `/api/admin/users/${encodeURIComponent(String(userId))}/projects`,
+  )
+  return data.projects ?? []
+}
+
 export async function createProject(payload: CreateProjectPayload): Promise<Project> {
   return apiRequestJson<Project>('/api/projects', {
     method: 'POST',

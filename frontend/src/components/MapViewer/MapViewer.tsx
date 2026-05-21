@@ -30,6 +30,7 @@ import {
 } from 'react-leaflet'
 import { createIssue, listIssues, type SavedIssue } from '../../services/issuesService'
 import { useWorkspaceContext } from '../../context/WorkspaceContext'
+import { useModal } from '../../context/ModalContext'
 import { API_BASE, toSameOriginBackendUrl } from '../../lib/apiBase'
 import {
   getProjectFiles,
@@ -669,6 +670,7 @@ export type MapViewerProps = {
 }
 
 export function MapViewer({ projectId }: MapViewerProps) {
+  const modal = useModal()
   const { activeLayers } = useWorkspaceContext()
   const center = useMemo(() => getDefaultMapCenter(), [])
   const zoom = useMemo(() => getDefaultZoom(), [])
@@ -1029,13 +1031,13 @@ export function MapViewer({ projectId }: MapViewerProps) {
       const ll = res.points.map((p) => L.latLng(Number(p[0]), Number(p[1])))
       setCropMaskPoints(ll.length >= 3 ? ll : null)
       setCropEnabled(true)
-      window.alert('Crop shape saved to database.')
+      await modal.alert('Crop saved', 'Crop shape saved to database.')
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : 'Failed to save drawn crop.')
+      await modal.alert('Crop save failed', e instanceof Error ? e.message : 'Failed to save drawn crop.')
     } finally {
       setCropBusy(false)
     }
-  }, [cogTileUrl, cropBusy, points, projectId])
+  }, [cogTileUrl, cropBusy, modal, points, projectId])
 
   const importKmlCrop = useCallback(
     async (file: File) => {
@@ -1049,14 +1051,14 @@ export function MapViewer({ projectId }: MapViewerProps) {
         setCropMaskPoints(ll.length >= 3 ? ll : null)
         setCropEnabled(true)
         setCropMode('off')
-        window.alert('KML crop shape saved to database.')
+        await modal.alert('KML crop saved', 'KML crop shape saved to database.')
       } catch (e) {
-        window.alert(e instanceof Error ? e.message : 'KML import failed.')
+        await modal.alert('KML import failed', e instanceof Error ? e.message : 'KML import failed.')
       } finally {
         setCropBusy(false)
       }
     },
-    [cogTileUrl, cropBusy, projectId],
+    [cogTileUrl, cropBusy, modal, projectId],
   )
 
   const onIssueSubmit = useCallback(

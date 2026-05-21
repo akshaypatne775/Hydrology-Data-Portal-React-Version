@@ -240,6 +240,17 @@
   background: #fff;
 }
 
+.dsp-action--danger {
+  border-color: #b91c1c;
+  color: #b91c1c;
+  background: #fff5f5;
+}
+
+.dsp-action--danger:hover:not(:disabled) {
+  border-color: #991b1b;
+  background: #fee2e2;
+}
+
 .dsp-action-group {
   display: flex;
   flex-wrap: wrap;
