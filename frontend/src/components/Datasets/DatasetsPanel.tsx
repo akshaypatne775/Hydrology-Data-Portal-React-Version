@@ -497,13 +497,24 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     <>
     {reportViewer ? (
       <div className="dsp-report-modal" role="dialog" aria-modal="true" aria-label={`Report preview ${reportViewer.name}`}>
-        <div className="dsp-report-modal__bar">
-          <strong>{reportViewer.name}</strong>
-          <button type="button" className="dsp-action" onClick={() => setReportViewer(null)}>
-            Close
-          </button>
+        <div className="dsp-report-modal__shell">
+          <div className="dsp-report-modal__bar">
+            <div>
+              <span>PDF Report</span>
+              <strong>{reportViewer.name}</strong>
+            </div>
+            <div className="dsp-report-modal__actions">
+              <button type="button" onClick={() => window.open(reportViewer.url, '_blank', 'noopener,noreferrer')}>
+                <i className="fa-solid fa-up-right-from-square" aria-hidden />
+                Open
+              </button>
+              <button type="button" onClick={() => setReportViewer(null)} aria-label="Close report viewer">
+                <i className="fa-solid fa-xmark" aria-hidden />
+              </button>
+            </div>
+          </div>
+          <iframe title={reportViewer.name} src={reportViewer.url} />
         </div>
-        <iframe title={reportViewer.name} src={reportViewer.url} />
       </div>
     ) : null}
     <section className="dsp-root">

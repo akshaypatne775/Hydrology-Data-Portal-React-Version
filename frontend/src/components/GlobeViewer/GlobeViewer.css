@@ -54,6 +54,14 @@
   color: #f8fafc;
 }
 
+.gv-panel > .gv-tools-panel {
+  position: static !important;
+  inset: auto !important;
+  float: none !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
 .gv-panel__title {
   margin: 0 0 0.85rem;
   font-size: 0.9rem;
@@ -64,7 +72,7 @@
 .gv-panel__hint {
   margin: 0.35rem 0 0;
   font-size: 0.74rem;
-  color: #64748b;
+  color: #cbd5e1;
 }
 
 .gv-field {

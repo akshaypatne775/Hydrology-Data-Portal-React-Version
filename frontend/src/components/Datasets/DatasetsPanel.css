@@ -354,8 +354,23 @@
   inset: 0;
   z-index: 3000;
   display: grid;
+  padding: 1rem;
+  background:
+    radial-gradient(circle at top left, rgba(20, 184, 166, 0.16), transparent 32rem),
+    rgba(2, 6, 23, 0.82);
+  backdrop-filter: blur(10px);
+}
+
+.dsp-report-modal__shell {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  background: #0b1720;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 16px;
+  background: #f8fafc;
+  box-shadow: 0 24px 70px rgba(2, 6, 23, 0.48);
 }
 
 .dsp-report-modal__bar {
@@ -365,8 +380,50 @@
   gap: 1rem;
   padding: 0.8rem 1rem;
   border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-  background: #0e3e49;
+  background: linear-gradient(135deg, #0e3e49, #145763);
   color: #fff;
+}
+
+.dsp-report-modal__bar span {
+  display: block;
+  margin-bottom: 0.15rem;
+  color: #ccfbf1;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.dsp-report-modal__bar strong {
+  display: block;
+  max-width: min(58vw, 52rem);
+  overflow: hidden;
+  font-size: 0.95rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsp-report-modal__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.dsp-report-modal__actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 2rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #0e3e49;
+  font-family: 'Montserrat', sans-serif;
+  font-size: 0.75rem;
+  font-weight: 800;
+  cursor: pointer;
 }
 
 .dsp-report-modal iframe {

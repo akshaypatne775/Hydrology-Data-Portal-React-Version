@@ -629,7 +629,7 @@
   .mv-chrome {
     top: 1.15rem;
     right: 1.15rem;
-    width: 370px;
+    width: 300px;
     max-height: calc(100% - 2.3rem);
   }
 
@@ -647,7 +647,7 @@
   .mv-chrome {
     top: 0.65rem;
     right: 0.65rem;
-    width: 286px;
+    width: 264px;
     max-height: calc(100% - 1.3rem);
     padding: 0.65rem;
     gap: 0.55rem;
