@@ -293,6 +293,31 @@ function ElevationInteraction({
   return null
 }
 
+function UserLocationMarker({ position }: { position: LatLng | null }) {
+  const map = useMap()
+
+  useEffect(() => {
+    if (!position) return
+    map.flyTo(position, Math.max(map.getZoom(), 16), { duration: 0.85 })
+  }, [map, position])
+
+  if (!position) return null
+  return (
+    <CircleMarker
+      center={position}
+      radius={7}
+      pathOptions={{
+        color: '#ffffff',
+        weight: 2,
+        fillColor: '#0e3e49',
+        fillOpacity: 1,
+      }}
+    >
+      <Popup>Your current location</Popup>
+    </CircleMarker>
+  )
+}
+
 function parseKmlLatLonBounds(xml: string): [[number, number], [number, number]] | null {
   const grab = (tag: string) => {
     const m = xml.match(new RegExp(`<${tag}>\\s*([\\d.\\-+eE]+)\\s*</${tag}>`, 'i'))
@@ -449,6 +474,7 @@ interface MapPaneProps {
   cropFootprint?: LatLng[] | null
   cogBounds?: [[number, number], [number, number]] | null
   cogTileUrl: string | null
+  userLocation: LatLng | null
   sync?: SyncRefs & { isA: boolean }
 }
 
@@ -469,6 +495,7 @@ function MapPane({
   cropFootprint,
   cogBounds,
   cogTileUrl,
+  userLocation,
   sync,
 }: MapPaneProps) {
   const baseUrl = useMemo(() => SATELLITE_FALLBACK_URL, [])
@@ -565,6 +592,7 @@ function MapPane({
       ) : null}
       <IssueInteraction active={issueMode} onPickPoint={onIssuePick} />
       <ElevationInteraction active={elevationMode} onPickPoint={onElevationPick} />
+      <UserLocationMarker position={userLocation} />
       {issues.map((issue) => (
         <Marker key={issue.id} position={[issue.lat, issue.lng]}>
           <Popup>
@@ -690,18 +718,6 @@ export type MapViewerProps = {
 export function MapViewer({ projectId }: MapViewerProps) {
   const modal = useModal()
   const { activeLayers } = useWorkspaceContext()
-  const is3DView = useMemo(
-    () =>
-      activeLayers.some((layer) => (
-        layer.projectId === projectId &&
-        (
-          layer.layerType === '3DModel' ||
-          layer.layerType === 'PointCloud' ||
-          String(layer.layerType).toLowerCase() === 'pointcloud'
-        )
-      )),
-    [activeLayers, projectId],
-  )
   const center = useMemo(() => getDefaultMapCenter(), [])
   const zoom = useMemo(() => getDefaultZoom(), [])
 
@@ -732,6 +748,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const [profileResult, setProfileResult] = useState<ProfileResponse | null>(null)
   const [volumeResult, setVolumeResult] = useState<DtmVolumeResponse | null>(null)
   const [analysisBusy, setAnalysisBusy] = useState(false)
+  const [userLocation, setUserLocation] = useState<LatLng | null>(null)
   const profileChartRef = useRef<SVGSVGElement | null>(null)
 
   const syncLockRef = useRef(false)
@@ -852,6 +869,22 @@ export function MapViewer({ projectId }: MapViewerProps) {
     clearAnalysisResults()
     setElevationMode((prev) => !prev)
   }, [clearAnalysisResults])
+
+  const findMyLocation = useCallback(async () => {
+    if (!navigator.geolocation) {
+      await modal.alert('Location unavailable', 'This browser does not support location access.')
+      return
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setUserLocation(L.latLng(position.coords.latitude, position.coords.longitude))
+      },
+      () => {
+        void modal.alert('Location blocked', 'Location permission was not granted. You can still use the dataset map normally.')
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 },
+    )
+  }, [modal])
 
   useEffect(() => {
     if (measureMode === 'none') {
@@ -1263,10 +1296,6 @@ export function MapViewer({ projectId }: MapViewerProps) {
 
   const activeCogLayers = projectCogLayers
 
-  if (is3DView) {
-    return <div className="mv-root" aria-hidden="true" />
-  }
-
   return (
     <div className="mv-root">
       <div className="mv-chrome">
@@ -1397,6 +1426,16 @@ export function MapViewer({ projectId }: MapViewerProps) {
           >
             <i className="fa-solid fa-location-dot" aria-hidden />
             Report Issue
+          </button>
+          <button
+            type="button"
+            className="mv-tool"
+            disabled={splitView}
+            onClick={() => void findMyLocation()}
+            title="Ask permission and zoom to your current location."
+          >
+            <i className="fa-solid fa-crosshairs" aria-hidden />
+            Find My Location
           </button>
           <button
             type="button"
@@ -1684,6 +1723,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
                 cropFootprint={cropMaskPoints}
                 cogBounds={cogBounds}
                 cogTileUrl={cogTileUrl}
+                userLocation={userLocation}
                 sync={splitView ? { ...syncRefs, isA: true } : undefined}
               />
             </MapContainer>
@@ -1802,6 +1842,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
                   cropFootprint={null}
                   cogBounds={undefined}
                   cogTileUrl={compareCogTileUrl}
+                  userLocation={userLocation}
                   sync={{ ...syncRefs, isA: false }}
                 />
               </MapContainer>

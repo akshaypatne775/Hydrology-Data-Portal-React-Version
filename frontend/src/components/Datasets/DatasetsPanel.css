@@ -6,6 +6,7 @@
   height: 100%;
   min-height: 0;
   align-content: start;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
 }
 
 .dsp-head {
@@ -135,6 +136,7 @@
   border-radius: 8px;
   overflow: auto;
   min-height: 9rem;
+  min-width: 0;
 }
 
 .dsp-table {
@@ -160,14 +162,22 @@
   color: #0f172a;
 }
 
-.dsp-month-input {
-  width: 8.5rem;
-  max-width: 100%;
-  border: 1px solid #cbd5e1;
+.dsp-date-edit {
+  display: inline-grid;
+  place-items: center;
+  width: 1.55rem;
+  height: 1.55rem;
+  margin-left: 0.4rem;
+  border: 1px solid rgba(14, 62, 73, 0.18);
   border-radius: 6px;
-  padding: 0.35rem 0.45rem;
-  font: inherit;
-  font-size: 0.75rem;
+  background: #f8fbfc;
+  color: #0e3e49;
+  cursor: pointer;
+}
+
+.dsp-date-edit:hover {
+  border-color: #0e3e49;
+  background: #edf7f8;
 }
 
 .dsp-badge {
@@ -255,6 +265,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem;
+  max-width: 100%;
 }
 
 .dsp-action--sync {
@@ -272,6 +283,40 @@
   .dsp-form__actions {
     grid-column: 1 / -1;
     justify-content: flex-start;
+  }
+}
+
+@media (min-width: 1600px) {
+  .dsp-root {
+    gap: 1rem;
+    padding: 1.1rem;
+  }
+
+  .dsp-form {
+    grid-template-columns: repeat(4, minmax(180px, 1fr)) auto;
+  }
+
+  .dsp-dropzone {
+    min-height: 7.4rem;
+  }
+
+  .dsp-table {
+    min-width: 960px;
+  }
+}
+
+@media (max-width: 900px) and (min-width: 768px) {
+  .dsp-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .dsp-head__actions {
+    flex-wrap: wrap;
+  }
+
+  .dsp-table {
+    min-width: 880px;
   }
 }
 

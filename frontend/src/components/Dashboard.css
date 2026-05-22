@@ -3,6 +3,7 @@
 .ds-dashboard {
   display: flex;
   min-height: 100dvh;
+  height: 100dvh;
   width: 100%;
   background:
     radial-gradient(circle at 0% 0%, rgba(14, 62, 73, 0.08), rgba(14, 62, 73, 0)),
@@ -155,6 +156,7 @@
   flex: 1;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 /* —— Topbar —— */
@@ -754,8 +756,8 @@
 }
 
 .ds-map-shell {
-  height: 100%;
-  min-height: min(72dvh, 680px);
+  height: calc(100dvh - 7rem);
+  min-height: 34rem;
   border-radius: 14px;
   background: #fff;
   border: 1px solid #e2e8f0;
@@ -768,7 +770,8 @@
 }
 
 .ds-map-shell--viewer {
-  min-height: min(78dvh, 720px);
+  height: calc(100dvh - 7rem);
+  min-height: 38rem;
 }
 
 .ds-map-body {
@@ -797,7 +800,7 @@
 }
 
 .ds-map-body--globe {
-  min-height: min(64dvh, 620px);
+  min-height: 0;
 }
 
 .ds-map-body--globe > .d3d-viewer-wrapper {
@@ -806,7 +809,8 @@
 }
 
 .ds-map-shell--analysis {
-  min-height: min(82dvh, 780px);
+  height: calc(100dvh - 7rem);
+  min-height: 40rem;
 }
 
 .ds-analysis-split {
@@ -951,7 +955,48 @@
   color: #0e3e49;
 }
 
-@media (max-width: 900px) {
+@media (min-width: 1800px) {
+  .ds-sidebar {
+    width: 19rem;
+  }
+
+  .ds-content {
+    padding: 1.4rem 1.8rem 1.8rem;
+  }
+
+  .ds-map-shell,
+  .ds-map-shell--viewer,
+  .ds-map-shell--analysis {
+    height: calc(100dvh - 7.2rem);
+  }
+
+  .ds-overview-metrics {
+    grid-template-columns: repeat(4, minmax(220px, 1fr));
+  }
+
+  .ds-module-grid {
+    grid-template-columns: repeat(4, minmax(260px, 1fr));
+  }
+}
+
+@media (max-width: 1280px) and (min-width: 901px) {
+  .ds-sidebar {
+    width: 15.5rem;
+  }
+
+  .ds-topbar {
+    padding-inline: 1rem;
+  }
+
+  .ds-profile__name {
+    max-width: 14rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 900px) and (min-width: 768px) {
   .ds-dashboard {
     flex-direction: column;
   }
@@ -1080,5 +1125,11 @@
 
   .ds-project-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 767px) {
+  .ds-dashboard {
+    display: none;
   }
 }

@@ -7,6 +7,7 @@ import { useWorkspaceContext } from '../../context/WorkspaceContext'
 import { useModal } from '../../context/ModalContext'
 import { getPointCloudStatus } from '../../services/pointCloudService'
 import { getProjectFiles, type ProjectFile } from '../../services/datasetService'
+import { updateAdminDatasetMetadata } from '../../services/adminService'
 import './GlobeViewer.css'
 import {
   readUploadedTilesets,
@@ -47,6 +48,8 @@ type ViewerDataOption = {
   name: string
   kind: ViewerLayerKind
   url: string
+  datasetId?: string
+  height_offset?: number | string
 }
 
 type DrawMode = 'none' | 'point' | 'polyline'
@@ -192,6 +195,8 @@ function projectFileToViewerOption(file: ProjectFile): ViewerDataOption | null {
       name: file.name,
       kind: 'model',
       url: toSameOriginBackendUrl(file.layer_url) || file.layer_url,
+      datasetId: file.dataset_id,
+      height_offset: file.height_offset,
     }
   }
   if (fileType === 'pointcloud' && !file.layer_url.toLowerCase().endsWith('.html')) {
@@ -200,6 +205,7 @@ function projectFileToViewerOption(file: ProjectFile): ViewerDataOption | null {
       name: file.name,
       kind: 'pointcloud',
       url: toSameOriginBackendUrl(file.layer_url) || file.layer_url,
+      datasetId: file.dataset_id,
     }
   }
   return null
@@ -507,6 +513,23 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     setModelOffset(-firstEntry.sourceHeight + MODEL_GROUND_CLEARANCE_METERS)
   }, [setModelOffset])
 
+  const saveModelHeightOffset = useCallback(async () => {
+    const activeLayer = activeModelLayers[0]
+    if (!activeLayer?.datasetId) {
+      await modal.alert('Height not saved', 'Open a saved 3D model from the Data Catalog before saving height.')
+      return
+    }
+    try {
+      await updateAdminDatasetMetadata(projectId, {
+        dataset_id: activeLayer.datasetId,
+        height_offset: modelHeightOffset,
+      })
+      await modal.alert('Height saved', '3D model height offset saved. It will be restored on reload.')
+    } catch (error) {
+      await modal.alert('Height save failed', error instanceof Error ? error.message : 'Height save failed')
+    }
+  }, [activeModelLayers, modal, modelHeightOffset, projectId])
+
   const getPrimaryModelEntry = useCallback((): ModelTilesetEntry | undefined => (
     modelTilesetsRef.current.values().next().value as ModelTilesetEntry | undefined
   ), [])
@@ -696,7 +719,7 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
     })()
   }, [])
 
-  const load3DModel = useCallback(async (layer: { id: string; url: string; name: string }) => {
+  const load3DModel = useCallback(async (layer: { id: string; url: string; name: string; height_offset?: number | string }) => {
     const viewer = viewerRef.current
     if (!viewer) {
       return
@@ -728,8 +751,10 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
         sourceHeight: cartographic.height,
       }
       const autoGroundOffset = -cartographic.height + MODEL_GROUND_CLEARANCE_METERS
-      setModelOffset(autoGroundOffset)
-      applyModelHeightOffset(entry, autoGroundOffset)
+      const savedOffset = Number(layer.height_offset)
+      const nextOffset = Number.isFinite(savedOffset) ? savedOffset : autoGroundOffset
+      setModelOffset(nextOffset)
+      applyModelHeightOffset(entry, nextOffset)
       const addedTileset = viewer.scene.primitives.add(tileset)
       entry.tileset = addedTileset
       modelTilesetsRef.current.set(layer.id, entry)
@@ -767,6 +792,7 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       id: option.id,
       name: option.name,
       url: option.url,
+      height_offset: option.height_offset,
     })
   }, [clearLoadedModels, load3DModel, loadPointCloudWhenReady])
 
@@ -837,6 +863,8 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
             name: layer.name,
             kind: layer.layerType === '3DModel' ? 'model' as const : 'pointcloud' as const,
             url: layer.url,
+            datasetId: layer.datasetId,
+            height_offset: layer.height_offset,
           }))
         const merged = [...activeOptions, ...fileOptions, ...storedPointClouds].filter(
           (item, index, arr) => arr.findIndex((candidate) => candidate.url === item.url) === index,
@@ -1238,6 +1266,9 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
                 </button>
                 <button type="button" onClick={() => void autoGroundModels()}>
                   Auto Ground
+                </button>
+                <button type="button" onClick={() => void saveModelHeightOffset()}>
+                  Save Height
                 </button>
                 <button type="button" onClick={() => setModelOffset(modelHeightOffset + 10)}>
                   +10m

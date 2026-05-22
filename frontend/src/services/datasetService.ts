@@ -42,6 +42,9 @@ export type ProjectFile = {
   layer_type?: string
   dataset_type?: string
   month?: string
+  processed_size?: string
+  upload_date?: string
+  height_offset?: string | number
   size_bytes: string
   status: string
   updated_at?: string

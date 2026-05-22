@@ -11,6 +11,8 @@ export type WorkspaceTabId =
   | 'compare'
   | 'downloads'
 
+export type ActiveViewerTab = '2D' | '3D'
+
 export type ActiveLayerConfig = {
   id: string
   projectId: string
@@ -21,6 +23,9 @@ export type ActiveLayerConfig = {
   datasetId?: string
   datasetType?: string
   month?: string
+  processedSize?: string
+  uploadDate?: string
+  height_offset?: number | string
 }
 
 export function useWorkspaceState() {
@@ -38,6 +43,27 @@ export function useWorkspaceState() {
   })
   const [shareCopied, setShareCopied] = useState(false)
   const [activeLayers, setActiveLayers] = useState<ActiveLayerConfig[]>([])
+  const [activeViewerTab, setActiveViewerTab] = useState<ActiveViewerTab>('2D')
+
+  const upsertLayer = useCallback((layerConfig: ActiveLayerConfig) => {
+    setActiveLayers((prev) => {
+      const existing = prev.find((layer) => layer.id === layerConfig.id)
+      if (
+        existing &&
+        existing.url === layerConfig.url &&
+        existing.layerType === layerConfig.layerType &&
+        existing.datasetId === layerConfig.datasetId &&
+        existing.datasetType === layerConfig.datasetType &&
+        existing.height_offset === layerConfig.height_offset
+      ) {
+        return prev
+      }
+      return [
+        layerConfig,
+        ...prev.filter((layer) => layer.id !== layerConfig.id),
+      ]
+    })
+  }, [])
 
   const toggleLayer = useCallback((layerConfig: ActiveLayerConfig) => {
     setActiveLayers((prev) => {
@@ -45,13 +71,12 @@ export function useWorkspaceState() {
       if (exists) {
         return prev.filter((layer) => layer.id !== layerConfig.id)
       }
-      const is3DLayer = ['3dmodel', 'pointcloud'].includes(String(layerConfig.layerType).toLowerCase())
-      const compatible = prev.filter((layer) => {
-        const existingIs3D = ['3dmodel', 'pointcloud'].includes(String(layer.layerType).toLowerCase())
-        return existingIs3D === is3DLayer
-      })
-      return [layerConfig, ...compatible]
+      return [layerConfig, ...prev]
     })
+  }, [])
+
+  const removeLayer = useCallback((layerId: string) => {
+    setActiveLayers((prev) => prev.filter((layer) => layer.id !== layerId))
   }, [])
 
   return useMemo(
@@ -71,7 +96,11 @@ export function useWorkspaceState() {
       shareCopied,
       setShareCopied,
       activeLayers,
+      activeViewerTab,
+      setActiveViewerTab,
+      upsertLayer,
       toggleLayer,
+      removeLayer,
     }),
     [
       activeId,
@@ -82,7 +111,10 @@ export function useWorkspaceState() {
       createForm,
       shareCopied,
       activeLayers,
+      activeViewerTab,
+      upsertLayer,
       toggleLayer,
+      removeLayer,
     ],
   )
 }

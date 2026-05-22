@@ -384,6 +384,7 @@ class AdminDatasetMetaPayload(BaseModel):
     status: str | None = None
     dataset_type: str | None = None
     month: str | None = None
+    height_offset: float | None = None
 
 
 class AdminDatasetPathMetaPayload(BaseModel):
@@ -392,6 +393,7 @@ class AdminDatasetPathMetaPayload(BaseModel):
     status: str | None = None
     dataset_type: str | None = None
     month: str | None = None
+    height_offset: float | None = None
 
 
 class AdminUserApprovalPayload(BaseModel):
@@ -454,6 +456,12 @@ def _safe_dataset_upload_basename(filename: str) -> str:
 def _infer_dataset_type(name: str) -> str:
     lowered = name.lower()
     suffix = Path(lowered).suffix
+    if "dtm" in lowered or "dem" in lowered:
+        return "dtm"
+    if "dsm" in lowered:
+        return "dsm"
+    if "ortho" in lowered:
+        return "ortho"
     if suffix == ".csv":
         return "csv"
     if suffix == ".zip":
@@ -462,11 +470,7 @@ def _infer_dataset_type(name: str) -> str:
         return "vector"
     if suffix == ".dwg":
         return "cad"
-    if "dtm" in lowered:
-        return "dtm"
-    if "dsm" in lowered:
-        return "dsm"
-    if "ortho" in lowered or suffix in (".tif", ".tiff"):
+    if suffix in (".tif", ".tiff"):
         return "ortho"
     if suffix in (".las", ".laz"):
         return "pointcloud"
@@ -517,6 +521,35 @@ def _normalize_month(value: str) -> str:
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
         return raw[:7]
     return raw[:40]
+
+
+def calculate_folder_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.is_file():
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+    total = 0
+    for item in path.rglob("*"):
+        if not item.is_file():
+            continue
+        try:
+            total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _format_size_bytes(size_bytes: int) -> str:
+    if size_bytes <= 0:
+        return ""
+    gb = size_bytes / (1024 * 1024 * 1024)
+    if gb >= 1:
+        return f"{gb:.2f} GB"
+    mb = size_bytes / (1024 * 1024)
+    return f"{mb:.0f} MB"
 
 
 def _upload_session_dir(filename: str, total_chunks: int, project_id: str) -> Path:
@@ -1245,6 +1278,8 @@ async def process_dataset_background(
             str(common_status.get("dataset_type", "")),
         )
         tiles_rel = Path(tiles_dir).resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+        processed_size_bytes = calculate_folder_size(Path(tiles_dir))
+        processed_size = _format_size_bytes(processed_size_bytes)
         _upsert_processing_job(
             project_id,
             {
@@ -1265,6 +1300,8 @@ async def process_dataset_background(
                 "status": "Web-Ready",
                 "updated_at": _now_iso(),
                 "tiles_rel_path": tiles_rel,
+                "processed_size_bytes": str(processed_size_bytes),
+                "processed_size": processed_size,
             },
         )
     except Exception as exc:  # noqa: BLE001
@@ -2375,9 +2412,41 @@ def pointcloud_status(
     }
 
 
+def _backfill_processed_sizes() -> None:
+    projects_root = Path(LOCAL_DATA_PATH) / "projects"
+    if not projects_root.is_dir():
+        return
+    for project_dir in projects_root.iterdir():
+        if not project_dir.is_dir():
+            continue
+        project_id = project_dir.name
+        changed_any = False
+        for st in _project_dataset_statuses(project_id):
+            dataset_id = str(st.get("dataset_id") or "").strip()
+            if not dataset_id or str(st.get("processed_size") or "").strip():
+                continue
+            rel = str(st.get("tiles_rel_path") or st.get("model_rel_path") or st.get("vector_rel_path") or "").strip()
+            path = Path(LOCAL_DATA_PATH) / rel if rel else None
+            if not path or not path.exists():
+                tile_folder = str(st.get("tile_folder") or "").strip()
+                if tile_folder:
+                    _, processed_root = get_project_dirs(project_id)
+                    path = processed_root / tile_folder
+            if not path or not path.exists():
+                continue
+            size_bytes = calculate_folder_size(path)
+            st["processed_size_bytes"] = str(size_bytes)
+            st["processed_size"] = _format_size_bytes(size_bytes)
+            _write_dataset_status(project_id, dataset_id, st)
+            changed_any = True
+        if changed_any:
+            _invalidate_project_files_cache(project_id)
+
+
 @app.on_event("startup")
 def startup() -> None:
     ensure_tables()
+    _backfill_processed_sizes()
 
 
 @app.post("/api/auth/signup")
@@ -3438,6 +3507,7 @@ async def process_dataset(
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Failed to prepare vector asset: {exc}") from exc
         asset_rel = asset_path.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+        asset_size_bytes = calculate_folder_size(asset_root)
         _write_dataset_status(
             safe_project_id,
             dataset_id,
@@ -3452,6 +3522,8 @@ async def process_dataset(
                 "month": normalized_month,
                 "raw_rel_path": raw_rel,
                 "vector_rel_path": asset_rel,
+                "processed_size_bytes": str(asset_size_bytes),
+                "processed_size": _format_size_bytes(asset_size_bytes),
             },
         )
         _upsert_processing_job(
@@ -3485,6 +3557,7 @@ async def process_dataset(
         tileset_root = _find_extracted_tileset_root(output_tile_dir)
         tileset_rel = (tileset_root / "tileset.json").resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
         model_rel = tileset_root.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+        model_size_bytes = calculate_folder_size(tileset_root)
         tileset_url = f"{str(request.base_url).rstrip('/')}/data/{tileset_rel}"
         _write_dataset_status(
             safe_project_id,
@@ -3501,6 +3574,8 @@ async def process_dataset(
                 "raw_rel_path": raw_rel,
                 "tiles_rel_path": model_rel,
                 "tileset_rel_path": tileset_rel,
+                "processed_size_bytes": str(model_size_bytes),
+                "processed_size": _format_size_bytes(model_size_bytes),
             },
         )
         _upsert_processing_job(
@@ -3538,6 +3613,8 @@ async def process_dataset(
                 "dataset_type": "csv",
                 "month": normalized_month,
                 "raw_rel_path": raw_rel,
+                "processed_size_bytes": str(input_path.stat().st_size),
+                "processed_size": _format_size_bytes(input_path.stat().st_size),
             },
         )
         _upsert_processing_job(
@@ -4456,9 +4533,11 @@ def admin_update_dataset_metadata(
         raise HTTPException(status_code=404, detail="Dataset status not found")
     if payload.name is not None and payload.name.strip():
         st["dataset_name"] = payload.name.strip()
-    next_month = payload.month if payload.month is not None else payload.date
-    if next_month is not None:
-        st["month"] = _normalize_month(next_month)
+    if payload.month is not None:
+        st["month"] = _normalize_month(payload.month)
+    if payload.date is not None:
+        st["upload_date"] = payload.date.strip()[:40]
+        st["date"] = payload.date.strip()[:40]
     if payload.status is not None and payload.status.strip():
         st["status"] = payload.status.strip()
     if payload.dataset_type is not None and payload.dataset_type.strip():
@@ -4466,6 +4545,8 @@ def admin_update_dataset_metadata(
             payload.dataset_type,
             st.get("dataset_name", ""),
         )
+    if payload.height_offset is not None:
+        st["height_offset"] = f"{float(payload.height_offset):.3f}".rstrip("0").rstrip(".")
     st["updated_at"] = _now_iso()
     _write_dataset_status(safe_project_id, dataset_id, st)
     _invalidate_project_files_cache(safe_project_id)
@@ -4514,6 +4595,60 @@ def _safe_remove_dataset_path(path: Path) -> int:
     return 1
 
 
+def _dataset_status_matches_rel(project_id: str, st: dict[str, str], rel_path: str) -> bool:
+    rel_path = rel_path.replace("\\", "/").strip("/")
+    candidates = [
+        str(st.get("raw_rel_path") or ""),
+        str(st.get("tiles_rel_path") or ""),
+        str(st.get("tileset_rel_path") or ""),
+        str(st.get("vector_rel_path") or ""),
+        str(st.get("model_rel_path") or ""),
+    ]
+    tile_folder = str(st.get("tile_folder") or "").strip()
+    if tile_folder:
+        _, processed_root = get_project_dirs(project_id)
+        candidates.append((processed_root / tile_folder).relative_to(Path(LOCAL_DATA_PATH)).as_posix())
+        dtype = str(st.get("dataset_type") or "").strip()
+        typed_root = processed_root / _dataset_type_folder(dtype) / tile_folder
+        candidates.append(typed_root.relative_to(Path(LOCAL_DATA_PATH)).as_posix())
+    for candidate in candidates:
+        clean = candidate.replace("\\", "/").strip("/")
+        if not clean:
+            continue
+        if rel_path == clean or rel_path.startswith(f"{clean}/") or clean.startswith(f"{rel_path}/"):
+            return True
+    return False
+
+
+def _find_dataset_status_for_rel(project_id: str, rel_path: str) -> tuple[str, dict[str, str]] | None:
+    for st in _project_dataset_statuses(project_id):
+        dataset_id = str(st.get("dataset_id") or "").strip()
+        if dataset_id and _dataset_status_matches_rel(project_id, st, rel_path):
+            return dataset_id, st
+    return None
+
+
+def _delete_dataset_artifacts(project_id: str, dataset_id: str, st: dict[str, str]) -> int:
+    removed = 0
+    for key in ("raw_rel_path", "tiles_rel_path", "tileset_rel_path", "vector_rel_path", "model_rel_path"):
+        rel = str(st.get(key) or "").strip().replace("\\", "/").lstrip("/")
+        if rel and ".." not in rel:
+            removed += _safe_remove_dataset_path(Path(LOCAL_DATA_PATH) / rel)
+    tile_folder = str(st.get("tile_folder") or "").strip()
+    if tile_folder:
+        _, processed_root = get_project_dirs(project_id)
+        for candidate in (
+            processed_root / tile_folder,
+            processed_root / _dataset_type_folder(str(st.get("dataset_type") or "")) / tile_folder,
+        ):
+            if candidate.exists():
+                removed += _safe_remove_dataset_path(candidate)
+    _safe_remove_dataset_path(_dataset_dir(project_id, dataset_id))
+    _remove_processing_job(project_id, dataset_id)
+    _invalidate_project_files_cache(project_id)
+    return removed
+
+
 @app.put("/api/admin/projects/{project_id}/datasets/{dataset_name:path}")
 def admin_update_dataset_metadata_by_name(
     project_id: str,
@@ -4526,13 +4661,17 @@ def admin_update_dataset_metadata_by_name(
     dataset_id, st = _admin_dataset_status_by_key(safe_project_id, dataset_name)
     if payload.name is not None and payload.name.strip():
         st["dataset_name"] = payload.name.strip()
-    next_month = payload.month if payload.month is not None else payload.date
-    if next_month is not None:
-        st["month"] = _normalize_month(next_month)
+    if payload.month is not None:
+        st["month"] = _normalize_month(payload.month)
+    if payload.date is not None:
+        st["upload_date"] = payload.date.strip()[:40]
+        st["date"] = payload.date.strip()[:40]
     if payload.status is not None and payload.status.strip():
         st["status"] = payload.status.strip()
     if payload.dataset_type is not None and payload.dataset_type.strip():
         st["dataset_type"] = _normalize_dataset_type(payload.dataset_type, st.get("dataset_name", ""))
+    if payload.height_offset is not None:
+        st["height_offset"] = f"{float(payload.height_offset):.3f}".rstrip("0").rstrip(".")
     st["updated_at"] = _now_iso()
     _write_dataset_status(safe_project_id, dataset_id, st)
     _invalidate_project_files_cache(safe_project_id)
@@ -4548,20 +4687,7 @@ def admin_delete_dataset_by_name(
     _require_admin(request)
     safe_project_id = _safe_project_id(project_id)
     dataset_id, st = _admin_dataset_status_by_key(safe_project_id, dataset_name)
-    removed = 0
-    for key in ("raw_rel_path", "tiles_rel_path", "vector_rel_path", "model_rel_path"):
-        rel = str(st.get(key) or "").strip().replace("\\", "/").lstrip("/")
-        if rel and ".." not in rel:
-            removed += _safe_remove_dataset_path(Path(LOCAL_DATA_PATH) / rel)
-    tile_folder = str(st.get("tile_folder") or "").strip()
-    if tile_folder:
-        _, processed_root = get_project_dirs(safe_project_id)
-        candidate = processed_root / tile_folder
-        if candidate.exists():
-            removed += _safe_remove_dataset_path(candidate)
-    _safe_remove_dataset_path(_dataset_dir(safe_project_id, dataset_id))
-    _remove_processing_job(safe_project_id, dataset_id)
-    _invalidate_project_files_cache(safe_project_id)
+    removed = _delete_dataset_artifacts(safe_project_id, dataset_id, st)
     return {"status": "success", "dataset_id": dataset_id, "removed_paths": removed}
 
 
@@ -4772,6 +4898,14 @@ def proxy_info(path: str):
     return RedirectResponse(f"/api/cog/info?url={encoded_url}")
 
 
+def _dataset_extra_response_fields(st: dict[str, str]) -> dict[str, str]:
+    return {
+        "processed_size": str(st.get("processed_size") or ""),
+        "upload_date": str(st.get("upload_date") or st.get("date") or st.get("created_at") or ""),
+        "height_offset": str(st.get("height_offset") or ""),
+    }
+
+
 @app.get("/api/projects/{project_id}/files")
 def project_files(project_id: str, request: Request) -> dict[str, list[dict[str, str]]]:
     user = _require_user(request)
@@ -4847,6 +4981,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                             "dataset_type": "csv",
                             "month": str(st.get("month") or ""),
                             "raw_rel_path": raw_rel_path,
+                            **_dataset_extra_response_fields(st),
                         },
                     )
                     listed_rel_paths.add(raw_rel_path)
@@ -4872,6 +5007,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                             "dataset_type": dtype,
                             "month": str(st.get("month") or ""),
                             "raw_rel_path": raw_rel_path,
+                            **_dataset_extra_response_fields(st),
                         },
                     )
                     listed_rel_paths.add(vector_rel)
@@ -4904,6 +5040,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                         "dataset_type": "3dmodel",
                         "month": str(st.get("month") or ""),
                         "raw_rel_path": raw_rel_path,
+                        **_dataset_extra_response_fields(st),
                     },
                 )
                 listed_rel_paths.add(rel_base)
@@ -4934,6 +5071,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "dataset_type": str(st.get("dataset_type") or _infer_dataset_type(display_name)),
                     "month": str(st.get("month") or ""),
                     "raw_rel_path": str(st.get("raw_rel_path") or ""),
+                    **_dataset_extra_response_fields(st),
                 },
             )
             listed_rel_paths.add(rel_base)
@@ -5093,6 +5231,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "dataset_type": str(st.get("dataset_type") or _infer_dataset_type(display_name)),
                     "month": str(st.get("month") or ""),
                     "raw_rel_path": str(st.get("raw_rel_path") or ""),
+                    **_dataset_extra_response_fields(st),
                 },
             )
             listed_rel_paths.add(rel_base)
@@ -5159,9 +5298,15 @@ def delete_project_file(project_id: str, payload: FileDeletePayload, request: Re
         raise HTTPException(status_code=400, detail="Invalid target path")
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
+    matched = _find_dataset_status_for_rel(safe_project_id, rel)
+    if matched:
+        dataset_id, st = matched
+        _delete_dataset_artifacts(safe_project_id, dataset_id, st)
+        return {"status": "success"}
     if target.is_dir():
-        raise HTTPException(status_code=400, detail="Only file deletion is supported")
-    target.unlink(missing_ok=True)
+        shutil.rmtree(target)
+    else:
+        target.unlink(missing_ok=True)
     _invalidate_project_files_cache(safe_project_id)
     return {"status": "success"}
 
@@ -5183,6 +5328,11 @@ def admin_force_delete_project_file(
         raise HTTPException(status_code=400, detail="Invalid target path")
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
+    matched = _find_dataset_status_for_rel(safe_project_id, rel)
+    if matched:
+        dataset_id, st = matched
+        _delete_dataset_artifacts(safe_project_id, dataset_id, st)
+        return {"status": "success"}
     if target.is_dir():
         shutil.rmtree(target)
     else:

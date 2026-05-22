@@ -105,6 +105,8 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     shareCopied,
     setShareCopied,
     activeLayers,
+    activeViewerTab,
+    setActiveViewerTab,
   } = useWorkspaceContext()
   const isAdmin = user.role === 'admin'
   const { projects, loading: projectsLoading, error: projectsError, addProject, renameProject } = useProjects(managedUser?.userId)
@@ -134,50 +136,10 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
       ),
     [activeLayers, selectedProject?.id],
   )
-  const selectedProjectActiveLayers = useMemo(
-    () => activeLayers.filter((layer) => layer.projectId === selectedProject?.id),
-    [activeLayers, selectedProject?.id],
-  )
-  const is3DView = useMemo(
-    () =>
-      selectedProjectActiveLayers.some((layer) => (
-        layer.layerType === '3DModel' ||
-        layer.layerType === 'PointCloud' ||
-        String(layer.layerType).toLowerCase() === 'pointcloud'
-      )),
-    [selectedProjectActiveLayers],
-  )
-  const activeWorkspaceLayer = useMemo(
-    () => selectedProjectActiveLayers[0] ?? null,
-    [selectedProjectActiveLayers],
-  )
   const routedViewerId = useMemo(() => {
     if (activeId !== 'map' && activeId !== 'globe') return activeId
-    if (is3DView) return 'globe'
-    const layerType = String(activeWorkspaceLayer?.layerType || '').toLowerCase()
-    const datasetType = String(activeWorkspaceLayer?.datasetType || '').toLowerCase()
-    const url = String(activeWorkspaceLayer?.url || '').toLowerCase()
-    if (
-      layerType === '3dmodel' ||
-      layerType === 'pointcloud' ||
-      datasetType === '3dmodel' ||
-      datasetType === 'pointcloud' ||
-      url.endsWith('tileset.json')
-    ) {
-      return 'globe'
-    }
-    if (
-      layerType === 'cog' ||
-      layerType === 'ortho' ||
-      layerType === 'dtm' ||
-      layerType === 'dsm' ||
-      layerType === 'vector' ||
-      ['ortho', 'orthomosaic', 'dtm', 'dem', 'dsm', 'vector'].includes(datasetType)
-    ) {
-      return 'map'
-    }
-    return activeId
-  }, [activeId, activeWorkspaceLayer, is3DView])
+    return activeViewerTab === '3D' ? 'globe' : 'map'
+  }, [activeId, activeViewerTab])
 
   const handleShare = useCallback(async () => {
     const url = `${window.location.origin}${window.location.pathname}`
@@ -402,6 +364,12 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                 if (item.id === 'admin') {
                   setSelectedProject(null)
                 }
+                if (item.id === 'map') {
+                  setActiveViewerTab('2D')
+                }
+                if (item.id === 'globe') {
+                  setActiveViewerTab('3D')
+                }
                 setActiveId(item.id)
               }}
               title={item.label}
@@ -585,7 +553,10 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                     <button
                       type="button"
                       className="ds-module-card__action"
-                      onClick={() => setActiveId(module.id)}
+                      onClick={() => {
+                        if (module.id === 'map') setActiveViewerTab('2D')
+                        setActiveId(module.id)
+                      }}
                     >
                       {module.action}
                     </button>

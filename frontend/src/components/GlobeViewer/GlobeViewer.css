@@ -438,7 +438,7 @@
 
 .d3d-height-control__actions {
   display: grid;
-  grid-template-columns: 1fr 1.35fr 1fr;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.35rem;
 }
 
@@ -482,4 +482,53 @@
   opacity: 0.08;
   filter: blur(3px);
   pointer-events: none;
+}
+
+@media (min-width: 1800px) {
+  .gv-panel {
+    top: 1.25rem;
+    right: 1.25rem;
+    width: 340px;
+    max-height: min(64vh, 720px);
+  }
+
+  .gv-tools-panel {
+    right: 1.25rem;
+    bottom: 4.2rem;
+    width: 300px;
+  }
+
+  .gv-nav-readout {
+    right: 1.25rem;
+    bottom: 1.25rem;
+  }
+}
+
+@media (max-width: 1200px) and (min-width: 768px) {
+  .gv-panel {
+    top: 0.65rem;
+    right: 0.65rem;
+    width: 280px;
+    max-height: min(62vh, 520px);
+    padding: 0.75rem;
+  }
+
+  .gv-tools-panel {
+    right: 0.65rem;
+    bottom: 3.45rem;
+    width: 245px;
+    padding: 0.7rem;
+  }
+
+  .gv-field,
+  .gv-panel__hint,
+  .gv-action,
+  .gv-tool-button,
+  .gv-tool-select {
+    font-size: 0.7rem;
+  }
+
+  .d3d-height-control__actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }

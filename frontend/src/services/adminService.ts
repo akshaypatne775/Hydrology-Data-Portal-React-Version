@@ -24,6 +24,7 @@ export type AdminDatasetMetadataPayload = {
   status?: string
   dataset_type?: string
   month?: string
+  height_offset?: number
 }
 
 export async function getAdminUserActivity(): Promise<AdminUserActivity[]> {

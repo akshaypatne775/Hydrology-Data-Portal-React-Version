@@ -14,7 +14,6 @@ import {
   openManualDatasetFolder,
   readDatasetMetadata,
   syncManualDatasetFolders,
-  updateDatasetMetadata,
   type ProjectFile,
   type ProjectJob,
 } from '../../services/datasetService'
@@ -31,6 +30,7 @@ type DatasetRow = {
   size: string
   status: DatasetStatus
   uploadDate?: string
+  uploadDateRaw?: string
   filePath?: string
   relPath?: string
   layerType?: 'cog' | 'Ortho' | 'DTM' | 'DSM' | 'pointcloud' | 'PointCloud' | '3DModel' | 'Vector' | 'CAD'
@@ -38,6 +38,8 @@ type DatasetRow = {
   datasetId?: string
   month?: string
   datasetType?: string
+  processedSize?: string
+  height_offset?: number | string
 }
 
 type DatasetsPanelProps = {
@@ -97,6 +99,11 @@ function formatSize(sizeBytes: string): string {
   return `${mb.toFixed(0)} MB`
 }
 
+function displayProjectFileSize(file: ProjectFile): string {
+  if (file.processed_size && file.processed_size.trim()) return file.processed_size
+  return formatSize(file.size_bytes)
+}
+
 function mapProjectFile(file: ProjectFile): DatasetRow {
   const fileType = String(file.type).toLowerCase()
   const type = datasetTypeFromBackend(file.dataset_type) ||
@@ -120,9 +127,10 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
     id: `file-${file.rel_path}`,
     fileName: file.name,
     type,
-    size: formatSize(file.size_bytes),
+    size: displayProjectFileSize(file),
     status: normalizeJobStatus(file.status),
-    uploadDate: formatDisplayDate(file.updated_at),
+    uploadDate: formatDisplayDate(file.upload_date || file.updated_at),
+    uploadDateRaw: file.upload_date || file.updated_at,
     filePath: file.file_path || undefined,
     relPath: file.rel_path,
     layerType,
@@ -130,6 +138,8 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
     datasetId: file.dataset_id,
     month: file.month,
     datasetType: file.dataset_type,
+    processedSize: file.processed_size,
+    height_offset: file.height_offset,
   }
 }
 
@@ -144,9 +154,30 @@ function toBackendDatasetType(type: DatasetType): string {
   return 'pointcloud'
 }
 
+function isTwoDLayer(layerType?: DatasetRow['layerType']): boolean {
+  return ['cog', 'Ortho', 'DTM', 'DSM', 'Vector'].includes(String(layerType))
+}
+
+function buildActiveLayer(projectId: string, row: DatasetRow) {
+  if (!row.layerType || !row.layerUrl) return null
+  return {
+    id: `${projectId}:${row.datasetId || row.fileName}`,
+    projectId,
+    name: row.fileName,
+    layerType: row.layerType,
+    url: row.layerUrl,
+    datasetId: row.datasetId,
+    datasetType: row.datasetType || toBackendDatasetType(row.type),
+    month: row.month,
+    processedSize: row.processedSize || row.size,
+    uploadDate: row.uploadDateRaw,
+    height_offset: row.height_offset,
+  }
+}
+
 export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   const { tasks, startDatasetUpload, startPointCloudUpload } = useUploadContext()
-  const { setActiveId, toggleLayer } = useWorkspaceContext()
+  const { setActiveId, setActiveViewerTab, toggleLayer, upsertLayer, removeLayer } = useWorkspaceContext()
   const { isAdmin } = useAuthContext()
   const modal = useModal()
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -187,13 +218,19 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       })
       const mergedRows = [...mergedMap.values()]
       setDatasets(mergedRows)
+      mergedRows
+        .filter((row) => row.status === 'Web-Ready')
+        .forEach((row) => {
+          const layer = buildActiveLayer(currentProjectId, row)
+          if (layer) upsertLayer(layer)
+        })
       window.sessionStorage.setItem(cacheKey, JSON.stringify(mergedRows))
     } catch {
       if (!cancelledRef()) setDatasets([])
     } finally {
       if (!cancelledRef()) setLoadingRows(false)
     }
-  }, [])
+  }, [upsertLayer])
 
   useEffect(() => {
     if (!projectId) return
@@ -321,7 +358,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     if (!projectId || !row.datasetId) return
     const name = await modal.prompt('Edit metadata', 'Dataset name', row.fileName)
     if (name === null) return
-    const date = await modal.prompt('Edit metadata', 'Dataset month/date (YYYY-MM or YYYY-MM-DD)', row.month || '')
+    const date = await modal.prompt('Edit metadata', 'Upload date (YYYY-MM-DD)', row.uploadDateRaw?.slice(0, 10) || '')
     if (date === null) return
     const status = await modal.prompt('Edit metadata', 'Dataset status', row.status)
     if (status === null) return
@@ -342,6 +379,35 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     }
   }, [loadRows, modal, projectId])
 
+  const onAdminEditDate = useCallback(async (row: DatasetRow) => {
+    if (!projectId || !row.datasetId) return
+    const current = row.uploadDateRaw && /^\d{4}-\d{2}-\d{2}/.test(row.uploadDateRaw)
+      ? row.uploadDateRaw.slice(0, 10)
+      : new Date().toISOString().slice(0, 10)
+    const nextDate = await modal.prompt('Edit upload date', 'Upload date (YYYY-MM-DD)', current)
+    if (nextDate === null) return
+    const cleanDate = nextDate.trim()
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanDate)) {
+      await modal.alert('Invalid date', 'Please enter date in YYYY-MM-DD format.')
+      return
+    }
+    try {
+      await updateAdminDatasetMetadata(projectId, {
+        dataset_id: row.datasetId,
+        date: cleanDate,
+        dataset_type: row.datasetType || toBackendDatasetType(row.type),
+      })
+      invalidateProjectDataCache(projectId)
+      setDatasets((prev) => prev.map((item) => (
+        item.id === row.id
+          ? { ...item, uploadDateRaw: cleanDate, uploadDate: formatDisplayDate(cleanDate) }
+          : item
+      )))
+    } catch (error) {
+      await modal.alert('Date update failed', error instanceof Error ? error.message : 'Date update failed')
+    }
+  }, [modal, projectId])
+
   const onAdminForceDelete = useCallback(async (row: DatasetRow) => {
     if (!projectId || !row.datasetId) return
     const confirmed = await modal.confirm(
@@ -352,11 +418,13 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     try {
       await forceDeleteAdminDataset(projectId, row.datasetId)
       invalidateProjectDataCache(projectId)
+      const layer = buildActiveLayer(projectId, row)
+      if (layer) removeLayer(layer.id)
       setDatasets((prev) => prev.filter((item) => item.id !== row.id))
     } catch (error) {
       await modal.alert('Admin force delete failed', error instanceof Error ? error.message : 'Admin force delete failed')
     }
-  }, [modal, projectId])
+  }, [modal, projectId, removeLayer])
 
   const onSyncManual = useCallback(async () => {
     if (!projectId || syncingManual) return
@@ -546,7 +614,6 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
               <th>Type</th>
               <th>Size</th>
               <th>Upload Date</th>
-              <th>Month</th>
               <th>Status</th>
               <th>Action</th>
             </tr>
@@ -554,7 +621,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
           <tbody>
             {loadingRows && datasets.length === 0 ? (
               <tr>
-                <td colSpan={7}>Loading datasets...</td>
+                <td colSpan={6}>Loading datasets...</td>
               </tr>
             ) : null}
             {datasets.map((row) => (
@@ -562,31 +629,19 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                 <td>{row.fileName}</td>
                 <td>{row.type}</td>
                 <td>{row.size}</td>
-                <td>{row.uploadDate || '--'}</td>
                 <td>
-                  {row.datasetId ? (
-                    <input
-                      className="dsp-month-input"
-                      type="month"
-                      value={row.month || ''}
-                      onChange={async (event) => {
-                        if (!projectId || !row.datasetId) return
-                        const nextMonth = event.target.value
-                        setDatasets((prev) => prev.map((item) => item.id === row.id ? { ...item, month: nextMonth } : item))
-                        try {
-                          await updateDatasetMetadata(projectId, {
-                            dataset_id: row.datasetId,
-                            month: nextMonth,
-                            dataset_type: row.datasetType || toBackendDatasetType(row.type),
-                          })
-                        } catch {
-                          // keep local UI usable; poll refresh will restore server value if needed
-                        }
-                      }}
-                    />
-                  ) : (
-                    '--'
-                  )}
+                  <span>{row.uploadDate || '--'}</span>
+                  {isAdmin && row.datasetId ? (
+                    <button
+                      type="button"
+                      className="dsp-date-edit"
+                      onClick={() => void onAdminEditDate(row)}
+                      title="Edit upload date"
+                      aria-label={`Edit upload date for ${row.fileName}`}
+                    >
+                      <i className="fa-solid fa-pen" aria-hidden />
+                    </button>
+                  ) : null}
                 </td>
                 <td>
                   <span className={row.status === 'Web-Ready' ? 'dsp-badge dsp-badge--ready' : 'dsp-badge dsp-badge--processing'}>
@@ -601,17 +656,16 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                         className="dsp-action"
                         onClick={() => {
                           if (!projectId || !row.layerType || !row.layerUrl) return
-                          toggleLayer({
-                            id: `${projectId}:${row.fileName}`,
-                            projectId,
-                            name: row.fileName,
-                            layerType: row.layerType,
-                            url: row.layerUrl,
-                            datasetId: row.datasetId,
-                            datasetType: row.datasetType || toBackendDatasetType(row.type),
-                            month: row.month,
-                          })
-                          setActiveId(['cog', 'Ortho', 'DTM', 'DSM', 'Vector'].includes(String(row.layerType)) ? 'map' : 'globe')
+                          const layer = buildActiveLayer(projectId, row)
+                          if (!layer) return
+                          toggleLayer(layer)
+                          if (isTwoDLayer(row.layerType)) {
+                            setActiveViewerTab('2D')
+                            setActiveId('map')
+                          } else {
+                            setActiveViewerTab('3D')
+                            setActiveId('globe')
+                          }
                         }}
                       >
                         {getActionLabel(row)}
@@ -624,6 +678,8 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                           if (!projectId || !row.relPath) return
                           try {
                             await deleteProjectFile(projectId, row.relPath)
+                            const layer = buildActiveLayer(projectId, row)
+                            if (layer) removeLayer(layer.id)
                             setDatasets((prev) => prev.filter((item) => item.id !== row.id))
                             invalidateProjectDataCache(projectId)
                           } catch {
