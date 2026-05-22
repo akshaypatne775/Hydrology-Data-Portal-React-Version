@@ -21,7 +21,7 @@ const CATEGORY_ORDER: DownloadCategory[] = ['Raw Survey Data', 'Web-Optimized Da
 
 function humanSize(sizeBytes: string): string {
   const n = Number(sizeBytes)
-  if (!Number.isFinite(n) || n <= 0) return '--'
+  if (!Number.isFinite(n) || n <= 0) return 'Size Unknown'
   const gb = n / (1024 * 1024 * 1024)
   if (gb >= 1) return `${gb.toFixed(2)} GB`
   const mb = n / (1024 * 1024)

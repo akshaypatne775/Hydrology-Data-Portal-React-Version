@@ -34,8 +34,9 @@
   top: 1rem;
   right: 1rem;
   left: auto;
-  width: min(300px, calc(100% - 2rem));
-  max-height: min(58vh, 560px);
+  bottom: 1rem;
+  width: min(320px, calc(100% - 2rem));
+  max-height: calc(100% - 2rem);
   overflow: auto;
   padding: 1rem;
   border-radius: 14px;
@@ -160,19 +161,11 @@
 }
 
 .gv-tools-panel {
-  position: absolute;
-  right: 1rem;
-  bottom: 3.8rem;
-  z-index: 22;
-  width: min(260px, calc(100% - 2rem));
-  padding: 0.85rem;
-  border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  background: linear-gradient(145deg, rgba(14, 62, 73, 0.64), rgba(6, 23, 31, 0.5));
-  box-shadow:
-    0 8px 28px rgba(2, 6, 23, 0.38),
-    inset 0 1px 0 rgba(255, 255, 255, 0.18);
-  backdrop-filter: blur(12px);
+  position: static;
+  width: 100%;
+  margin-top: 0.85rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.16);
   color: #f8fafc;
 }
 
@@ -297,7 +290,8 @@
 
 .gv-nav-readout {
   position: absolute;
-  right: 1rem;
+  left: 1rem;
+  right: auto;
   bottom: 1rem;
   display: inline-flex;
   align-items: center;
@@ -484,22 +478,48 @@
   pointer-events: none;
 }
 
+.gv-root .cesium-home-button {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 34px !important;
+  height: 34px !important;
+  border: 1px solid rgba(14, 62, 73, 0.22) !important;
+  border-radius: 10px !important;
+  background: rgba(255, 255, 255, 0.94) !important;
+  box-shadow: 0 8px 18px rgba(2, 6, 23, 0.18) !important;
+}
+
+.gv-root .cesium-home-button svg,
+.gv-root .cesium-home-button img {
+  display: none !important;
+}
+
+.gv-root .cesium-home-button::before {
+  content: '\f015';
+  color: #0e3e49;
+  font-family: 'Font Awesome 6 Free';
+  font-size: 0.9rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.gv-root .cesium-home-button:hover {
+  background: #ccfbf1 !important;
+}
+
 @media (min-width: 1800px) {
   .gv-panel {
     top: 1.25rem;
     right: 1.25rem;
-    width: 340px;
-    max-height: min(64vh, 720px);
-  }
-
-  .gv-tools-panel {
-    right: 1.25rem;
-    bottom: 4.2rem;
-    width: 300px;
+    bottom: 1.25rem;
+    width: 320px;
+    max-height: calc(100% - 2.5rem);
   }
 
   .gv-nav-readout {
-    right: 1.25rem;
+    left: 1.25rem;
+    right: auto;
     bottom: 1.25rem;
   }
 }
@@ -508,16 +528,15 @@
   .gv-panel {
     top: 0.65rem;
     right: 0.65rem;
+    bottom: 0.65rem;
     width: 280px;
-    max-height: min(62vh, 520px);
+    max-height: calc(100% - 1.3rem);
     padding: 0.75rem;
   }
 
   .gv-tools-panel {
-    right: 0.65rem;
-    bottom: 3.45rem;
-    width: 245px;
-    padding: 0.7rem;
+    margin-top: 0.7rem;
+    padding-top: 0.7rem;
   }
 
   .gv-field,

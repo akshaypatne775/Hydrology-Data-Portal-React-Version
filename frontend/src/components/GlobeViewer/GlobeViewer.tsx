@@ -6,8 +6,7 @@ import { useUploadContext } from '../../context/UploadContext'
 import { useWorkspaceContext } from '../../context/WorkspaceContext'
 import { useModal } from '../../context/ModalContext'
 import { getPointCloudStatus } from '../../services/pointCloudService'
-import { getProjectFiles, type ProjectFile } from '../../services/datasetService'
-import { updateAdminDatasetMetadata } from '../../services/adminService'
+import { getProjectFiles, updateDatasetOwnerMetadata, type ProjectFile } from '../../services/datasetService'
 import './GlobeViewer.css'
 import {
   readUploadedTilesets,
@@ -72,6 +71,16 @@ const MODEL_TILE_CACHE_BYTES = 1024 * 1024 * 1024
 const MODEL_TILE_CACHE_OVERFLOW_BYTES = 1024 * 1024 * 1024
 const MODEL_SCREEN_SPACE_ERROR = 2
 const MODEL_GROUND_CLEARANCE_METERS = 80
+
+function resolveLayerDatasetId(layer?: { datasetId?: unknown; id?: unknown } | null): string {
+  const direct = String(layer?.datasetId || '').trim()
+  if (direct) return direct
+  const rawId = String(layer?.id || '').trim()
+  if (!rawId) return ''
+  const cleaned = rawId.replace(/^active:/i, '')
+  const parts = cleaned.split(':').map((part) => part.trim()).filter(Boolean)
+  return parts.at(-1) || cleaned
+}
 
 function applyModelHeightOffset(entry: ModelTilesetEntry, offsetMeters: number): void {
   const surface = Cesium.Cartesian3.fromRadians(entry.longitude, entry.latitude, 0)
@@ -515,13 +524,13 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
 
   const saveModelHeightOffset = useCallback(async () => {
     const activeLayer = activeModelLayers[0]
-    if (!activeLayer?.datasetId) {
+    const datasetId = resolveLayerDatasetId(activeLayer)
+    if (!datasetId) {
       await modal.alert('Height not saved', 'Open a saved 3D model from the Data Catalog before saving height.')
       return
     }
     try {
-      await updateAdminDatasetMetadata(projectId, {
-        dataset_id: activeLayer.datasetId,
+      await updateDatasetOwnerMetadata(projectId, datasetId, {
         height_offset: modelHeightOffset,
       })
       await modal.alert('Height saved', '3D model height offset saved. It will be restored on reload.')
@@ -1084,11 +1093,12 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       viewer = new Cesium.Viewer(host, {
         animation: false,
         timeline: false,
-        sceneModePicker: true,
-        baseLayerPicker: HAS_VALID_ION_TOKEN,
+        sceneModePicker: false,
+        baseLayerPicker: false,
         geocoder: false,
         homeButton: true,
-        navigationHelpButton: true,
+        navigationHelpButton: false,
+        fullscreenButton: false,
         infoBox: false,
         selectionIndicator: false,
         shouldAnimate: true,
@@ -1372,58 +1382,58 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
             ))}
           </div>
         ) : null}
-      </section>
 
-      <section className="gv-tools-panel" aria-label="Cesium measurement tools">
-        <div className="gv-tools-panel__head">
-          <span>Tools</span>
-          <strong>{formatMeasureDistance(measureDistanceM)}</strong>
+        <div className="gv-tools-panel" aria-label="Cesium measurement tools">
+          <div className="gv-tools-panel__head">
+            <span>Tools</span>
+            <strong>{formatMeasureDistance(measureDistanceM)}</strong>
+          </div>
+          <button
+            type="button"
+            className={distanceMeasureActive ? 'gv-tool-button gv-tool-button--active' : 'gv-tool-button'}
+            onClick={() => setDistanceMeasureActive((active) => !active)}
+          >
+            Measure Distance
+          </button>
+          <button
+            type="button"
+            className={drawMode === 'point' ? 'gv-tool-button gv-tool-button--active' : 'gv-tool-button'}
+            onClick={() => setDrawMode((mode) => (mode === 'point' ? 'none' : 'point'))}
+          >
+            Point
+          </button>
+          <button
+            type="button"
+            className={drawMode === 'polyline' ? 'gv-tool-button gv-tool-button--active' : 'gv-tool-button'}
+            onClick={() => setDrawMode((mode) => (mode === 'polyline' ? 'none' : 'polyline'))}
+          >
+            Polyline
+          </button>
+          <button type="button" className="gv-tool-button" disabled={draftLineCount < 2} onClick={finishDraftLine}>
+            Finish Line
+          </button>
+          <select
+            className="gv-tool-select"
+            value=""
+            onChange={(event) => {
+              if (event.target.value === 'kml') exportDrawingsKml()
+              if (event.target.value === 'csv') exportDrawingsCsv()
+              event.currentTarget.value = ''
+            }}
+            aria-label="Export drawings"
+            disabled={drawnGeometries.length === 0}
+          >
+            <option value="">Export</option>
+            <option value="kml">Export as KML</option>
+            <option value="csv">Export as CSV</option>
+          </select>
+          <button type="button" className="gv-tool-button gv-tool-button--ghost" onClick={clearDistanceMeasurement}>
+            Clear
+          </button>
+          <button type="button" className="gv-tool-button gv-tool-button--ghost" onClick={clearDrawings}>
+            Clear Drawings
+          </button>
         </div>
-        <button
-          type="button"
-          className={distanceMeasureActive ? 'gv-tool-button gv-tool-button--active' : 'gv-tool-button'}
-          onClick={() => setDistanceMeasureActive((active) => !active)}
-        >
-          Measure Distance
-        </button>
-        <button
-          type="button"
-          className={drawMode === 'point' ? 'gv-tool-button gv-tool-button--active' : 'gv-tool-button'}
-          onClick={() => setDrawMode((mode) => (mode === 'point' ? 'none' : 'point'))}
-        >
-          Point
-        </button>
-        <button
-          type="button"
-          className={drawMode === 'polyline' ? 'gv-tool-button gv-tool-button--active' : 'gv-tool-button'}
-          onClick={() => setDrawMode((mode) => (mode === 'polyline' ? 'none' : 'polyline'))}
-        >
-          Polyline
-        </button>
-        <button type="button" className="gv-tool-button" disabled={draftLineCount < 2} onClick={finishDraftLine}>
-          Finish Line
-        </button>
-        <select
-          className="gv-tool-select"
-          value=""
-          onChange={(event) => {
-            if (event.target.value === 'kml') exportDrawingsKml()
-            if (event.target.value === 'csv') exportDrawingsCsv()
-            event.currentTarget.value = ''
-          }}
-          aria-label="Export drawings"
-          disabled={drawnGeometries.length === 0}
-        >
-          <option value="">Export</option>
-          <option value="kml">Export as KML</option>
-          <option value="csv">Export as CSV</option>
-        </select>
-        <button type="button" className="gv-tool-button gv-tool-button--ghost" onClick={clearDistanceMeasurement}>
-          Clear
-        </button>
-        <button type="button" className="gv-tool-button gv-tool-button--ghost" onClick={clearDrawings}>
-          Clear Drawings
-        </button>
       </section>
 
       <div className="gv-nav-readout" aria-live="polite">

@@ -171,6 +171,23 @@ export async function updateDatasetMetadata(
   invalidateProjectDataCache(projectId)
 }
 
+export async function updateDatasetOwnerMetadata(
+  projectId: string,
+  datasetId: string,
+  payload: { height_offset?: number },
+): Promise<void> {
+  const res = await apiRequest(
+    `/api/datasets/${encodeURIComponent(projectId)}/${encodeURIComponent(datasetId)}/metadata`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  )
+  if (!res.ok) throw new Error(`Metadata update failed (${res.status})`)
+  invalidateProjectDataCache(projectId)
+}
+
 export async function generateContours(
   projectId: string,
   payload: { dataset_id?: string; source_tif?: string; interval: number },

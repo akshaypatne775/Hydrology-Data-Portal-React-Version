@@ -369,6 +369,10 @@ class DatasetMetaPayload(BaseModel):
     dataset_type: str = ""
 
 
+class DatasetOwnerPathMetaPayload(BaseModel):
+    height_offset: float | None = None
+
+
 class AdminProjectPatchPayload(BaseModel):
     name: str | None = None
     location: str | None = None
@@ -523,7 +527,7 @@ def _normalize_month(value: str) -> str:
     return raw[:40]
 
 
-def calculate_folder_size(path: Path) -> int:
+def get_dir_size(path: Path) -> int:
     if not path.exists():
         return 0
     if path.is_file():
@@ -532,14 +536,26 @@ def calculate_folder_size(path: Path) -> int:
         except OSError:
             return 0
     total = 0
-    for item in path.rglob("*"):
-        if not item.is_file():
-            continue
+    stack = [path]
+    while stack:
+        current = stack.pop()
         try:
-            total += item.stat().st_size
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                        elif entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                    except OSError:
+                        continue
         except OSError:
             continue
     return total
+
+
+def calculate_folder_size(path: Path) -> int:
+    return get_dir_size(path)
 
 
 def _format_size_bytes(size_bytes: int) -> str:
@@ -4519,6 +4535,29 @@ def update_dataset_metadata(project_id: str, payload: DatasetMetaPayload, reques
     return {"status": "success"}
 
 
+@app.put("/api/datasets/{project_id}/{dataset_id}/metadata")
+def update_dataset_owner_metadata(
+    project_id: str,
+    dataset_id: str,
+    payload: DatasetOwnerPathMetaPayload,
+    request: Request,
+) -> dict[str, str]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    if str(user.get("role", "")).lower() != "admin":
+        _ensure_project_owner(int(user["id"]), safe_project_id)
+    safe_dataset_id = _safe_dataset_id(dataset_id)
+    st = _read_dataset_status(safe_project_id, safe_dataset_id)
+    if not st:
+        raise HTTPException(status_code=404, detail="Dataset status not found")
+    if payload.height_offset is not None:
+        st["height_offset"] = f"{float(payload.height_offset):.3f}".rstrip("0").rstrip(".")
+    st["updated_at"] = _now_iso()
+    _write_dataset_status(safe_project_id, safe_dataset_id, st)
+    _invalidate_project_files_cache(safe_project_id)
+    return {"status": "success"}
+
+
 @app.patch("/api/admin/datasets/{project_id}/metadata")
 def admin_update_dataset_metadata(
     project_id: str,
@@ -5029,9 +5068,9 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                         "name": display_name,
                         "kind": "3D Photogrammetry Model",
                         "type": "3DModel",
-                    "size_bytes": str(tileset_path.stat().st_size),
-                    "status": str(st.get("status") or jobs_by_file.get(display_name, {}).get("status", "WEB-READY")),
-                    "updated_at": str(st.get("updated_at") or ""),
+                        "size_bytes": str(get_dir_size(tile_root)),
+                        "status": str(st.get("status") or jobs_by_file.get(display_name, {}).get("status", "WEB-READY")),
+                        "updated_at": str(st.get("updated_at") or ""),
                         "file_url": f"{base_url}/data/{tileset_rel}",
                         "layer_url": f"{base_url}/data/{tileset_rel}",
                         "file_path": str(tileset_path.resolve()),
@@ -5060,7 +5099,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "kind": "Web-Optimized Data",
                     "type": "cog",
                     "layer_type": _raster_layer_type(str(st.get("dataset_type") or ""), display_name),
-                    "size_bytes": _fast_tile_dir_size(tile_root),
+                    "size_bytes": str(get_dir_size(tile_root)),
                     "status": str(st.get("status") or jobs_by_file.get(display_name, {}).get("status", "Web-Ready")),
                     "updated_at": str(st.get("updated_at") or ""),
                     "file_url": f"{base_url}/data/{rel_base}",
@@ -5123,7 +5162,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "name": display_name,
                     "kind": "Droid 3D Point Cloud",
                     "type": "PointCloud",
-                    "size_bytes": str(potree_html.stat().st_size),
+                    "size_bytes": str(get_dir_size(potree_html.parent)),
                     "status": jobs_by_file.get(display_name, {}).get("status", "WEB-READY"),
                     "file_url": f"{base_url}/data/{rel}",
                     "layer_url": f"{base_url}/data/{rel}",
@@ -5154,7 +5193,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "name": display_name,
                     "kind": "3D Photogrammetry Model",
                     "type": "3DModel",
-                    "size_bytes": str(tileset_path.stat().st_size),
+                    "size_bytes": str(get_dir_size(model_root)),
                     "status": "WEB-READY",
                     "file_url": f"{base_url}/data/{tileset_rel}",
                     "layer_url": f"{base_url}/data/{tileset_rel}",
@@ -5182,7 +5221,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "kind": "Web-Optimized Data",
                     "type": "cog",
                     "layer_type": _raster_layer_type(_infer_dataset_type(tile_root.name), tile_root.name),
-                    "size_bytes": _fast_tile_dir_size(tile_root),
+                    "size_bytes": str(get_dir_size(tile_root)),
                     "status": "Web-Ready",
                     "file_url": f"{base_url}/data/{rel_base}",
                     "layer_url": layer_url,
@@ -5221,7 +5260,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "name": display_name,
                     "kind": "Web-Optimized Data",
                     "type": "cog",
-                    "size_bytes": _fast_tile_dir_size(webtiles),
+                    "size_bytes": str(get_dir_size(webtiles)),
                     "status": jobs_by_file.get(display_name, {}).get("status", "Web-Ready"),
                     "file_url": f"{base_url}/data/{rel_base}",
                     "layer_url": layer_url,
@@ -5246,7 +5285,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "name": file_name,
                     "kind": "Web-Optimized Data",
                     "type": "pointcloud",
-                    "size_bytes": str(tileset.stat().st_size),
+                    "size_bytes": str(get_dir_size(tileset.parent)),
                     "status": jobs_by_file.get(file_name, {}).get("status", "Web-Ready"),
                     "file_url": f"{base_url}/data/{rel}",
                     "layer_url": f"{base_url}/data/{rel}",

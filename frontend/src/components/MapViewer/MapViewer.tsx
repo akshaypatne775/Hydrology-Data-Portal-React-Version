@@ -356,13 +356,14 @@ function MapController({
   layers,
   projectId,
   selectedUrl,
+  zoomTrigger,
 }: {
   layers: ViewerLayer[]
   projectId?: string
   selectedUrl?: string | null
+  zoomTrigger: number
 }) {
   const map = useMap()
-  const lastFitKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (!projectId) return
@@ -373,10 +374,6 @@ function MapController({
     const tileUrl = activeCog.url
     const fitKey = rawPath ?? (isStaticXyzTileTemplate(tileUrl) ? tileUrl : null)
     if (!fitKey) return
-
-    const dedupeKey = `${projectId}:${fitKey}`
-    if (dedupeKey === lastFitKeyRef.current) return
-    lastFitKeyRef.current = dedupeKey
 
     if (rawPath) {
       void fetch(`${API_BASE}/api/cog/info?url=${encodeURIComponent(rawPath)}`, {
@@ -450,9 +447,9 @@ function MapController({
         }
       } catch {
         // Ignore auto-zoom failure and keep the map usable.
-      }
-    })()
-  }, [layers, map, projectId, selectedUrl])
+        }
+      })()
+  }, [layers, map, projectId, selectedUrl, zoomTrigger])
 
   return null
 }
@@ -730,6 +727,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const [cropMode, setCropMode] = useState<'off' | 'kml' | 'draw'>('off')
   const [cropEnabled, setCropEnabled] = useState(false)
   const [cogTileUrl, setCogTileUrl] = useState<string | null>(null)
+  const [zoomTrigger, setZoomTrigger] = useState(0)
   const [compareCogTileUrl, setCompareCogTileUrl] = useState<string | null>(null)
   const [projectFiles, setProjectFiles] = useState<ProjectFile[]>([])
   const [projectLayersLoading, setProjectLayersLoading] = useState(false)
@@ -1309,7 +1307,10 @@ export function MapViewer({ projectId }: MapViewerProps) {
                   key={layer.id}
                   type="button"
                   className={layer.url === cogTileUrl ? 'mv-tool mv-tool--active' : 'mv-tool'}
-                  onClick={() => selectPrimaryLayer(layer.url)}
+                  onClick={() => {
+                    selectPrimaryLayer(layer.url)
+                    setZoomTrigger((prev) => prev + 1)
+                  }}
                   title={`${layer.datasetType?.toUpperCase() || 'LAYER'}${layer.month ? ` · ${layer.month}` : ''}`}
                 >
                   <span className="mv-layer-type">{layer.datasetType || 'layer'}</span>
@@ -1705,7 +1706,12 @@ export function MapViewer({ projectId }: MapViewerProps) {
           ) : null}
           <div className="mv-map-canvas">
             <MapContainer {...mapProps} style={{ height: '100%', width: '100%' }}>
-              <MapController layers={activeCogLayers} projectId={projectId} selectedUrl={cogTileUrl} />
+              <MapController
+                layers={activeCogLayers}
+                projectId={projectId}
+                selectedUrl={cogTileUrl}
+                zoomTrigger={zoomTrigger}
+              />
               <MapPane
                 measureMode={measureMode}
                 measureActive={measureActive}
