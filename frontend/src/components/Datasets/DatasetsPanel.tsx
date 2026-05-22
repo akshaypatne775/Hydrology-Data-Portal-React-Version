@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
+﻿import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { useUploadContext } from '../../context/UploadContext'
 import { useWorkspaceContext } from '../../context/WorkspaceContext'
 import { useAuthContext } from '../../context/AuthContext'
@@ -12,7 +12,6 @@ import {
   generateContours,
   invalidateProjectDataCache,
   openManualDatasetFolder,
-  readDatasetMetadata,
   syncManualDatasetFolders,
   type ProjectFile,
   type ProjectJob,
@@ -35,6 +34,7 @@ type DatasetRow = {
   relPath?: string
   layerType?: 'cog' | 'Ortho' | 'DTM' | 'DSM' | 'pointcloud' | 'PointCloud' | '3DModel' | 'Vector' | 'CAD' | 'Reports'
   layerUrl?: string
+  downloadUrl?: string
   datasetId?: string
   month?: string
   datasetType?: string
@@ -101,6 +101,45 @@ function formatSize(sizeBytes: string): string {
   return `${mb.toFixed(0)} MB`
 }
 
+async function detectGeoTiffEpsgLocally(file: File): Promise<string> {
+  const ext = file.name.split('.').pop()?.toLowerCase() || ''
+  if (!['tif', 'tiff'].includes(ext)) return ''
+  const buffer = await file.slice(0, Math.min(file.size, 1024 * 1024)).arrayBuffer()
+  const view = new DataView(buffer)
+  if (view.byteLength < 8) return ''
+  const byteOrder = String.fromCharCode(view.getUint8(0), view.getUint8(1))
+  const littleEndian = byteOrder === 'II'
+  if (!littleEndian && byteOrder !== 'MM') return ''
+  if (view.getUint16(2, littleEndian) !== 42) return ''
+  const ifdOffset = view.getUint32(4, littleEndian)
+  if (ifdOffset + 2 > view.byteLength) return ''
+  const entryCount = view.getUint16(ifdOffset, littleEndian)
+  const typeSize: Record<number, number> = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 12: 8 }
+  for (let index = 0; index < entryCount; index += 1) {
+    const entryOffset = ifdOffset + 2 + index * 12
+    if (entryOffset + 12 > view.byteLength) break
+    const tag = view.getUint16(entryOffset, littleEndian)
+    if (tag !== 34735) continue
+    const type = view.getUint16(entryOffset + 2, littleEndian)
+    const count = view.getUint32(entryOffset + 4, littleEndian)
+    const bytes = (typeSize[type] || 0) * count
+    const valueOffset = bytes <= 4 ? entryOffset + 8 : view.getUint32(entryOffset + 8, littleEndian)
+    if (type !== 3 || count < 4 || valueOffset + count * 2 > view.byteLength) return ''
+    const shorts = Array.from({ length: count }, (_, shortIndex) => view.getUint16(valueOffset + shortIndex * 2, littleEndian))
+    const keyCount = shorts[3] || 0
+    for (let keyIndex = 0; keyIndex < keyCount; keyIndex += 1) {
+      const keyOffset = 4 + keyIndex * 4
+      const keyId = shorts[keyOffset]
+      const tiffTagLocation = shorts[keyOffset + 1]
+      const keyValue = shorts[keyOffset + 3]
+      if (tiffTagLocation === 0 && (keyId === 3072 || keyId === 2048) && keyValue > 0 && keyValue !== 32767) {
+        return `EPSG:${keyValue}`
+      }
+    }
+  }
+  return ''
+}
+
 function displayProjectFileSize(file: ProjectFile): string {
   if (file.processed_size && file.processed_size.trim()) return file.processed_size
   return formatSize(file.size_bytes)
@@ -142,6 +181,7 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
     relPath: file.rel_path,
     layerType,
     layerUrl,
+    downloadUrl: toSameOriginBackendUrl(file.download_url) || toSameOriginBackendUrl(file.file_url),
     datasetId: file.dataset_id,
     month: file.month,
     datasetType: file.dataset_type,
@@ -197,7 +237,8 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   const [syncingManual, setSyncingManual] = useState(false)
   const [openingManualFolder, setOpeningManualFolder] = useState(false)
   const [detectingEpsg, setDetectingEpsg] = useState(false)
-  const [reportViewer, setReportViewer] = useState<{ name: string; url: string } | null>(null)
+  const [reportViewer, setReportViewer] = useState<{ name: string; url: string; downloadUrl: string } | null>(null)
+  const [generatingContours, setGeneratingContours] = useState<Record<string, boolean>>({})
   const [uploadForm, setUploadForm] = useState<UploadFormState>({
     name: '',
     type: 'Point Cloud',
@@ -349,6 +390,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
 
   const onGenerateContours = useCallback(async (row: DatasetRow) => {
     if (!projectId || !row.datasetId) return
+    const contourKey = row.datasetId
     const raw = await modal.prompt('Generate contours', 'Contour interval in meters', '2')
     if (!raw) return
     const interval = Number(raw)
@@ -356,6 +398,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       await modal.alert('Invalid interval', 'Please enter a valid contour interval.')
       return
     }
+    setGeneratingContours((prev) => ({ ...prev, [contourKey]: true }))
     try {
       await generateContours(projectId, { dataset_id: row.datasetId, interval })
       invalidateProjectDataCache(projectId)
@@ -365,6 +408,8 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       await modal.alert('Contours started', 'Contour generation started. The Vector layer will appear when ready.')
     } catch (error) {
       await modal.alert('Contour generation failed', error instanceof Error ? error.message : 'Contour generation failed')
+    } finally {
+      setGeneratingContours((prev) => ({ ...prev, [contourKey]: false }))
     }
   }, [loadRows, modal, projectId])
 
@@ -478,12 +523,9 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     if (!projectId || !selectedFile || detectingEpsg) return
     setDetectingEpsg(true)
     try {
-      const form = new FormData()
-      form.append('project_id', projectId)
-      form.append('file', selectedFile)
-      const meta = await readDatasetMetadata(form)
-      setUploadForm((s) => ({ ...s, epsg: meta.epsg || '' }))
-      if (!meta.epsg) {
+      const epsg = await detectGeoTiffEpsgLocally(selectedFile)
+      setUploadForm((s) => ({ ...s, epsg }))
+      if (!epsg) {
         await modal.alert('EPSG not found', 'EPSG auto detect failed. Please enter it manually if known.')
       }
     } catch {
@@ -504,16 +546,23 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
               <strong>{reportViewer.name}</strong>
             </div>
             <div className="dsp-report-modal__actions">
-              <button type="button" onClick={() => window.open(reportViewer.url, '_blank', 'noopener,noreferrer')}>
-                <i className="fa-solid fa-up-right-from-square" aria-hidden />
-                Open
-              </button>
+              <a href={reportViewer.downloadUrl} download={reportViewer.name}>
+                <i className="fa-solid fa-download" aria-hidden />
+                Download
+              </a>
               <button type="button" onClick={() => setReportViewer(null)} aria-label="Close report viewer">
                 <i className="fa-solid fa-xmark" aria-hidden />
               </button>
             </div>
           </div>
-          <iframe title={reportViewer.name} src={reportViewer.url} />
+          <object
+            data={`${reportViewer.url}#toolbar=0&navpanes=0&scrollbar=0`}
+            type="application/pdf"
+            width="100%"
+            height="100%"
+          >
+            <p>Unable to display PDF.</p>
+          </object>
         </div>
       </div>
     ) : null}
@@ -530,7 +579,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
             onClick={() => void onOpenManualFolder()}
             disabled={!projectId || openingManualFolder}
           >
-            {openingManualFolder ? 'Opening...' : '➕ Add Manually'}
+            {openingManualFolder ? 'Opening...' : '+ Add Manually'}
           </button>
           <button
             type="button"
@@ -538,7 +587,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
             onClick={() => void onSyncManual()}
             disabled={!projectId || syncingManual}
           >
-            {syncingManual ? 'Syncing...' : '🔄 Sync Manual Folders'}
+            {syncingManual ? 'Syncing...' : 'Sync Manual Folders'}
           </button>
         </div>
       </header>
@@ -700,7 +749,11 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                         onClick={() => {
                           if (!projectId || !row.layerType || !row.layerUrl) return
                           if (row.layerType === 'Reports') {
-                            setReportViewer({ name: row.fileName, url: row.layerUrl })
+                            setReportViewer({
+                              name: row.fileName,
+                              url: row.layerUrl,
+                              downloadUrl: row.downloadUrl || row.layerUrl,
+                            })
                             return
                           }
                           const layer = buildActiveLayer(projectId, row)
@@ -728,7 +781,11 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                             const layer = buildActiveLayer(projectId, row)
                             if (layer) removeLayer(layer.id)
                             window.sessionStorage.removeItem(`datasets:rows:${projectId}`)
-                            setDatasets((prev) => prev.filter((item) => item.id !== row.id))
+                            setDatasets((prev) => prev.filter((item) => (
+                              item.id !== row.id &&
+                              item.datasetId !== row.datasetId &&
+                              item.relPath !== row.relPath
+                            )))
                             invalidateProjectDataCache(projectId)
                           } catch {
                             // keep UI stable on failure
@@ -740,8 +797,13 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                       </button>
                     )}
                     {row.datasetId && ['DTM', 'DSM'].includes(row.type) ? (
-                      <button type="button" className="dsp-action" onClick={() => void onGenerateContours(row)}>
-                        🗺️ Generate Contours
+                      <button
+                        type="button"
+                        className="dsp-action"
+                        onClick={() => void onGenerateContours(row)}
+                        disabled={Boolean(generatingContours[row.datasetId])}
+                      >
+                        {generatingContours[row.datasetId] ? '⏳ Generating...' : '🗺️ Generate Contours'}
                       </button>
                     ) : null}
                     {isAdmin && row.datasetId ? (

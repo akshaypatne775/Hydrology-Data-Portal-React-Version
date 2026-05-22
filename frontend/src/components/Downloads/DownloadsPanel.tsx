@@ -62,7 +62,7 @@ export function DownloadsPanel({ projectId }: DownloadsPanelProps) {
             size: humanSize(file.size_bytes),
             format: file.type.toUpperCase(),
             category,
-            href: toSameOriginBackendUrl(file.file_url) || file.file_url,
+            href: toSameOriginBackendUrl(file.download_url) || toSameOriginBackendUrl(file.file_url) || file.file_url,
           }
         })
         setItems(mapped)

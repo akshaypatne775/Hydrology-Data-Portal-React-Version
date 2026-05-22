@@ -506,7 +506,7 @@ function MapPane({
         key={baseUrl}
         attribution="&copy; Esri"
         url={baseUrl}
-        maxZoom={24}
+        maxZoom={30}
         maxNativeZoom={19}
         updateWhenIdle
         updateWhenZooming={false}
@@ -633,7 +633,7 @@ function OrthomosaicTileLayerWithOptions({
       if (cancelled) return
       const zoomMax = Number(meta?.zoom_max)
       if (Number.isFinite(zoomMax) && zoomMax >= 0) {
-        setNativeZoom(Math.max(0, Math.min(24, Math.round(zoomMax))))
+        setNativeZoom(Math.max(0, Math.min(22, Math.round(zoomMax))))
       } else {
         setNativeZoom(22)
       }
@@ -654,7 +654,7 @@ function OrthomosaicTileLayerWithOptions({
         key={`cog-${tileUrl}-${cropEnabled ? 'crop' : 'full'}`}
         url={tileUrl}
         opacity={0.9}
-        maxZoom={24}
+        maxZoom={30}
         maxNativeZoom={nativeZoom}
         bounds={bounds}
         noWrap

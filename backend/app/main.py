@@ -37,7 +37,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 import laspy
@@ -216,6 +216,21 @@ class ActivityTrackingMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class ProtectedDataPathMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path.replace("\\", "/").lower()
+        if path.startswith("/data/") and ("/raw/" in path or path.endswith(".pdf")):
+            # Raw assets and PDFs must be served through authenticated /api endpoints
+            # so project paths are not exposed in the browser.
+            try:
+                _require_user(request)
+            except HTTPException:
+                return Response(status_code=404)
+            return Response(status_code=404)
+        return await call_next(request)
+
+
+app.add_middleware(ProtectedDataPathMiddleware)
 app.add_middleware(ActivityTrackingMiddleware)
 app.add_middleware(Debug404Middleware)
 app.add_middleware(
@@ -1941,6 +1956,38 @@ def _upsert_processing_job(project_id: str, job: dict[str, str]) -> None:
     current = jobs.get(project_id, [])
     current = [item for item in current if item.get("job_id") != job.get("job_id")]
     current.insert(0, job)
+    jobs[project_id] = current[:200]
+    _write_processing_jobs(jobs)
+
+
+def _sync_dataset_metadata_to_processing_job(project_id: str, dataset_id: str, st: dict[str, str]) -> None:
+    jobs = _read_processing_jobs()
+    current = jobs.get(project_id, [])
+    matched = False
+    for item in current:
+        if item.get("job_id") != dataset_id:
+            continue
+        matched = True
+        item["file_name"] = str(st.get("dataset_name") or item.get("file_name") or dataset_id)
+        item["status"] = str(st.get("status") or item.get("status") or "Completed")
+        item["updated_at"] = str(st.get("updated_at") or _now_iso())
+        for key in ("height_offset", "dataset_type", "month", "raw_rel_path", "tiles_rel_path", "tileset_rel_path"):
+            if key in st:
+                item[key] = str(st.get(key) or "")
+        break
+    if not matched:
+        current.insert(
+            0,
+            {
+                "job_id": dataset_id,
+                "kind": str(st.get("dataset_type") or "dataset"),
+                "file_name": str(st.get("dataset_name") or dataset_id),
+                "status": str(st.get("status") or "Completed"),
+                "updated_at": str(st.get("updated_at") or _now_iso()),
+                "height_offset": str(st.get("height_offset") or ""),
+                "dataset_type": str(st.get("dataset_type") or ""),
+            },
+        )
     jobs[project_id] = current[:200]
     _write_processing_jobs(jobs)
 
@@ -4600,6 +4647,7 @@ def update_dataset_owner_metadata(
         st["height_offset"] = f"{float(payload.height_offset):.3f}".rstrip("0").rstrip(".")
     st["updated_at"] = _now_iso()
     _write_dataset_status(safe_project_id, safe_dataset_id, st)
+    _sync_dataset_metadata_to_processing_job(safe_project_id, safe_dataset_id, st)
     _invalidate_project_files_cache(safe_project_id)
     return {"status": "success"}
 
@@ -4634,6 +4682,7 @@ def admin_update_dataset_metadata(
         st["height_offset"] = f"{float(payload.height_offset):.3f}".rstrip("0").rstrip(".")
     st["updated_at"] = _now_iso()
     _write_dataset_status(safe_project_id, dataset_id, st)
+    _sync_dataset_metadata_to_processing_job(safe_project_id, dataset_id, st)
     _invalidate_project_files_cache(safe_project_id)
     return {"status": "success"}
 
@@ -4741,8 +4790,10 @@ def admin_update_dataset_metadata_by_name(
     payload: AdminDatasetPathMetaPayload,
     request: Request,
 ) -> dict[str, str]:
-    _require_admin(request)
+    user = _require_user(request)
     safe_project_id = _safe_project_id(project_id)
+    if str(user.get("role", "")).lower() != "admin":
+        _ensure_project_owner(int(user["id"]), safe_project_id)
     dataset_id, st = _admin_dataset_status_by_key(safe_project_id, dataset_name)
     if payload.name is not None and payload.name.strip():
         st["dataset_name"] = payload.name.strip()
@@ -4759,6 +4810,7 @@ def admin_update_dataset_metadata_by_name(
         st["height_offset"] = f"{float(payload.height_offset):.3f}".rstrip("0").rstrip(".")
     st["updated_at"] = _now_iso()
     _write_dataset_status(safe_project_id, dataset_id, st)
+    _sync_dataset_metadata_to_processing_job(safe_project_id, dataset_id, st)
     _invalidate_project_files_cache(safe_project_id)
     return {"status": "success", "dataset_id": dataset_id}
 
@@ -4991,6 +5043,79 @@ def _dataset_extra_response_fields(st: dict[str, str]) -> dict[str, str]:
     }
 
 
+def _ensure_project_file_access(request: Request, project_id: str) -> dict[str, str | int]:
+    user = _require_user(request)
+    if str(user.get("role", "")).lower() != "admin":
+        _ensure_project_owner(int(user["id"]), project_id)
+    return user
+
+
+def _secure_dataset_file(project_id: str, dataset_id: str, report_only: bool = False) -> tuple[Path, dict[str, str]]:
+    safe_dataset_id = _safe_dataset_id(dataset_id)
+    st = _read_dataset_status(project_id, safe_dataset_id)
+    if not st:
+        if report_only:
+            reports_dir = Path(LOCAL_DATA_PATH) / "reports" / project_id
+            if reports_dir.is_dir():
+                for report in reports_dir.rglob("*.pdf"):
+                    report_id = re.sub(r"[^A-Za-z0-9._-]+", "-", report.stem).strip("-")[:180]
+                    if report_id == safe_dataset_id:
+                        return report.resolve(), {"dataset_name": report.name, "dataset_type": "reports"}
+        raise HTTPException(status_code=404, detail="File not found")
+    rel = str(st.get("report_rel_path") or st.get("raw_rel_path") or "").strip()
+    if not rel:
+        raise HTTPException(status_code=404, detail="File not found")
+    if report_only and str(st.get("dataset_type") or "").lower() != "reports":
+        raise HTTPException(status_code=404, detail="Report not found")
+    if ".." in rel or rel.startswith("/") or rel.startswith("\\"):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    path = (Path(LOCAL_DATA_PATH) / rel).resolve()
+    local_root = Path(LOCAL_DATA_PATH).resolve()
+    if local_root not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    if report_only and path.suffix.lower() != ".pdf":
+        raise HTTPException(status_code=404, detail="Report not found")
+    return path, st
+
+
+@app.get("/api/projects/{project_id}/reports/{dataset_id}/view")
+def view_project_report(project_id: str, dataset_id: str, request: Request) -> FileResponse:
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_file_access(request, safe_project_id)
+    path, st = _secure_dataset_file(safe_project_id, dataset_id, report_only=True)
+    return FileResponse(
+        str(path),
+        media_type="application/pdf",
+        filename=str(st.get("dataset_name") or path.name),
+        content_disposition_type="inline",
+    )
+
+
+@app.get("/api/projects/{project_id}/reports/{dataset_id}/download")
+def download_project_report(project_id: str, dataset_id: str, request: Request) -> FileResponse:
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_file_access(request, safe_project_id)
+    path, st = _secure_dataset_file(safe_project_id, dataset_id, report_only=True)
+    return FileResponse(
+        str(path),
+        media_type="application/pdf",
+        filename=str(st.get("dataset_name") or path.name),
+        content_disposition_type="attachment",
+    )
+
+
+@app.get("/api/projects/{project_id}/datasets/{dataset_id}/raw/download")
+def download_project_dataset_raw(project_id: str, dataset_id: str, request: Request) -> FileResponse:
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_file_access(request, safe_project_id)
+    path, st = _secure_dataset_file(safe_project_id, dataset_id, report_only=False)
+    return FileResponse(
+        str(path),
+        filename=str(st.get("dataset_name") or path.name),
+        content_disposition_type="attachment",
+    )
+
+
 @app.get("/api/projects/{project_id}/files")
 def project_files(project_id: str, request: Request) -> dict[str, list[dict[str, str]]]:
     user = _require_user(request)
@@ -5038,6 +5163,16 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
             display_name = str(meta.get("dataset_name") or file_path.name.replace(f"{safe_project_id}__", "", 1))
             dataset_type = str(meta.get("dataset_type") or _infer_dataset_type(display_name))
             is_report = dataset_type == "reports" or file_path.suffix.lower() == ".pdf"
+            dataset_id_for_file = str(meta.get("dataset_id") or "")
+            if is_report and dataset_id_for_file:
+                file_url = f"{base_url}/api/projects/{safe_project_id}/reports/{dataset_id_for_file}/view"
+                download_url = f"{base_url}/api/projects/{safe_project_id}/reports/{dataset_id_for_file}/download"
+            elif dataset_id_for_file:
+                file_url = f"{base_url}/api/projects/{safe_project_id}/datasets/{dataset_id_for_file}/raw/download"
+                download_url = file_url
+            else:
+                file_url = f"{base_url}/data/{rel_path}"
+                download_url = file_url
             files.append(
                 {
                     "name": display_name,
@@ -5046,11 +5181,12 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "size_bytes": str(file_path.stat().st_size),
                     "status": str(meta.get("status") or jobs_by_file.get(display_name, {}).get("status", "Raw")),
                     "updated_at": str(meta.get("updated_at") or ""),
-                    "file_url": f"{base_url}/data/{rel_path}",
+                    "file_url": file_url,
+                    "download_url": download_url,
                     "layer_url": "",
                     "file_path": str(file_path.resolve()),
                     "rel_path": rel_path,
-                    "dataset_id": str(meta.get("dataset_id") or ""),
+                    "dataset_id": dataset_id_for_file,
                     "dataset_type": dataset_type,
                     "month": str(meta.get("month") or ""),
                     "raw_rel_path": rel_path,
@@ -5369,6 +5505,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
     if reports_dir.is_dir():
         for report in sorted(reports_dir.rglob("*.pdf"), key=lambda p: p.name.lower()):
             rel = report.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            report_id = re.sub(r"[^A-Za-z0-9._-]+", "-", report.stem).strip("-")[:180] or "report"
             files.append(
                 {
                     "name": report.name,
@@ -5376,10 +5513,12 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "type": "pdf",
                     "size_bytes": str(report.stat().st_size),
                     "status": "Completed",
-                    "file_url": f"{base_url}/data/{rel}",
+                    "file_url": f"{base_url}/api/projects/{safe_project_id}/reports/{report_id}/view",
+                    "download_url": f"{base_url}/api/projects/{safe_project_id}/reports/{report_id}/download",
                     "layer_url": "",
                     "file_path": str(report.resolve()),
                     "rel_path": rel,
+                    "dataset_id": report_id,
                 },
             )
             listed_rel_paths.add(rel)

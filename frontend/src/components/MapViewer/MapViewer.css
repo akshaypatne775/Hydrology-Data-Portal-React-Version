@@ -482,6 +482,10 @@
   background: #ffffff;
 }
 
+.leaflet-container {
+  background: #ffffff !important;
+}
+
 .mv-leaflet .leaflet-control-zoom a {
   color: #0e3e49;
 }

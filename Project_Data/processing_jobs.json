@@ -59,10 +59,16 @@
     {
       "job_id": "Aditya-Aluminium-38f6f8c0ff02",
       "kind": "dataset",
-      "file_name": "Aditya Aluminium.zip",
-      "status": "Completed",
-      "updated_at": "2026-05-20T13:00:12.238661+00:00",
-      "result_url": "/data/projects/proj_af421b0b468cbce1/processed/3dmodel/Aditya-Aluminium-0bcf284f/Scene/tileset.json"
+      "file_name": "Aditya Aluminium",
+      "status": "Web-Ready",
+      "updated_at": "2026-05-22T12:19:08.910244+00:00",
+      "result_url": "/data/projects/proj_af421b0b468cbce1/processed/3dmodel/Aditya-Aluminium-0bcf284f/Scene/tileset.json",
+      "height_offset": "-189",
+      "dataset_type": "3dmodel",
+      "month": "2026-05",
+      "raw_rel_path": "projects/proj_af421b0b468cbce1/raw/3dmodel/Aditya-Aluminium-0bcf284f.zip",
+      "tiles_rel_path": "projects/proj_af421b0b468cbce1/processed/3dmodel/Aditya-Aluminium-0bcf284f/Scene",
+      "tileset_rel_path": "projects/proj_af421b0b468cbce1/processed/3dmodel/Aditya-Aluminium-0bcf284f/Scene/tileset.json"
     }
   ]
 }

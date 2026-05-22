@@ -77,7 +77,7 @@ function resolveLayerDatasetId(layer?: { datasetId?: unknown; id?: unknown } | n
   if (direct) return direct
   const rawId = String(layer?.id || '').trim()
   if (!rawId) return ''
-  const cleaned = rawId.replace(/^active:/i, '')
+  const cleaned = rawId.replace(/^model:/i, '').replace(/^active:/i, '')
   const parts = cleaned.split(':').map((part) => part.trim()).filter(Boolean)
   return parts.at(-1) || cleaned
 }
@@ -742,16 +742,13 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
         maximumCacheOverflowBytes: MODEL_TILE_CACHE_OVERFLOW_BYTES,
         skipLevelOfDetail: false,
         dynamicScreenSpaceError: false,
-        foveatedScreenSpaceError: false,
         progressiveResolutionHeightFraction: 0,
         cullRequestsWhileMoving: false,
         preferLeaves: true,
-        preloadFlightDestinations: true,
         backFaceCulling: false,
       })
       tileset.maximumScreenSpaceError = MODEL_SCREEN_SPACE_ERROR
       tileset.dynamicScreenSpaceError = false
-      tileset.foveatedScreenSpaceError = false
       const cartographic = Cesium.Cartographic.fromCartesian(tileset.boundingSphere.center)
       const entry: ModelTilesetEntry = {
         tileset,

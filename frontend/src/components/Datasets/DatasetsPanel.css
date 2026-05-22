@@ -409,7 +409,8 @@
   gap: 0.5rem;
 }
 
-.dsp-report-modal__actions button {
+.dsp-report-modal__actions button,
+.dsp-report-modal__actions a {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -423,10 +424,11 @@
   font-family: 'Montserrat', sans-serif;
   font-size: 0.75rem;
   font-weight: 800;
+  text-decoration: none;
   cursor: pointer;
 }
 
-.dsp-report-modal iframe {
+.dsp-report-modal object {
   width: 100%;
   height: 100%;
   border: 0;

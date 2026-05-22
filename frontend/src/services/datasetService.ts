@@ -49,6 +49,7 @@ export type ProjectFile = {
   status: string
   updated_at?: string
   file_url: string
+  download_url?: string
   layer_url: string
   file_path: string
   rel_path: string
