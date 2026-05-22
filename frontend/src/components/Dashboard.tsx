@@ -385,9 +385,6 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
 
       <div className="ds-main">
         <header className="ds-topbar">
-          <div className="ds-topbar__brand-logo-wrap">
-            <img src={DROID_CLOUD_LOGO_URL} alt="Droid Cloud" className="ds-topbar__brand-logo" />
-          </div>
           <div className="ds-topbar__project">
             <span className="ds-topbar__label">Project</span>
             <h1 className="ds-topbar__name">
@@ -575,9 +572,9 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
               <div className="ds-map-toolbar">
                 <h2 className="ds-map-toolbar__title">
                   {routedViewerId === 'map'
-                    ? 'WORKSPACE - 2D/3D VIEWER'
+                    ? 'WORKSPACE - 2D VIEWER'
                     : routedViewerId === 'globe'
-                      ? 'WORKSPACE - 2D/3D VIEWER'
+                      ? 'WORKSPACE - 3D VIEWER'
                     : activeId === 'datasets'
                       ? 'Data Catalog'
                     : activeId === 'compare'
