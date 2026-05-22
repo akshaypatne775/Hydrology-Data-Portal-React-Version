@@ -19,8 +19,8 @@ import {
 } from '../../services/datasetService'
 import './DatasetsPanel.css'
 
-const ALLOWED_EXTENSIONS = new Set(['las', 'laz', 'tif', 'tiff', 'csv', 'zip', 'kml', 'geojson', 'dwg'])
-type DatasetType = 'Ortho' | 'DTM' | 'DSM' | 'Point Cloud' | '3D Model' | 'CSV' | 'Vector' | 'CAD'
+const ALLOWED_EXTENSIONS = new Set(['las', 'laz', 'tif', 'tiff', 'csv', 'zip', 'kml', 'geojson', 'dwg', 'pdf'])
+type DatasetType = 'Ortho' | 'DTM' | 'DSM' | 'Point Cloud' | '3D Model' | 'CSV' | 'Vector' | 'CAD' | 'Reports'
 type DatasetStatus = 'Raw' | 'Processing' | 'Web-Ready'
 
 type DatasetRow = {
@@ -33,7 +33,7 @@ type DatasetRow = {
   uploadDateRaw?: string
   filePath?: string
   relPath?: string
-  layerType?: 'cog' | 'Ortho' | 'DTM' | 'DSM' | 'pointcloud' | 'PointCloud' | '3DModel' | 'Vector' | 'CAD'
+  layerType?: 'cog' | 'Ortho' | 'DTM' | 'DSM' | 'pointcloud' | 'PointCloud' | '3DModel' | 'Vector' | 'CAD' | 'Reports'
   layerUrl?: string
   datasetId?: string
   month?: string
@@ -56,6 +56,7 @@ type UploadFormState = {
 function inferDatasetType(fileName: string): DatasetType {
   const lowered = fileName.toLowerCase()
   if (lowered.endsWith('.dwg')) return 'CAD'
+  if (lowered.endsWith('.pdf')) return 'Reports'
   if (lowered.endsWith('.kml') || lowered.endsWith('.geojson')) return 'Vector'
   if (lowered.includes('dtm') || lowered.includes('dem')) return 'DTM'
   if (lowered.includes('dsm')) return 'DSM'
@@ -75,6 +76,7 @@ function datasetTypeFromBackend(value?: string): DatasetType | undefined {
   if (normalized === 'pointcloud') return 'Point Cloud'
   if (normalized === 'vector') return 'Vector'
   if (normalized === 'cad') return 'CAD'
+  if (normalized === 'reports' || normalized === 'report' || normalized === 'pdf') return 'Reports'
   return undefined
 }
 
@@ -107,7 +109,9 @@ function displayProjectFileSize(file: ProjectFile): string {
 function mapProjectFile(file: ProjectFile): DatasetRow {
   const fileType = String(file.type).toLowerCase()
   const type = datasetTypeFromBackend(file.dataset_type) ||
+    (file.kind === 'Reports' || fileType === 'pdf' ? 'Reports' :
     (file.type === '3DModel' ? '3D Model' : fileType === 'vector' ? 'Vector' : fileType === 'cad' ? 'CAD' : inferDatasetType(file.name))
+    )
   const backendLayerType = String(file.layer_type || '')
   const layerType =
     ['Ortho', 'DTM', 'DSM'].includes(backendLayerType) ? backendLayerType as 'Ortho' | 'DTM' | 'DSM' :
@@ -116,9 +120,12 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
         file.type === '3DModel' ? '3DModel' :
           fileType === 'vector' ? 'Vector' :
             fileType === 'cad' ? 'CAD' :
+              type === 'Reports' ? 'Reports' :
           undefined
   const layerUrl =
-    layerType === '3DModel'
+    layerType === 'Reports'
+      ? toSameOriginBackendUrl(file.file_url)
+      : layerType === '3DModel'
       ? toSameOriginBackendUrl(file.layer_url) || `${API_BASE}/data/${file.rel_path.replace(/\/$/, '')}/tileset.json`
       : (file.layer_url || '').toLowerCase().endsWith('tileset.json')
         ? `${API_BASE}/data/${file.rel_path.replace(/\/tileset\.json$/i, '').replace(/\/$/, '')}/{z}/{x}/{y}.png`
@@ -151,6 +158,7 @@ function toBackendDatasetType(type: DatasetType): string {
   if (type === '3D Model') return '3dmodel'
   if (type === 'Vector') return 'vector'
   if (type === 'CAD') return 'cad'
+  if (type === 'Reports') return 'reports'
   return 'pointcloud'
 }
 
@@ -160,6 +168,7 @@ function isTwoDLayer(layerType?: DatasetRow['layerType']): boolean {
 
 function buildActiveLayer(projectId: string, row: DatasetRow) {
   if (!row.layerType || !row.layerUrl) return null
+  if (row.layerType === 'Reports') return null
   return {
     id: `${projectId}:${row.datasetId || row.fileName}`,
     projectId,
@@ -188,6 +197,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   const [syncingManual, setSyncingManual] = useState(false)
   const [openingManualFolder, setOpeningManualFolder] = useState(false)
   const [detectingEpsg, setDetectingEpsg] = useState(false)
+  const [reportViewer, setReportViewer] = useState<{ name: string; url: string } | null>(null)
   const [uploadForm, setUploadForm] = useState<UploadFormState>({
     name: '',
     type: 'Point Cloud',
@@ -201,7 +211,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     try {
       const [jobs, files] = await Promise.all([getProjectJobs(currentProjectId), getProjectFiles(currentProjectId)])
       if (cancelledRef()) return
-      const fileRows = files.filter((file) => file.kind !== 'Reports').map(mapProjectFile)
+      const fileRows = files.filter((file) => file.kind !== 'Raw Survey Data').map(mapProjectFile)
       const fileDatasetIds = new Set(fileRows.map((row) => row.datasetId).filter(Boolean))
       const jobRows: DatasetRow[] = jobs
         .filter((job: ProjectJob) => !fileDatasetIds.has(job.job_id))
@@ -315,7 +325,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       type: selectedFile.type,
       lastModified: selectedFile.lastModified,
     })
-    if (['tif', 'tiff', 'csv', 'zip', 'kml', 'geojson', 'dwg'].includes(ext.toLowerCase())) {
+    if (['tif', 'tiff', 'csv', 'zip', 'kml', 'geojson', 'dwg', 'pdf'].includes(ext.toLowerCase())) {
       await startDatasetUpload(renamed, projectId, {
         datasetType: toBackendDatasetType(uploadForm.type),
         month: uploadForm.date.slice(0, 7),
@@ -333,12 +343,13 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     if (row.layerType === '3DModel') return 'Show 3D Model'
     if (row.layerType === 'Vector') return 'Show Vector'
     if (row.layerType === 'CAD') return 'CAD Asset'
+    if (row.layerType === 'Reports') return 'View Report'
     return 'Delete'
   }, [])
 
   const onGenerateContours = useCallback(async (row: DatasetRow) => {
     if (!projectId || !row.datasetId) return
-    const raw = await modal.prompt('Generate contours', 'Contour interval in meters', '5')
+    const raw = await modal.prompt('Generate contours', 'Contour interval in meters', '2')
     if (!raw) return
     const interval = Number(raw)
     if (!Number.isFinite(interval) || interval <= 0) {
@@ -348,11 +359,14 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     try {
       await generateContours(projectId, { dataset_id: row.datasetId, interval })
       invalidateProjectDataCache(projectId)
+      const cacheKey = `datasets:rows:${projectId}`
+      setLoadingRows(true)
+      await loadRows(projectId, cacheKey, () => false)
       await modal.alert('Contours started', 'Contour generation started. The Vector layer will appear when ready.')
     } catch (error) {
       await modal.alert('Contour generation failed', error instanceof Error ? error.message : 'Contour generation failed')
     }
-  }, [modal, projectId])
+  }, [loadRows, modal, projectId])
 
   const onAdminEditMetadata = useCallback(async (row: DatasetRow) => {
     if (!projectId || !row.datasetId) return
@@ -420,7 +434,12 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       invalidateProjectDataCache(projectId)
       const layer = buildActiveLayer(projectId, row)
       if (layer) removeLayer(layer.id)
-      setDatasets((prev) => prev.filter((item) => item.id !== row.id))
+      window.sessionStorage.removeItem(`datasets:rows:${projectId}`)
+      setDatasets((prev) => prev.filter((item) => (
+        item.id !== row.id &&
+        item.datasetId !== row.datasetId &&
+        item.relPath !== row.relPath
+      )))
     } catch (error) {
       await modal.alert('Admin force delete failed', error instanceof Error ? error.message : 'Admin force delete failed')
     }
@@ -475,6 +494,18 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   }, [detectingEpsg, modal, projectId, selectedFile])
 
   return (
+    <>
+    {reportViewer ? (
+      <div className="dsp-report-modal" role="dialog" aria-modal="true" aria-label={`Report preview ${reportViewer.name}`}>
+        <div className="dsp-report-modal__bar">
+          <strong>{reportViewer.name}</strong>
+          <button type="button" className="dsp-action" onClick={() => setReportViewer(null)}>
+            Close
+          </button>
+        </div>
+        <iframe title={reportViewer.name} src={reportViewer.url} />
+      </div>
+    ) : null}
     <section className="dsp-root">
       <header className="dsp-head">
         <div>
@@ -521,19 +552,19 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         }}
         role="button"
         tabIndex={0}
-        aria-label="Drop LAS, LAZ, or TIF dataset file"
+        aria-label="Drop survey, GIS, model, or report file"
       >
         <input
           ref={fileInputRef}
           type="file"
-          accept=".las,.laz,.tif,.tiff,.csv,.zip,.kml,.geojson,.dwg"
+          accept=".las,.laz,.tif,.tiff,.csv,.zip,.kml,.geojson,.dwg,.pdf"
           className="gv-file-input"
           onChange={(event) => {
             const file = event.target.files?.[0]
             if (file) void prepareFile(file)
           }}
         />
-        <p className="dsp-dropzone__title">Drop or Select .las, .laz, .tif, .csv, .zip, .kml, .geojson, .dwg files</p>
+        <p className="dsp-dropzone__title">Drop or Select .las, .laz, .tif, .csv, .zip, .kml, .geojson, .dwg, .pdf files</p>
         <p className="dsp-dropzone__meta">After select, fill details and start upload</p>
       </div>
 
@@ -560,6 +591,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
               <option value="Point Cloud">Point Cloud</option>
               <option value="Vector">Vector</option>
               <option value="CAD">CAD</option>
+              <option value="Reports">Reports</option>
             </select>
           </label>
           <label>
@@ -656,6 +688,10 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                         className="dsp-action"
                         onClick={() => {
                           if (!projectId || !row.layerType || !row.layerUrl) return
+                          if (row.layerType === 'Reports') {
+                            setReportViewer({ name: row.fileName, url: row.layerUrl })
+                            return
+                          }
                           const layer = buildActiveLayer(projectId, row)
                           if (!layer) return
                           toggleLayer(layer)
@@ -680,6 +716,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                             await deleteProjectFile(projectId, row.relPath)
                             const layer = buildActiveLayer(projectId, row)
                             if (layer) removeLayer(layer.id)
+                            window.sessionStorage.removeItem(`datasets:rows:${projectId}`)
                             setDatasets((prev) => prev.filter((item) => item.id !== row.id))
                             invalidateProjectDataCache(projectId)
                           } catch {
@@ -693,7 +730,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                     )}
                     {row.datasetId && ['DTM', 'DSM'].includes(row.type) ? (
                       <button type="button" className="dsp-action" onClick={() => void onGenerateContours(row)}>
-                        Contours
+                        🗺️ Generate Contours
                       </button>
                     ) : null}
                     {isAdmin && row.datasetId ? (
@@ -722,6 +759,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         </table>
       </div>
     </section>
+    </>
   )
 }
 

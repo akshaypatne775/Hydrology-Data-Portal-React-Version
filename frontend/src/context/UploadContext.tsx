@@ -167,6 +167,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
       try {
         const lowerFileName = file.name.toLowerCase()
         const isCsv = lowerFileName.endsWith('.csv')
+        const isPdf = lowerFileName.endsWith('.pdf')
         const isZip = lowerFileName.endsWith('.zip')
         const is3DModel = (metadata?.datasetType || '').toLowerCase() === '3dmodel'
         const form = new FormData()
@@ -179,17 +180,20 @@ export function UploadProvider({ children }: PropsWithChildren) {
           datasetId: created.dataset_id,
           progressPercent: 45,
           state: 'processing',
-          statusText: isCsv
+          statusText: isPdf
+            ? `Preparing ${file.name} report...`
+            : isCsv
             ? `Preparing ${file.name} for compare...`
             : isZip && is3DModel
               ? `Extracting ${file.name} as 3D model...`
               : `Converting ${file.name} to COG...`,
         })
-        if (isCsv) {
+        if (isCsv || isPdf) {
           upsertTask(id, {
             state: 'success',
             progressPercent: 100,
-            statusText: `${file.name} is ready for comparison.`,
+            statusText: isPdf ? `${file.name} report is ready.` : `${file.name} is ready for comparison.`,
+            resultUrl: created.cog_tile_url_template,
           })
           return
         }

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { getProjectFiles, type ProjectFile } from '../../services/datasetService'
+import { toSameOriginBackendUrl } from '../../lib/apiBase'
 import './DownloadsPanel.css'
 
 type DownloadCategory = 'Raw Survey Data' | 'Web-Optimized Data' | 'Reports'
@@ -56,12 +57,12 @@ export function DownloadsPanel({ projectId }: DownloadsPanelProps) {
                 ? 'Web-Optimized Data'
                 : 'Raw Survey Data'
           return {
-            id: `${file.name}-${file.type}`,
+            id: `${file.rel_path || file.name}-${file.type}`,
             name: file.name,
             size: humanSize(file.size_bytes),
             format: file.type.toUpperCase(),
             category,
-            href: file.file_url,
+            href: toSameOriginBackendUrl(file.file_url) || file.file_url,
           }
         })
         setItems(mapped)
@@ -99,14 +100,14 @@ export function DownloadsPanel({ projectId }: DownloadsPanelProps) {
                         <span>{item.size}</span>
                       </p>
                     </div>
-                    <button
-                      type="button"
+                    <a
                       className="dlp-download"
-                      onClick={() => window.open(item.href, '_blank', 'noopener,noreferrer')}
+                      href={item.href}
+                      download={item.name}
                     >
                       <i className="fa-solid fa-download" aria-hidden />
                       Download
-                    </button>
+                    </a>
                   </li>
                 ))}
             </ul>

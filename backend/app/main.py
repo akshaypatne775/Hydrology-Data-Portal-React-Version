@@ -452,8 +452,8 @@ def _safe_dataset_upload_basename(filename: str) -> str:
     if "/" in base or "\\" in base or ".." in base:
         raise HTTPException(status_code=400, detail="Invalid filename")
     suffix = Path(base).suffix.lower()
-    if suffix not in (".tif", ".tiff", ".las", ".laz", ".csv", ".zip", ".kml", ".geojson", ".dwg"):
-        raise HTTPException(status_code=400, detail="Only .tif/.tiff/.las/.laz/.csv/.zip/.kml/.geojson/.dwg files are supported")
+    if suffix not in (".tif", ".tiff", ".las", ".laz", ".csv", ".zip", ".kml", ".geojson", ".dwg", ".pdf"):
+        raise HTTPException(status_code=400, detail="Only .tif/.tiff/.las/.laz/.csv/.zip/.kml/.geojson/.dwg/.pdf files are supported")
     return base
 
 
@@ -474,6 +474,8 @@ def _infer_dataset_type(name: str) -> str:
         return "vector"
     if suffix == ".dwg":
         return "cad"
+    if suffix == ".pdf":
+        return "reports"
     if suffix in (".tif", ".tiff"):
         return "ortho"
     if suffix in (".las", ".laz"):
@@ -512,6 +514,9 @@ def _normalize_dataset_type(value: str, fallback_name: str = "") -> str:
         "geojson": "vector",
         "cad": "cad",
         "dwg": "cad",
+        "pdf": "reports",
+        "report": "reports",
+        "reports": "reports",
     }
     return aliases.get(normalized) or _infer_dataset_type(fallback_name)
 
@@ -3469,8 +3474,8 @@ async def process_dataset(
     _ensure_project_owner(int(user["id"]), safe_project_id)
     safe_name = _safe_dataset_upload_basename(file.filename or "")
     ext = Path(safe_name).suffix.lower()
-    if ext not in (".tif", ".tiff", ".csv", ".zip", ".kml", ".geojson", ".dwg"):
-        raise HTTPException(status_code=400, detail="Only .tif/.tiff/.csv/.zip/.kml/.geojson/.dwg dataset files are supported")
+    if ext not in (".tif", ".tiff", ".csv", ".zip", ".kml", ".geojson", ".dwg", ".pdf"):
+        raise HTTPException(status_code=400, detail="Only .tif/.tiff/.csv/.zip/.kml/.geojson/.dwg/.pdf dataset files are supported")
     normalized_type = _normalize_dataset_type(dataset_type, safe_name)
     if ext in (".tif", ".tiff") and normalized_type == "3dmodel":
         normalized_type = _infer_dataset_type(safe_name)
@@ -3501,7 +3506,7 @@ async def process_dataset(
     _ensure_disk_space_for_bytes(raw_dir, max(expected_bytes * 2, 512 * 1024 * 1024))
 
     output_tile_dir = processed_dir / tile_output_folder
-    if ext != ".csv":
+    if ext not in (".csv", ".pdf"):
         output_tile_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -3513,6 +3518,47 @@ async def process_dataset(
         await file.close()
 
     raw_rel = input_path.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+    if ext == ".pdf":
+        _write_dataset_status(
+            safe_project_id,
+            dataset_id,
+            {
+                "status": "WEB-READY",
+                "updated_at": _now_iso(),
+                "dataset_id": dataset_id,
+                "dataset_name": safe_name,
+                "tile_folder": "",
+                "dataset_type": "reports",
+                "layer_type": "Reports",
+                "month": normalized_month,
+                "raw_rel_path": raw_rel,
+                "report_rel_path": raw_rel,
+                "processed_size_bytes": str(input_path.stat().st_size),
+                "processed_size": _format_size_bytes(input_path.stat().st_size),
+            },
+        )
+        _upsert_processing_job(
+            safe_project_id,
+            {
+                "job_id": dataset_id,
+                "kind": "report",
+                "file_name": safe_name,
+                "status": "Completed",
+                "updated_at": _now_iso(),
+                "result_url": f"/data/{raw_rel}",
+            },
+        )
+        _invalidate_project_files_cache(safe_project_id)
+        return ProcessDatasetOut(
+            status="success",
+            message="PDF report uploaded and ready.",
+            project_id=safe_project_id,
+            dataset_id=dataset_id,
+            dataset_name=safe_name,
+            cog_path="",
+            cog_tile_url_template=f"{str(request.base_url).rstrip('/')}/data/{raw_rel}",
+        )
+
     if ext in (".kml", ".geojson", ".dwg"):
         asset_type = "cad" if ext == ".dwg" else "vector"
         asset_root = processed_dir / tile_output_folder
@@ -4964,35 +5010,55 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
     listed_rel_paths: set[str] = set()
 
     raw_dir_proj, processed_root = get_project_dirs(safe_project_id)
+    jobs_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "_dataset_jobs"
+    raw_meta_by_rel: dict[str, dict[str, str]] = {}
+    if jobs_root.is_dir():
+        for job_dir in sorted([p for p in jobs_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
+            st = _read_dataset_status(safe_project_id, job_dir.name)
+            if not st:
+                continue
+            raw_rel = str(st.get("raw_rel_path") or "").strip()
+            if raw_rel:
+                raw_meta_by_rel[raw_rel] = st
     legacy_raw = Path(LOCAL_DATA_PATH) / "raw_uploads"
+    raw_suffixes = {".tif", ".tiff", ".las", ".laz", ".zip", ".pdf"}
     for raw_dir in (raw_dir_proj, legacy_raw):
         if not raw_dir.is_dir():
             continue
-        for file_path in sorted(raw_dir.glob(f"{safe_project_id}__*"), key=lambda p: p.name.lower()):
+        raw_candidates = raw_dir.rglob("*") if raw_dir == raw_dir_proj else raw_dir.glob(f"{safe_project_id}__*")
+        for file_path in sorted(raw_candidates, key=lambda p: p.name.lower()):
             if not file_path.is_file():
                 continue
-            display_name = file_path.name.replace(f"{safe_project_id}__", "", 1)
+            if file_path.suffix.lower() not in raw_suffixes:
+                continue
             rel_path = file_path.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            if rel_path in listed_rel_paths:
+                continue
+            meta = raw_meta_by_rel.get(rel_path, {})
+            display_name = str(meta.get("dataset_name") or file_path.name.replace(f"{safe_project_id}__", "", 1))
+            dataset_type = str(meta.get("dataset_type") or _infer_dataset_type(display_name))
+            is_report = dataset_type == "reports" or file_path.suffix.lower() == ".pdf"
             files.append(
                 {
                     "name": display_name,
-                    "kind": "Raw Survey Data",
-                    "type": file_path.suffix.lower().lstrip(".") or "file",
+                    "kind": "Reports" if is_report else "Raw Survey Data",
+                    "type": "pdf" if is_report else file_path.suffix.lower().lstrip(".") or "file",
                     "size_bytes": str(file_path.stat().st_size),
-                    "status": jobs_by_file.get(display_name, {}).get("status", "Raw"),
+                    "status": str(meta.get("status") or jobs_by_file.get(display_name, {}).get("status", "Raw")),
+                    "updated_at": str(meta.get("updated_at") or ""),
                     "file_url": f"{base_url}/data/{rel_path}",
                     "layer_url": "",
                     "file_path": str(file_path.resolve()),
                     "rel_path": rel_path,
-                    "dataset_id": "",
-                    "dataset_type": _infer_dataset_type(display_name),
-                    "month": "",
+                    "dataset_id": str(meta.get("dataset_id") or ""),
+                    "dataset_type": dataset_type,
+                    "month": str(meta.get("month") or ""),
                     "raw_rel_path": rel_path,
+                    **_dataset_extra_response_fields(meta),
                 },
             )
             listed_rel_paths.add(rel_path)
 
-    jobs_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "_dataset_jobs"
     if jobs_root.is_dir():
         for job_dir in sorted([p for p in jobs_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
             st = _read_dataset_status(safe_project_id, job_dir.name)

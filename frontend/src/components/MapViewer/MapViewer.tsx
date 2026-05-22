@@ -375,80 +375,79 @@ function MapController({
     const fitKey = rawPath ?? (isStaticXyzTileTemplate(tileUrl) ? tileUrl : null)
     if (!fitKey) return
 
+    let cancelled = false
+    let didFit = false
+    type FitBounds = [[number, number], [number, number]]
+    const fitNow = (bounds: FitBounds | null) => {
+      if (!bounds || cancelled || didFit) return
+      didFit = true
+      map.fitBounds(bounds, { padding: [24, 24] })
+    }
+    const wgs84Bounds = (bounds?: [number, number, number, number] | null): FitBounds | null => {
+      if (!bounds) return null
+      const [minX, minY, maxX, maxY] = bounds
+      return [
+        [minY, minX],
+        [maxY, maxX],
+      ]
+    }
+
     if (rawPath) {
       void fetch(`${API_BASE}/api/cog/info?url=${encodeURIComponent(rawPath)}`, {
         credentials: 'include',
       })
         .then((res) => res.json() as Promise<{ bounds?: [number, number, number, number] }>)
-        .then((data) => {
-          if (data?.bounds) {
-            const [minX, minY, maxX, maxY] = data.bounds
-            map.fitBounds(
-              [
-                [minY, minX],
-                [maxY, maxX],
-              ],
-              { padding: [24, 24] },
-            )
-          }
-        })
+        .then((data) => fitNow(wgs84Bounds(data?.bounds)))
         .catch(() => {
           // Ignore auto-zoom failure and keep the map usable.
         })
-      return
+      return () => {
+        cancelled = true
+      }
     }
 
     const base = tileTemplateToStaticBase(tileUrl)
     if (!base) return
 
-    void (async () => {
-      try {
-        const datasetName = activeCog.name.replace(/\.tiff?$/i, '')
-        const boundsUrl = `${API_BASE}/api/datasets/${encodeURIComponent(projectId)}/${encodeURIComponent(datasetName)}/bounds`
-        const boundsRes = await fetch(boundsUrl, { credentials: 'include' })
-        if (boundsRes.ok) {
-          const data = (await boundsRes.json()) as { bounds?: [number, number, number, number] | null }
-          if (data?.bounds) {
-            const [minX, minY, maxX, maxY] = data.bounds
-            map.fitBounds(
-              [
-                [minY, minX],
-                [maxY, maxX],
-              ],
-              { padding: [24, 24] },
-            )
-            return
-          }
-        }
-        const meta = await fetchStaticTileMeta(tileUrl)
+    const datasetName = activeCog.name.replace(/\.tiff?$/i, '')
+    const boundsUrl = `${API_BASE}/api/datasets/${encodeURIComponent(projectId)}/${encodeURIComponent(datasetName)}/bounds`
+    const backendBounds = fetch(boundsUrl, { credentials: 'include' })
+      .then((res) => (res.ok ? res.json() as Promise<{ bounds?: [number, number, number, number] | null }> : null))
+      .then((data) => wgs84Bounds(data?.bounds))
+      .catch(() => null)
+    const tilesetBounds = fetchStaticTileMeta(tileUrl)
+      .then((meta) => {
         if (meta?.bounds_wgs84 && meta.bounds_wgs84.length === 4) {
           const [west, south, east, north] = meta.bounds_wgs84
-          map.fitBounds(
-            [
-              [south, west],
-              [north, east],
-            ],
-            { padding: [24, 24] },
-          )
-          return
+          return [
+            [south, west],
+            [north, east],
+          ] as FitBounds
         }
-        const kmlRes = await fetch(`${base}doc.kml`, { credentials: 'include' })
-        if (kmlRes.ok) {
-          const b = parseKmlLatLonBounds(await kmlRes.text())
-          if (b) {
-            map.fitBounds(b, { padding: [24, 24] })
-            return
-          }
-        }
-        const tmrRes = await fetch(`${base}tilemapresource.xml`, { credentials: 'include' })
-        if (tmrRes.ok) {
-          const b = parseTileMapResourceBounds(await tmrRes.text())
-          if (b) map.fitBounds(b, { padding: [24, 24] })
-        }
-      } catch {
-        // Ignore auto-zoom failure and keep the map usable.
-        }
-      })()
+        return null
+      })
+      .catch(() => null)
+    const kmlBounds = fetch(`${base}doc.kml`, { credentials: 'include' })
+      .then(async (res) => (res.ok ? parseKmlLatLonBounds(await res.text()) : null))
+      .catch(() => null)
+    const tileMapResourceBounds = fetch(`${base}tilemapresource.xml`, { credentials: 'include' })
+      .then(async (res) => (res.ok ? parseTileMapResourceBounds(await res.text()) : null))
+      .catch(() => null)
+
+    void backendBounds.then(fitNow)
+    void Promise.any(
+      [tilesetBounds, kmlBounds, tileMapResourceBounds].map((promise) => (
+        promise.then((bounds) => (bounds ? bounds : Promise.reject(new Error('No bounds'))))
+      )),
+    )
+      .then(fitNow)
+      .catch(() => {
+        // Ignore auto-zoom fallback failure and keep the map usable.
+      })
+
+    return () => {
+      cancelled = true
+    }
   }, [layers, map, projectId, selectedUrl, zoomTrigger])
 
   return null
@@ -507,8 +506,8 @@ function MapPane({
         key={baseUrl}
         attribution="&copy; Esri"
         url={baseUrl}
-        maxZoom={22}
-        maxNativeZoom={20}
+        maxZoom={24}
+        maxNativeZoom={19}
         updateWhenIdle
         updateWhenZooming={false}
         keepBuffer={1}
@@ -634,7 +633,7 @@ function OrthomosaicTileLayerWithOptions({
       if (cancelled) return
       const zoomMax = Number(meta?.zoom_max)
       if (Number.isFinite(zoomMax) && zoomMax >= 0) {
-        setNativeZoom(Math.max(0, Math.min(22, Math.round(zoomMax))))
+        setNativeZoom(Math.max(0, Math.min(24, Math.round(zoomMax))))
       } else {
         setNativeZoom(22)
       }
@@ -655,7 +654,7 @@ function OrthomosaicTileLayerWithOptions({
         key={`cog-${tileUrl}-${cropEnabled ? 'crop' : 'full'}`}
         url={tileUrl}
         opacity={0.9}
-        maxZoom={22}
+        maxZoom={24}
         maxNativeZoom={nativeZoom}
         bounds={bounds}
         noWrap
