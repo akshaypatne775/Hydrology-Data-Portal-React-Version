@@ -7,6 +7,7 @@ import {
   type PropsWithChildren,
 } from 'react'
 import { API_BASE, formatApiNetworkError } from '../lib/apiBase'
+import { ApiError } from '../services/api'
 import { getDatasetStatus, processDatasetTif } from '../services/datasetService'
 import { completeUpload, getPointCloudStatus, uploadChunk } from '../services/pointCloudService'
 import { saveWebReadyCogLayer } from '../utils/datasetLayerStorage'
@@ -23,6 +24,9 @@ export type UploadTask = {
   progressPercent: number
   statusText: string
   state: 'uploading' | 'processing' | 'success' | 'error'
+  stage?: string
+  etaText?: string
+  startedAt?: number
   resultUrl?: string
   datasetId?: string
 }
@@ -38,6 +42,21 @@ const UploadContext = createContext<UploadContextValue | null>(null)
 
 function taskId(kind: UploadTask['kind'], projectId: string, fileName: string): string {
   return `${kind}:${projectId}:${fileName}:${Date.now()}`
+}
+
+function formatEta(seconds?: string | number): string {
+  const n = Number(seconds)
+  if (!Number.isFinite(n) || n <= 0) return 'Almost done'
+  if (n < 60) return `${Math.max(1, Math.round(n))} sec left`
+  const minutes = Math.ceil(n / 60)
+  return `${minutes} min left`
+}
+
+function estimateEtaFromProgress(startedAt: number | undefined, progressPercent: number): string {
+  if (!startedAt || progressPercent <= 5 || progressPercent >= 99) return ''
+  const elapsed = (Date.now() - startedAt) / 1000
+  const remaining = Math.max(0, (elapsed / progressPercent) * (100 - progressPercent))
+  return formatEta(remaining)
 }
 
 export function UploadProvider({ children }: PropsWithChildren) {
@@ -66,6 +85,8 @@ export function UploadProvider({ children }: PropsWithChildren) {
         progressPercent: 0,
         statusText: `Uploading ${file.name}...`,
         state: 'uploading',
+        stage: 'Uploading file',
+        startedAt: Date.now(),
       })
 
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE_BYTES)
@@ -162,6 +183,9 @@ export function UploadProvider({ children }: PropsWithChildren) {
         progressPercent: 10,
         statusText: `Uploading ${file.name}...`,
         state: 'uploading',
+        stage: 'Uploading file',
+        etaText: file.size > 0 ? 'Estimating...' : '',
+        startedAt: Date.now(),
       })
 
       try {
@@ -180,6 +204,14 @@ export function UploadProvider({ children }: PropsWithChildren) {
           datasetId: created.dataset_id,
           progressPercent: 45,
           state: 'processing',
+          stage: isPdf
+            ? 'Preparing report'
+            : isCsv
+            ? 'Preparing comparison data'
+            : isZip && is3DModel
+              ? 'Extracting 3D tiles'
+              : 'Starting raster tiler',
+          etaText: 'Estimating...',
           statusText: isPdf
             ? `Preparing ${file.name} report...`
             : isCsv
@@ -200,7 +232,29 @@ export function UploadProvider({ children }: PropsWithChildren) {
 
         const start = Date.now()
         while (Date.now() - start < 2 * 60 * 60 * 1000) {
-          const status = await getDatasetStatus(projectId, created.dataset_id)
+          let status
+          try {
+            status = await getDatasetStatus(projectId, created.dataset_id)
+          } catch (error) {
+            if (error instanceof ApiError && error.status === 404) {
+              const elapsedProgress = Math.min(55, 45 + Math.floor((Date.now() - start) / 3000))
+              upsertTask(id, {
+                state: 'processing',
+                progressPercent: elapsedProgress,
+                stage: 'Waiting for processor',
+                etaText: 'Estimating...',
+                statusText: `Waiting for processor - ${file.name}`,
+              })
+              await new Promise((resolve) => window.setTimeout(resolve, 1500))
+              continue
+            }
+            throw error
+          }
+          const serverProgress = Number(status.progress_percent)
+          const nextProgress = Number.isFinite(serverProgress)
+            ? Math.max(45, Math.min(99, serverProgress))
+            : Math.min(95, 60 + Math.floor((Date.now() - start) / 4000))
+          const stage = status.stage || (isZip && is3DModel ? 'Extracting 3D tiles' : 'Converting raster tiles')
           if (status.status === 'Web-Ready') {
             if (!(isZip && is3DModel) && status.cog_tile_url_template) {
               saveWebReadyCogLayer(projectId, created.dataset_id, file.name, status.cog_tile_url_template)
@@ -208,6 +262,8 @@ export function UploadProvider({ children }: PropsWithChildren) {
             upsertTask(id, {
               state: 'success',
               progressPercent: 100,
+              stage: 'Web-ready',
+              etaText: 'Done',
               statusText: isZip && is3DModel ? `${file.name} 3D model is ready.` : `${file.name} is Web-Ready.`,
               resultUrl: status.cog_tile_url_template,
             })
@@ -218,8 +274,12 @@ export function UploadProvider({ children }: PropsWithChildren) {
           }
           upsertTask(id, {
             state: 'processing',
-            progressPercent: 60,
-            statusText: isZip && is3DModel ? `Extracting ${file.name} as 3D model...` : `Converting ${file.name} to COG...`,
+            progressPercent: nextProgress,
+            stage,
+            etaText: status.eta_seconds !== undefined && status.eta_seconds !== ''
+              ? formatEta(status.eta_seconds)
+              : estimateEtaFromProgress(start, nextProgress),
+            statusText: `${stage} - ${file.name}`,
           })
           await new Promise((resolve) => window.setTimeout(resolve, 2000))
         }

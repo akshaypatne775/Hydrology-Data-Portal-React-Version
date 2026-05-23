@@ -28,6 +28,9 @@ type DatasetRow = {
   type: DatasetType
   size: string
   status: DatasetStatus
+  stage?: string
+  progressPercent?: number
+  etaText?: string
   uploadDate?: string
   uploadDateRaw?: string
   filePath?: string
@@ -92,6 +95,19 @@ function normalizeJobStatus(status: string): DatasetStatus {
   return status === 'Completed' ? 'Web-Ready' : 'Processing'
 }
 
+function normalizeProgressPercent(value?: string | number): number | undefined {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return undefined
+  return Math.max(0, Math.min(100, n))
+}
+
+function formatEtaLabel(value?: string | number): string | undefined {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return undefined
+  if (n < 60) return `${Math.max(1, Math.round(n))} sec left`
+  return `${Math.ceil(n / 60)} min left`
+}
+
 function formatSize(sizeBytes: string): string {
   const n = Number(sizeBytes)
   if (!Number.isFinite(n) || n <= 0) return '--'
@@ -101,43 +117,135 @@ function formatSize(sizeBytes: string): string {
   return `${mb.toFixed(0)} MB`
 }
 
+const GEOTIFF_PROBE_BYTES = 16 * 1024 * 1024
+
+function normalizeEpsgCode(value: number): string {
+  if (!Number.isFinite(value) || value <= 0 || value === 32767) return ''
+  return value >= 1000 && value <= 999999 ? `EPSG:${value}` : ''
+}
+
+function findEpsgInGeoText(text: string): string {
+  const projectedPatterns = [
+    /PROJ(?:CRS|CS)\s*\[[\s\S]{0,8000}(?:AUTHORITY|ID)\s*\[\s*["']EPSG["']\s*,\s*["']?(\d{4,6})["']?\s*\]/i,
+    /ProjectedCSTypeGeoKey[\s\S]{0,200}?(?:EPSG[:\s"']+)?(\d{4,6})/i,
+  ]
+  for (const pattern of projectedPatterns) {
+    const match = text.match(pattern)
+    if (match?.[1]) {
+      const epsg = normalizeEpsgCode(Number(match[1]))
+      if (epsg) return epsg
+    }
+  }
+
+  const patterns = [
+    /(?:AUTHORITY|ID)\s*\[\s*["']EPSG["']\s*,\s*["']?(\d{4,6})["']?\s*\]/gi,
+    /EPSG(?::|["'\s,]+)(\d{4,6})/gi,
+  ]
+  const candidates: string[] = []
+  const noisyGeodeticCodes = new Set(['EPSG:4326', 'EPSG:6326', 'EPSG:7030', 'EPSG:8901', 'EPSG:9001', 'EPSG:9122'])
+  for (const pattern of patterns) {
+    let match: RegExpExecArray | null
+    pattern.lastIndex = 0
+    while ((match = pattern.exec(text)) !== null) {
+      const epsg = normalizeEpsgCode(Number(match[1]))
+      if (epsg) candidates.push(epsg)
+    }
+  }
+  return candidates.find((epsg) => /^EPSG:32[67]\d{2}$/.test(epsg)) ||
+    candidates.find((epsg) => !noisyGeodeticCodes.has(epsg)) ||
+    candidates[0] ||
+    ''
+}
+
 async function detectGeoTiffEpsgLocally(file: File): Promise<string> {
   const ext = file.name.split('.').pop()?.toLowerCase() || ''
   if (!['tif', 'tiff'].includes(ext)) return ''
-  const buffer = await file.slice(0, Math.min(file.size, 1024 * 1024)).arrayBuffer()
+  const buffer = await file.slice(0, Math.min(file.size, GEOTIFF_PROBE_BYTES)).arrayBuffer()
   const view = new DataView(buffer)
   if (view.byteLength < 8) return ''
   const byteOrder = String.fromCharCode(view.getUint8(0), view.getUint8(1))
   const littleEndian = byteOrder === 'II'
   if (!littleEndian && byteOrder !== 'MM') return ''
-  if (view.getUint16(2, littleEndian) !== 42) return ''
-  const ifdOffset = view.getUint32(4, littleEndian)
-  if (ifdOffset + 2 > view.byteLength) return ''
-  const entryCount = view.getUint16(ifdOffset, littleEndian)
-  const typeSize: Record<number, number> = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 12: 8 }
-  for (let index = 0; index < entryCount; index += 1) {
-    const entryOffset = ifdOffset + 2 + index * 12
-    if (entryOffset + 12 > view.byteLength) break
-    const tag = view.getUint16(entryOffset, littleEndian)
-    if (tag !== 34735) continue
-    const type = view.getUint16(entryOffset + 2, littleEndian)
-    const count = view.getUint32(entryOffset + 4, littleEndian)
+
+  const magic = view.getUint16(2, littleEndian)
+  const isClassicTiff = magic === 42
+  const isBigTiff = magic === 43 && view.byteLength >= 16
+  if (!isClassicTiff && !isBigTiff) return ''
+
+  const typeSize: Record<number, number> = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 12: 8, 16: 8 }
+  const readU64 = (offset: number) => {
+    if (offset + 8 > view.byteLength) return 0
+    const value = view.getBigUint64(offset, littleEndian)
+    return value > BigInt(Number.MAX_SAFE_INTEGER) ? 0 : Number(value)
+  }
+  const getOffsetValue = (entryOffset: number, type: number, count: number, inlineBytes: number) => {
     const bytes = (typeSize[type] || 0) * count
-    const valueOffset = bytes <= 4 ? entryOffset + 8 : view.getUint32(entryOffset + 8, littleEndian)
-    if (type !== 3 || count < 4 || valueOffset + count * 2 > view.byteLength) return ''
-    const shorts = Array.from({ length: count }, (_, shortIndex) => view.getUint16(valueOffset + shortIndex * 2, littleEndian))
-    const keyCount = shorts[3] || 0
-    for (let keyIndex = 0; keyIndex < keyCount; keyIndex += 1) {
-      const keyOffset = 4 + keyIndex * 4
-      const keyId = shorts[keyOffset]
-      const tiffTagLocation = shorts[keyOffset + 1]
-      const keyValue = shorts[keyOffset + 3]
-      if (tiffTagLocation === 0 && (keyId === 3072 || keyId === 2048) && keyValue > 0 && keyValue !== 32767) {
-        return `EPSG:${keyValue}`
+    if (!bytes) return 0
+    if (bytes <= inlineBytes) return entryOffset + (isBigTiff ? 12 : 8)
+    return isBigTiff ? readU64(entryOffset + 12) : view.getUint32(entryOffset + 8, littleEndian)
+  }
+
+  let ifdOffset = isBigTiff ? readU64(8) : view.getUint32(4, littleEndian)
+  const maxIfdWalk = 8
+  let geographicEpsg = ''
+  const asciiFallbackValues: string[] = []
+  for (let ifdIndex = 0; ifdIndex < maxIfdWalk && ifdOffset > 0 && ifdOffset < view.byteLength; ifdIndex += 1) {
+    const rawEntryCount = isBigTiff ? readU64(ifdOffset) : view.getUint16(ifdOffset, littleEndian)
+    const entriesStart = ifdOffset + (isBigTiff ? 8 : 2)
+    const entrySize = isBigTiff ? 20 : 12
+    const inlineBytes = isBigTiff ? 8 : 4
+    const entryCount = Math.min(rawEntryCount, Math.floor((view.byteLength - entriesStart) / entrySize))
+    let geoKeys: number[] = []
+    const asciiValues: string[] = []
+
+    for (let index = 0; index < entryCount; index += 1) {
+      const entryOffset = entriesStart + index * entrySize
+      if (entryOffset + entrySize > view.byteLength) break
+      const tag = view.getUint16(entryOffset, littleEndian)
+      const type = view.getUint16(entryOffset + 2, littleEndian)
+      const count = isBigTiff ? readU64(entryOffset + 4) : view.getUint32(entryOffset + 4, littleEndian)
+      const valueOffset = getOffsetValue(entryOffset, type, count, inlineBytes)
+      if (!valueOffset || valueOffset >= view.byteLength) continue
+
+      if (tag === 34735 && type === 3 && count >= 4 && valueOffset + count * 2 <= view.byteLength) {
+        geoKeys = Array.from({ length: count }, (_, shortIndex) => view.getUint16(valueOffset + shortIndex * 2, littleEndian))
+      }
+
+      if (tag === 34737 && type === 2 && count > 0 && valueOffset + count <= view.byteLength) {
+        const bytes = new Uint8Array(buffer, valueOffset, count)
+        asciiValues.push(new TextDecoder('utf-8', { fatal: false }).decode(bytes))
       }
     }
+
+    if (geoKeys.length >= 4) {
+      const keyCount = geoKeys[3] || 0
+      for (let keyIndex = 0; keyIndex < keyCount; keyIndex += 1) {
+        const keyOffset = 4 + keyIndex * 4
+        const keyId = geoKeys[keyOffset]
+        const tiffTagLocation = geoKeys[keyOffset + 1]
+        const keyValue = geoKeys[keyOffset + 3]
+        if (tiffTagLocation === 0 && keyId === 3072) {
+          const epsg = normalizeEpsgCode(keyValue)
+          if (epsg) return epsg
+        }
+        if (tiffTagLocation === 0 && keyId === 2048 && !geographicEpsg) {
+          geographicEpsg = normalizeEpsgCode(keyValue)
+        }
+      }
+    }
+
+    const epsgFromAscii = findEpsgInGeoText(asciiValues.join('\n'))
+    if (epsgFromAscii && epsgFromAscii !== 'EPSG:4326') return epsgFromAscii
+    asciiFallbackValues.push(...asciiValues)
+
+    const nextIfdOffsetLocation = entriesStart + entryCount * entrySize
+    if (nextIfdOffsetLocation + (isBigTiff ? 8 : 4) > view.byteLength) break
+    ifdOffset = isBigTiff ? readU64(nextIfdOffsetLocation) : view.getUint32(nextIfdOffsetLocation, littleEndian)
   }
-  return ''
+  const decodedProbe = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(buffer))
+  const epsgFromText = findEpsgInGeoText(`${asciiFallbackValues.join('\n')}\n${decodedProbe}`)
+  if (epsgFromText && epsgFromText !== 'EPSG:4326') return epsgFromText
+  return geographicEpsg || epsgFromText || ''
 }
 
 function displayProjectFileSize(file: ProjectFile): string {
@@ -170,11 +278,14 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
         ? `${API_BASE}/data/${file.rel_path.replace(/\/tileset\.json$/i, '').replace(/\/$/, '')}/{z}/{x}/{y}.png`
         : toSameOriginBackendUrl(file.layer_url)
   return {
-    id: `file-${file.rel_path}`,
+    id: file.dataset_id ? `dataset-${file.dataset_id}` : `file-${file.rel_path}`,
     fileName: file.name,
     type,
     size: displayProjectFileSize(file),
     status: normalizeJobStatus(file.status),
+    stage: file.stage || undefined,
+    progressPercent: normalizeProgressPercent(file.progress_percent),
+    etaText: formatEtaLabel(file.eta_seconds),
     uploadDate: formatDisplayDate(file.upload_date || file.updated_at),
     uploadDateRaw: file.upload_date || file.updated_at,
     filePath: file.file_path || undefined,
@@ -246,7 +357,11 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     epsg: '',
   })
 
-  const activeTasks = useMemo(() => tasks.filter((task) => task.projectId === projectId), [projectId, tasks])
+  const activeTasks = useMemo(
+    () => tasks.filter((task) => task.projectId === projectId && task.state !== 'success'),
+    [projectId, tasks],
+  )
+  const primaryTask = activeTasks.find((task) => task.state === 'uploading' || task.state === 'processing') || activeTasks[0]
 
   const loadRows = useCallback(async (currentProjectId: string, cacheKey: string, cancelledRef: () => boolean) => {
     try {
@@ -262,12 +377,25 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
           type: inferDatasetType(job.file_name),
           size: '--',
           status: normalizeJobStatus(job.status),
+          stage: job.stage || undefined,
+          progressPercent: normalizeProgressPercent(job.progress_percent),
+          etaText: formatEtaLabel(job.eta_seconds),
+          datasetId: job.job_id,
         }))
       const mergedMap = new Map<string, DatasetRow>()
       ;[...fileRows, ...jobRows].forEach((row) => {
-        if (!mergedMap.has(row.fileName) || row.layerUrl) mergedMap.set(row.fileName, row)
+        const key = row.datasetId || row.fileName
+        const previous = mergedMap.get(key)
+        if (!previous || (row.status === 'Web-Ready' && previous.status !== 'Web-Ready') || row.layerUrl) {
+          mergedMap.set(key, row)
+        }
       })
-      const mergedRows = [...mergedMap.values()]
+      const mergedRows = [...mergedMap.values()].sort((a, b) => {
+        const aProcessing = a.status === 'Processing' ? 0 : 1
+        const bProcessing = b.status === 'Processing' ? 0 : 1
+        if (aProcessing !== bProcessing) return aProcessing - bProcessing
+        return String(b.uploadDateRaw || b.fileName).localeCompare(String(a.uploadDateRaw || a.fileName))
+      })
       setDatasets(mergedRows)
       mergedRows
         .filter((row) => row.status === 'Web-Ready')
@@ -301,12 +429,12 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     const poll = window.setInterval(() => {
       invalidateProjectDataCache(projectId)
       void loadRows(projectId, cacheKey, () => cancelled)
-    }, 10000)
+    }, activeTasks.length ? 3000 : 10000)
     return () => {
       cancelled = true
       window.clearInterval(poll)
     }
-  }, [loadRows, projectId])
+  }, [activeTasks.length, loadRows, projectId])
 
   useEffect(() => {
     if (!projectId) return
@@ -314,18 +442,29 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       const live = activeTasks
         .filter((task) => task.state !== 'success')
         .map((task) => ({
-          id: `live-${task.id}`,
+          id: task.datasetId ? `dataset-${task.datasetId}` : `live-${task.id}`,
           fileName: task.fileName,
           type: datasetTypeFromBackend(task.datasetType) || inferDatasetType(task.fileName),
-          size: 'Uploading',
+          size: task.state === 'uploading' ? 'Uploading' : '--',
           status: 'Processing',
+          stage: task.stage || task.statusText,
+          progressPercent: task.progressPercent,
+          etaText: task.etaText,
+          datasetId: task.datasetId,
         } as DatasetRow))
-      const base = prev.filter((row) => !row.id.startsWith('live-'))
+      const liveKeys = new Set(live.map((row) => row.datasetId || row.fileName))
+      const base = prev.filter((row) => !row.id.startsWith('live-') && !liveKeys.has(row.datasetId || row.fileName))
       const mergedMap = new Map<string, DatasetRow>()
       ;[...live, ...base].forEach((row) => {
-        if (!mergedMap.has(row.fileName) || row.id.startsWith('live-')) mergedMap.set(row.fileName, row)
+        const key = row.datasetId || row.fileName
+        if (!mergedMap.has(key) || row.id.startsWith('live-') || row.status === 'Processing') mergedMap.set(key, row)
       })
-      return [...mergedMap.values()]
+      return [...mergedMap.values()].sort((a, b) => {
+        const aProcessing = a.status === 'Processing' ? 0 : 1
+        const bProcessing = b.status === 'Processing' ? 0 : 1
+        if (aProcessing !== bProcessing) return aProcessing - bProcessing
+        return String(b.uploadDateRaw || b.fileName).localeCompare(String(a.uploadDateRaw || a.fileName))
+      })
     })
   }, [activeTasks, projectId])
 
@@ -524,6 +663,14 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     setDetectingEpsg(true)
     try {
       const epsg = await detectGeoTiffEpsgLocally(selectedFile)
+      if (epsg === 'EPSG:4326' && ['Ortho', 'DTM', 'DSM'].includes(uploadForm.type)) {
+        setUploadForm((s) => ({ ...s, epsg: '' }))
+        await modal.alert(
+          'Projected EPSG not found',
+          'The file only reports WGS84 geographic metadata (EPSG:4326). For drone Ortho/DTM/DSM, please enter the projected EPSG manually, for example the correct UTM zone.',
+        )
+        return
+      }
       setUploadForm((s) => ({ ...s, epsg }))
       if (!epsg) {
         await modal.alert('EPSG not found', 'EPSG auto detect failed. Please enter it manually if known.')
@@ -533,7 +680,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     } finally {
       setDetectingEpsg(false)
     }
-  }, [detectingEpsg, modal, projectId, selectedFile])
+  }, [detectingEpsg, modal, projectId, selectedFile, uploadForm.type])
 
   return (
     <>
@@ -686,14 +833,18 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         </div>
       ) : null}
 
-      {activeTasks[0] ? (
+      {primaryTask ? (
         <div className="dsp-progress" aria-live="polite">
-          <div className="dsp-progress__track">
-            <div className="dsp-progress__fill" style={{ width: `${activeTasks[0].progressPercent}%` }} />
+          <div className="dsp-progress__summary">
+            <strong>{primaryTask.fileName}</strong>
+            <span>{primaryTask.stage || primaryTask.statusText}</span>
+            <em>{primaryTask.etaText || 'Estimating time...'}</em>
           </div>
-          <div className="dsp-progress__meta">
-            <span>{`${Math.round(activeTasks[0].progressPercent)}%`}</span>
-            <span>{activeTasks[0].statusText}</span>
+          <div className="dsp-progress__barline">
+            <span>{`${Math.round(primaryTask.progressPercent)}%`}</span>
+            <div className="dsp-progress__track">
+              <div className="dsp-progress__fill" style={{ width: `${primaryTask.progressPercent}%` }} />
+            </div>
           </div>
         </div>
       ) : null}
@@ -739,10 +890,20 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                   <span className={row.status === 'Web-Ready' ? 'dsp-badge dsp-badge--ready' : 'dsp-badge dsp-badge--processing'}>
                     {row.status}
                   </span>
+                  {row.status === 'Processing' ? (
+                    <div className="dsp-row-progress">
+                      <span>{row.stage || 'Processing'}</span>
+                      <em>{row.progressPercent !== undefined ? `${Math.round(row.progressPercent)}%` : ''}{row.etaText ? ` - ${row.etaText}` : ''}</em>
+                    </div>
+                  ) : null}
                 </td>
                 <td>
                   <div className="dsp-action-group">
-                    {row.layerType && row.layerUrl ? (
+                    {row.status !== 'Web-Ready' ? (
+                      <button type="button" className="dsp-action" disabled>
+                        {row.stage || 'Processing...'}
+                      </button>
+                    ) : row.layerType && row.layerUrl ? (
                       <button
                         type="button"
                         className="dsp-action"

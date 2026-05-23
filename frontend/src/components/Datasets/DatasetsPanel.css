@@ -1,12 +1,12 @@
 .dsp-root {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 0.85rem;
   padding: 0.95rem;
   background: #fff;
   height: 100%;
   min-height: 0;
-  align-content: start;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .dsp-head {
@@ -107,11 +107,60 @@
 
 .dsp-progress {
   display: grid;
-  gap: 0.35rem;
+  grid-template-columns: minmax(14rem, 0.42fr) minmax(18rem, 1fr);
+  align-items: center;
+  gap: 0.8rem;
+  min-height: 3.15rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid #dbe4ee;
+  border-radius: 8px;
+  background: #f8fbfc;
+}
+
+.dsp-progress__summary {
+  display: grid;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
+.dsp-progress__summary strong,
+.dsp-progress__summary span,
+.dsp-progress__summary em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsp-progress__summary strong {
+  color: #0e3e49;
+  font-size: 0.78rem;
+}
+
+.dsp-progress__summary span {
+  color: #475569;
+  font-size: 0.7rem;
+}
+
+.dsp-progress__summary em {
+  color: #0f766e;
+  font-size: 0.68rem;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.dsp-progress__barline {
+  display: grid;
+  grid-template-columns: 3rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  color: #475569;
+  font-size: 0.72rem;
+  font-weight: 800;
 }
 
 .dsp-progress__track {
-  height: 0.45rem;
+  height: 0.38rem;
   border-radius: 999px;
   background: #e2e8f0;
   overflow: hidden;
@@ -123,20 +172,13 @@
   transition: width 0.2s ease;
 }
 
-.dsp-progress__meta {
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-  font-size: 0.72rem;
-  color: #475569;
-}
-
 .dsp-table-wrap {
   border: 1px solid #dbe4ee;
   border-radius: 8px;
   overflow: auto;
   min-height: 9rem;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .dsp-table {
@@ -207,6 +249,28 @@
   background: #dcfce7;
 }
 
+.dsp-row-progress {
+  display: grid;
+  gap: 0.12rem;
+  margin-top: 0.28rem;
+  max-width: 16rem;
+  color: #64748b;
+  font-size: 0.66rem;
+}
+
+.dsp-row-progress span,
+.dsp-row-progress em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsp-row-progress em {
+  color: #0f766e;
+  font-style: normal;
+  font-weight: 700;
+}
+
 .dsp-action {
   display: inline-flex;
   align-items: center;
@@ -222,6 +286,9 @@
   cursor: pointer;
   line-height: 1;
   white-space: nowrap;
+  max-width: 13rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
   transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
@@ -283,6 +350,10 @@
   .dsp-form__actions {
     grid-column: 1 / -1;
     justify-content: flex-start;
+  }
+
+  .dsp-progress {
+    grid-template-columns: 1fr;
   }
 }
 

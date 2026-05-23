@@ -65,6 +65,56 @@ type ViewerLayer = {
   datasetType?: string
   month?: string
 }
+type BaseMapKey = 'esri-imagery' | 'osm' | 'carto-light' | 'carto-voyager' | 'esri-topo'
+type BaseMapConfig = {
+  key: BaseMapKey
+  label: string
+  url: string
+  attribution: string
+  maxNativeZoom: number
+}
+
+const BASE_MAPS: BaseMapConfig[] = [
+  {
+    key: 'esri-imagery',
+    label: 'Esri Satellite',
+    url: SATELLITE_FALLBACK_URL,
+    attribution: 'Tiles &copy; Esri',
+    maxNativeZoom: 19,
+  },
+  {
+    key: 'osm',
+    label: 'OpenStreetMap',
+    url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    attribution: '&copy; OpenStreetMap contributors',
+    maxNativeZoom: 19,
+  },
+  {
+    key: 'carto-light',
+    label: 'Carto Light',
+    url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+    attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+    maxNativeZoom: 20,
+  },
+  {
+    key: 'carto-voyager',
+    label: 'Carto Voyager',
+    url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+    attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+    maxNativeZoom: 20,
+  },
+  {
+    key: 'esri-topo',
+    label: 'Esri Topographic',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
+    attribution: 'Tiles &copy; Esri',
+    maxNativeZoom: 19,
+  },
+]
+
+function getBaseMap(key: BaseMapKey): BaseMapConfig {
+  return BASE_MAPS.find((map) => map.key === key) ?? BASE_MAPS[0]!
+}
 type IssueDraft = {
   lat: number
   lng: number
@@ -470,6 +520,7 @@ interface MapPaneProps {
   cropFootprint?: LatLng[] | null
   cogBounds?: [[number, number], [number, number]] | null
   cogTileUrl: string | null
+  baseMap: BaseMapConfig
   userLocation: LatLng | null
   sync?: SyncRefs & { isA: boolean }
 }
@@ -491,11 +542,10 @@ function MapPane({
   cropFootprint,
   cogBounds,
   cogTileUrl,
+  baseMap,
   userLocation,
   sync,
 }: MapPaneProps) {
-  const baseUrl = useMemo(() => SATELLITE_FALLBACK_URL, [])
-
   return (
     <>
       {/*
@@ -503,14 +553,16 @@ function MapPane({
         Bump VITE_TILE_CACHE_BUST after regenerating local tiles; Leaflet fetches XYZ per zoom/pan.
       */}
       <TileLayer
-        key={baseUrl}
-        attribution="&copy; Esri"
-        url={baseUrl}
+        key={baseMap.key}
+        attribution={baseMap.attribution}
+        url={baseMap.url}
         maxZoom={30}
-        maxNativeZoom={19}
-        updateWhenIdle
-        updateWhenZooming={false}
-        keepBuffer={1}
+        maxNativeZoom={baseMap.maxNativeZoom}
+        updateWhenIdle={false}
+        updateWhenZooming
+        keepBuffer={6}
+        detectRetina={false}
+        crossOrigin
       />
       {cogTileUrl ? (
         <OrthomosaicTileLayerWithOptions
@@ -626,16 +678,23 @@ function OrthomosaicTileLayerWithOptions({
   const map = useMap()
   const paneName = 'orthomosaic-crop-pane'
   const [nativeZoom, setNativeZoom] = useState(22)
+  const [nativeMinZoom, setNativeMinZoom] = useState(0)
 
   useEffect(() => {
     let cancelled = false
     void fetchStaticTileMeta(tileUrl).then((meta) => {
       if (cancelled) return
       const zoomMax = Number(meta?.zoom_max)
+      const zoomMin = Number(meta?.zoom_min)
       if (Number.isFinite(zoomMax) && zoomMax >= 0) {
-        setNativeZoom(Math.max(0, Math.min(22, Math.round(zoomMax))))
+        setNativeZoom(Math.max(0, Math.min(30, Math.round(zoomMax))))
       } else {
         setNativeZoom(22)
+      }
+      if (Number.isFinite(zoomMin) && zoomMin >= 0) {
+        setNativeMinZoom(Math.max(0, Math.min(30, Math.round(zoomMin))))
+      } else {
+        setNativeMinZoom(0)
       }
     })
     return () => {
@@ -656,11 +715,14 @@ function OrthomosaicTileLayerWithOptions({
         opacity={0.9}
         maxZoom={30}
         maxNativeZoom={nativeZoom}
+        minNativeZoom={nativeMinZoom}
         bounds={bounds}
         noWrap
-        updateWhenIdle
-        updateWhenZooming={false}
-        keepBuffer={1}
+        updateWhenIdle={false}
+        updateWhenZooming
+        keepBuffer={6}
+        detectRetina={false}
+        crossOrigin
       />
     </Pane>
   )
@@ -725,6 +787,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const [elevationMode, setElevationMode] = useState(false)
   const [cropMode, setCropMode] = useState<'off' | 'kml' | 'draw'>('off')
   const [cropEnabled, setCropEnabled] = useState(false)
+  const [baseMapKey, setBaseMapKey] = useState<BaseMapKey>('esri-imagery')
   const [cogTileUrl, setCogTileUrl] = useState<string | null>(null)
   const [zoomTrigger, setZoomTrigger] = useState(0)
   const [compareCogTileUrl, setCompareCogTileUrl] = useState<string | null>(null)
@@ -759,6 +822,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
     }),
     [],
   )
+  const selectedBaseMap = useMemo(() => getBaseMap(baseMapKey), [baseMapKey])
 
   const distanceM = useMemo(
     () => (measureMode === 'distance' || measureMode === 'profile' ? totalPathLengthM(points) : 0),
@@ -1196,6 +1260,10 @@ export function MapViewer({ projectId }: MapViewerProps) {
     center,
     zoom,
     scrollWheelZoom: true,
+    preferCanvas: true,
+    fadeAnimation: false,
+    markerZoomAnimation: false,
+    wheelDebounceTime: 40,
     className: 'mv-leaflet',
   } as const
 
@@ -1298,6 +1366,21 @@ export function MapViewer({ projectId }: MapViewerProps) {
       <div className="mv-chrome">
         <div className="mv-panel mv-panel--layers">
           <p className="mv-panel__title">Data Highlights</p>
+          <fieldset className="mv-fieldset">
+            <legend className="mv-legend">Base Map</legend>
+            <select
+              className="mv-select mv-select--compact"
+              value={baseMapKey}
+              onChange={(event) => setBaseMapKey(event.target.value as BaseMapKey)}
+              aria-label="Base map"
+            >
+              {BASE_MAPS.map((map) => (
+                <option key={map.key} value={map.key}>
+                  {map.label}
+                </option>
+              ))}
+            </select>
+          </fieldset>
           <fieldset className="mv-fieldset">
             <legend className="mv-legend">Project 2D Layers</legend>
             {activeCogLayers.length > 0 ? (
@@ -1728,6 +1811,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
                 cropFootprint={cropMaskPoints}
                 cogBounds={cogBounds}
                 cogTileUrl={cogTileUrl}
+                baseMap={selectedBaseMap}
                 userLocation={userLocation}
                 sync={splitView ? { ...syncRefs, isA: true } : undefined}
               />
@@ -1847,6 +1931,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
                   cropFootprint={null}
                   cogBounds={undefined}
                   cogTileUrl={compareCogTileUrl}
+                  baseMap={selectedBaseMap}
                   userLocation={userLocation}
                   sync={{ ...syncRefs, isA: false }}
                 />

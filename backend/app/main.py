@@ -99,7 +99,8 @@ POTREE_CONVERTER_EXE = os.getenv(
 ).strip()
 PROJECT_FILES_CACHE_TTL_SECONDS = float(os.getenv("PROJECT_FILES_CACHE_TTL_SECONDS", "4"))
 TIFF_TILE_BUDGET_MB = float(os.getenv("TIFF_TILE_BUDGET_MB", "100"))
-TIFF_TILE_MAX_ZOOM_LIMIT = int(os.getenv("TIFF_TILE_MAX_ZOOM_LIMIT", "20"))
+TIFF_TILE_MIN_ZOOM_LIMIT = int(os.getenv("TIFF_TILE_MIN_ZOOM_LIMIT", "14"))
+TIFF_TILE_MAX_ZOOM_LIMIT = int(os.getenv("TIFF_TILE_MAX_ZOOM_LIMIT", "19"))
 TIFF_TILE_SIZE = int(os.getenv("TIFF_TILE_SIZE", "256"))
 SESSION_COOKIE_NAME = "droid_cloud_session"
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "604800"))
@@ -1261,6 +1262,7 @@ async def process_tif_to_tiles(
     project_id: str,
     dataset_name: str,
     dataset_type: str = "",
+    progress_callback=None,
 ) -> None:
     await asyncio.to_thread(
         run_rasterio_tiler,
@@ -1271,8 +1273,10 @@ async def process_tif_to_tiles(
         dataset_type,
         LOCAL_DATA_PATH,
         TIFF_TILE_BUDGET_MB,
+        TIFF_TILE_MIN_ZOOM_LIMIT,
         TIFF_TILE_MAX_ZOOM_LIMIT,
         TIFF_TILE_SIZE,
+        progress_callback,
     )
 
 
@@ -1300,18 +1304,53 @@ async def process_dataset_background(
         {
             **common_status,
             "status": "Generating XYZ tiles",
+            "stage": "Queued for tiling",
+            "progress_percent": "5",
+            "eta_seconds": "",
+            "started_at": _now_iso(),
             "updated_at": _now_iso(),
         },
     )
     err_path = _dataset_dir(project_id, dataset_id) / ".conversion_error.txt"
     err_path.unlink(missing_ok=True)
     try:
+        def update_progress(payload: dict[str, object]) -> None:
+            progress_percent = str(payload.get("progress_percent", ""))
+            stage = str(payload.get("stage") or "Processing raster")
+            eta_seconds = str(payload.get("eta_seconds", ""))
+            status_payload = {
+                **common_status,
+                "status": "Generating XYZ tiles",
+                "stage": stage,
+                "progress_percent": progress_percent,
+                "eta_seconds": eta_seconds,
+                "tiles_written": str(payload.get("tiles_written", "")),
+                "estimated_tiles": str(payload.get("estimated_tiles", "")),
+                "zoom_max": str(payload.get("zoom_max", "")),
+                "updated_at": _now_iso(),
+            }
+            _write_dataset_status(project_id, dataset_id, status_payload)
+            _upsert_processing_job(
+                project_id,
+                {
+                    "job_id": dataset_id,
+                    "kind": "dataset",
+                    "file_name": file_name or Path(input_tif).name,
+                    "status": "Processing",
+                    "stage": stage,
+                    "progress_percent": progress_percent,
+                    "eta_seconds": eta_seconds,
+                    "updated_at": _now_iso(),
+                },
+            )
+
         await process_tif_to_tiles(
             input_tif,
             tiles_dir,
             project_id,
             file_name or Path(input_tif).name,
             str(common_status.get("dataset_type", "")),
+            update_progress,
         )
         tiles_rel = Path(tiles_dir).resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
         processed_size_bytes = calculate_folder_size(Path(tiles_dir))
@@ -1338,6 +1377,9 @@ async def process_dataset_background(
                 "tiles_rel_path": tiles_rel,
                 "processed_size_bytes": str(processed_size_bytes),
                 "processed_size": processed_size,
+                "stage": "Web-ready",
+                "progress_percent": "100",
+                "eta_seconds": "0",
             },
         )
     except Exception as exc:  # noqa: BLE001
@@ -4090,7 +4132,26 @@ def dataset_status(project_id: str, dataset_id: str, request: Request) -> dict[s
     safe_dataset_id = _safe_dataset_id(dataset_id)
     status = _read_dataset_status(safe_project_id, safe_dataset_id)
     if not status:
-        raise HTTPException(status_code=404, detail="Dataset status not found")
+        for job in _read_processing_jobs().get(safe_project_id, []):
+            if isinstance(job, dict) and str(job.get("job_id") or "") == safe_dataset_id:
+                return {
+                    "status": str(job.get("status") or "Processing"),
+                    "dataset_id": safe_dataset_id,
+                    "dataset_name": str(job.get("file_name") or safe_dataset_id),
+                    "stage": str(job.get("stage") or "Waiting for processor"),
+                    "progress_percent": str(job.get("progress_percent") or "45"),
+                    "eta_seconds": str(job.get("eta_seconds") or ""),
+                    "updated_at": str(job.get("updated_at") or _now_iso()),
+                }
+        return {
+            "status": "Processing",
+            "dataset_id": safe_dataset_id,
+            "dataset_name": safe_dataset_id,
+            "stage": "Waiting for processor",
+            "progress_percent": "45",
+            "eta_seconds": "",
+            "updated_at": _now_iso(),
+        }
 
     base = str(request.base_url).rstrip("/")
     tiles_rel = status.get("tiles_rel_path", "").strip()
@@ -5040,6 +5101,9 @@ def _dataset_extra_response_fields(st: dict[str, str]) -> dict[str, str]:
         "processed_size": str(st.get("processed_size") or ""),
         "upload_date": str(st.get("upload_date") or st.get("date") or st.get("created_at") or ""),
         "height_offset": str(st.get("height_offset") or ""),
+        "stage": str(st.get("stage") or ""),
+        "progress_percent": str(st.get("progress_percent") or ""),
+        "eta_seconds": str(st.get("eta_seconds") or ""),
     }
 
 

@@ -297,19 +297,29 @@ if errorlevel 1 (
   goto menu
 )
 
+"%BACKEND_DIR%\venv\Scripts\python.exe" -c "import uvicorn, fastapi" >nul 2>&1
+if errorlevel 1 (
+  echo [ERROR] Backend dependencies are missing from venv.
+  echo [FIX] Run option 1 ^(One Click Install / Repair^) first.
+  pause
+  goto menu
+)
+
 call :ensure_backend_public_origin
 if errorlevel 1 (
   pause
   goto menu
 )
 
-start "Droid Cloud - Backend" cmd /k "cd /d ""%BACKEND_DIR%"" && call venv\Scripts\activate.bat && uvicorn app.main:app --reload --host 0.0.0.0 --port 8000"
-start "Droid Cloud - Frontend" cmd /k "cd /d ""%FRONTEND_DIR%"" && npm run dev"
+start "Droid Cloud - Backend" /D "%BACKEND_DIR%" cmd /k "venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000"
+start "Droid Cloud - Frontend" /D "%FRONTEND_DIR%" cmd /k "npm run dev"
 
 echo [SUCCESS] Backend and frontend windows launched.
 echo [URL] Frontend: http://localhost:5173
 echo [URL] Public:   %PUBLIC_PORTAL_URL%
-echo [URL] Backend:  http://localhost:8000/health
+echo [URL] Backend:  http://127.0.0.1:8000/health
+echo.
+echo [NOTE] Keep both opened command windows running. If /api shows ECONNREFUSED, the backend window stopped or port 8000 is busy.
 pause
 goto menu
 

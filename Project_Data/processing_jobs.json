@@ -1,6 +1,14 @@
 {
   "proj_af421b0b468cbce1": [
     {
+      "job_id": "AuroTrimmed-9586d39d1fda",
+      "kind": "dataset",
+      "file_name": "AuroTrimmed.tif",
+      "status": "Completed",
+      "updated_at": "2026-05-23T09:07:06.529452+00:00",
+      "result_url": "/data/projects/proj_af421b0b468cbce1/processed/ortho/AuroTrimmed-01f6785f"
+    },
+    {
       "job_id": "Auro_DTMd-b6a44458-contours-2m-d149bc02e744",
       "kind": "vector",
       "file_name": "Auro_DTMd-b6a44458 contours",
@@ -31,30 +39,6 @@
       "status": "Completed",
       "updated_at": "2026-05-21T12:45:03.149257+00:00",
       "result_url": "/data/projects/proj_af421b0b468cbce1/processed/dtm/Auro_DTMd-b6a44458"
-    },
-    {
-      "job_id": "Auro_DTM-95dbc870f73b",
-      "kind": "dataset",
-      "file_name": "Auro_DTM.tif",
-      "status": "Completed",
-      "updated_at": "2026-05-21T11:53:27.346297+00:00",
-      "result_url": "/data/projects/proj_af421b0b468cbce1/processed/dtm/Auro_DTM-fc7b6d0a"
-    },
-    {
-      "job_id": "Auro_DTM_Crop-0054e44a5c28",
-      "kind": "dataset",
-      "file_name": "Auro_DTM_Crop.tif",
-      "status": "Completed",
-      "updated_at": "2026-05-20T13:15:01.458313+00:00",
-      "result_url": "/data/projects/proj_af421b0b468cbce1/processed/dtm/Auro_DTM_Crop-2c173df7"
-    },
-    {
-      "job_id": "Auro_DTM_Crop-0621013e757c",
-      "kind": "dataset",
-      "file_name": "Auro_DTM_Crop.tif",
-      "status": "Completed",
-      "updated_at": "2026-05-20T13:09:23.771316+00:00",
-      "result_url": "/data/projects/proj_af421b0b468cbce1/processed/dtm/Auro_DTM_Crop-b03e59f2"
     },
     {
       "job_id": "Aditya-Aluminium-38f6f8c0ff02",

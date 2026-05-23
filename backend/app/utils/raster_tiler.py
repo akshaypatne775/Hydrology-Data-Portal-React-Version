@@ -7,6 +7,7 @@ import math
 import shutil
 import time
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 from PIL import Image
@@ -60,20 +61,24 @@ def _zoom_for_raster_resolution(ground_res_m: float, latitude: float, max_zoom_l
 def _save_png_tile(rgba: np.ndarray, out_path: Path) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img = Image.fromarray(rgba, mode="RGBA")
-    best = b""
-    for level in (6, 8, 9):
-        buffer = io.BytesIO()
-        img.save(buffer, format="PNG", optimize=True, compress_level=level)
-        data = buffer.getvalue()
-        if not best or len(data) < len(best):
-            best = data
-    out_path.write_bytes(best)
-    return len(best)
+    buffer = io.BytesIO()
+    # Single-pass PNG writing is much faster for interactive portal uploads.
+    img.save(buffer, format="PNG", optimize=False, compress_level=4)
+    data = buffer.getvalue()
+    out_path.write_bytes(data)
+    return len(data)
 
 
 def _compact_tile_tasks(mercantile_module, bounds_wgs84: tuple[float, float, float, float], max_zoom: int):
     west, south, east, north = bounds_wgs84
     for zoom in range(0, max_zoom + 1):
+        for tile in mercantile_module.tiles(west, south, east, north, [zoom]):
+            yield zoom, tile.x, tile.y
+
+
+def _tile_tasks_in_range(mercantile_module, bounds_wgs84: tuple[float, float, float, float], min_zoom: int, max_zoom: int):
+    west, south, east, north = bounds_wgs84
+    for zoom in range(min_zoom, max_zoom + 1):
         for tile in mercantile_module.tiles(west, south, east, north, [zoom]):
             yield zoom, tile.x, tile.y
 
@@ -84,14 +89,15 @@ def _choose_compact_zoom(
     desired_max_zoom: int,
     dataset_type: str,
     tile_budget_mb: float,
+    min_zoom: int = 0,
 ) -> tuple[int, int]:
     avg_kb = 70 if dataset_type in {"dtm", "dsm"} else 110
     budget_tiles = max(1, int((tile_budget_mb * 1024) / avg_kb))
-    chosen_zoom = 0
+    chosen_zoom = min_zoom
     chosen_count = 1
-    for zoom in range(0, desired_max_zoom + 1):
+    for zoom in range(min_zoom, desired_max_zoom + 1):
         count = 0
-        for z in range(0, zoom + 1):
+        for z in range(min_zoom, zoom + 1):
             count += sum(1 for _ in mercantile_module.tiles(*bounds_wgs84, [z]))
         if count <= budget_tiles:
             chosen_zoom = zoom
@@ -277,8 +283,10 @@ def run_rasterio_tiler(
     dataset_type: str,
     local_data_path: str,
     tile_budget_mb: float = 100,
+    min_zoom_limit: int = 14,
     max_zoom_limit: int = 20,
     tile_size: int = 256,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> None:
     try:
         import mercantile
@@ -288,6 +296,8 @@ def run_rasterio_tiler(
         raise RuntimeError("Rasterio tiler needs rasterio, mercantile, numpy, and Pillow installed.") from exc
 
     normalized_type = _normalize_dataset_type(dataset_type, dataset_name)
+    min_zoom_limit = max(0, int(min_zoom_limit))
+    max_zoom_limit = max(min_zoom_limit, int(max_zoom_limit))
     in_abs = Path(input_tif).resolve()
     out_abs = Path(output_dir).resolve()
     local_root = Path(local_data_path).resolve()
@@ -296,10 +306,28 @@ def run_rasterio_tiler(
     if out_abs.exists():
         shutil.rmtree(out_abs)
     out_abs.mkdir(parents=True, exist_ok=True)
+    last_progress_emit = 0.0
 
+    def emit_progress(stage: str, progress: float, **extra: object) -> None:
+        nonlocal last_progress_emit
+        if not progress_callback:
+            return
+        now = time.time()
+        if progress < 99 and now - last_progress_emit < 0.7:
+            return
+        last_progress_emit = now
+        payload: dict[str, object] = {
+            "stage": stage,
+            "progress_percent": round(max(1.0, min(99.0, progress)), 1),
+            **extra,
+        }
+        progress_callback(payload)
+
+    emit_progress("Opening GeoTIFF", 8)
     with rasterio.open(in_abs) as src:
         if not src.crs:
             raise RuntimeError("TIFF has no CRS. Please export with EPSG/CRS before upload.")
+        emit_progress("Reading bounds and CRS", 14)
         bounds_wgs84_raw = transform_bounds(src.crs, "EPSG:4326", *src.bounds, densify_pts=21)
         bounds_wgs84 = (
             max(-180.0, bounds_wgs84_raw[0]),
@@ -310,10 +338,13 @@ def run_rasterio_tiler(
         center_lat = (bounds_wgs84[1] + bounds_wgs84[3]) / 2.0
         ground_res = min(abs(float(src.res[0])), abs(float(src.res[1])))
         desired_zoom = _zoom_for_raster_resolution(ground_res, center_lat, max_zoom_limit)
-        max_zoom, estimated_tiles = _choose_compact_zoom(mercantile, bounds_wgs84, desired_zoom, normalized_type, tile_budget_mb)
+        desired_zoom = max(min_zoom_limit, desired_zoom)
+        max_zoom, estimated_tiles = _choose_compact_zoom(mercantile, bounds_wgs84, desired_zoom, normalized_type, tile_budget_mb, min_zoom_limit)
+        emit_progress("Planning compact tile pyramid", 22, estimated_tiles=estimated_tiles, zoom_max=max_zoom)
         dem_range = _sample_raster_percentiles(src, normalized_type)
         if normalized_type in {"dtm", "dsm"} and dem_range is None:
             raise RuntimeError("No valid elevation cells found in DEM TIFF.")
+        emit_progress("Rendering web map tiles", 28, estimated_tiles=estimated_tiles, zoom_max=max_zoom)
 
         meta: dict[str, object] = {
             "engine": "python-rasterio",
@@ -322,7 +353,7 @@ def run_rasterio_tiler(
             "source_crs": str(src.crs),
             "source_fingerprint": _fingerprint(in_abs),
             "bounds_wgs84": list(bounds_wgs84),
-            "zoom_min": 0,
+            "zoom_min": min_zoom_limit,
             "zoom_max": max_zoom,
             "tile_size": tile_size,
             "dataset_type": normalized_type,
@@ -336,7 +367,7 @@ def run_rasterio_tiler(
         bytes_written = 0
         tiles_written = 0
         started = time.time()
-        for zoom, x, y in _compact_tile_tasks(mercantile, bounds_wgs84, max_zoom):
+        for zoom, x, y in _tile_tasks_in_range(mercantile, bounds_wgs84, min_zoom_limit, max_zoom):
             tile_bounds = mercantile.xy_bounds(x, y, zoom)
             bounds_3857 = (tile_bounds.left, tile_bounds.bottom, tile_bounds.right, tile_bounds.top)
             if normalized_type in {"dtm", "dsm"}:
@@ -345,9 +376,22 @@ def run_rasterio_tiler(
                 rgba = _read_ortho_tile(src, bounds_3857, zoom, tile_size)
             bytes_written += _save_png_tile(rgba, out_abs / str(zoom) / str(x) / f"{y}.png")
             tiles_written += 1
+            elapsed = max(time.time() - started, 0.1)
+            if estimated_tiles > 0:
+                render_fraction = min(tiles_written / estimated_tiles, 1.0)
+                eta_seconds = max(0, int((elapsed / max(render_fraction, 0.01)) - elapsed))
+                emit_progress(
+                    "Rendering web map tiles",
+                    28 + render_fraction * 62,
+                    estimated_tiles=estimated_tiles,
+                    tiles_written=tiles_written,
+                    eta_seconds=eta_seconds,
+                    zoom_max=max_zoom,
+                )
 
+    emit_progress("Optimizing tile package", 93, estimated_tiles=estimated_tiles, tiles_written=tiles_written)
     budget_bytes = int(tile_budget_mb * 1024 * 1024)
-    while bytes_written > budget_bytes and max_zoom > 0:
+    while bytes_written > budget_bytes and max_zoom > min_zoom_limit:
         zoom_dir = out_abs / str(max_zoom)
         removed_bytes = sum(p.stat().st_size for p in zoom_dir.rglob("*.png")) if zoom_dir.is_dir() else 0
         if zoom_dir.is_dir():
@@ -360,8 +404,9 @@ def run_rasterio_tiler(
     meta["bytes_written"] = bytes_written
     meta["elapsed_seconds"] = round(time.time() - started, 2)
     (out_abs / "tileset.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    emit_progress("Finalizing dataset", 99, estimated_tiles=estimated_tiles, tiles_written=tiles_written, eta_seconds=0)
     print(
         "Rasterio tiles ready: "
         f"project={project_id}, dataset={dataset_name}, type={normalized_type}, "
-        f"zoom=0-{max_zoom}, tiles={tiles_written}, size={bytes_written / (1024 * 1024):.1f} MB"
+        f"zoom={min_zoom_limit}-{max_zoom}, tiles={tiles_written}, size={bytes_written / (1024 * 1024):.1f} MB"
     )

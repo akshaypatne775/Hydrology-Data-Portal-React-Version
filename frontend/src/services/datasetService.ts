@@ -19,6 +19,11 @@ export type DatasetStatusResponse = {
   dataset_id?: string
   dataset_name?: string
   layer_type?: string
+  stage?: string
+  progress_percent?: string | number
+  eta_seconds?: string | number
+  tiles_written?: string | number
+  estimated_tiles?: string | number
   error?: string
   cog_path?: string
   cog_tile_url_template?: string
@@ -30,6 +35,9 @@ export type ProjectJob = {
   file_name: string
   status: string
   updated_at?: string
+  stage?: string
+  progress_percent?: string | number
+  eta_seconds?: string | number
   error?: string
   result_url?: string
 }
@@ -48,6 +56,9 @@ export type ProjectFile = {
   size_bytes: string
   status: string
   updated_at?: string
+  stage?: string
+  progress_percent?: string | number
+  eta_seconds?: string | number
   file_url: string
   download_url?: string
   layer_url: string
