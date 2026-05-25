@@ -72,16 +72,6 @@ const MODEL_TILE_CACHE_OVERFLOW_BYTES = 1024 * 1024 * 1024
 const MODEL_SCREEN_SPACE_ERROR = 2
 const MODEL_GROUND_CLEARANCE_METERS = 80
 
-function resolveLayerDatasetId(layer?: { datasetId?: unknown; id?: unknown } | null): string {
-  const direct = String(layer?.datasetId || '').trim()
-  if (direct) return direct
-  const rawId = String(layer?.id || '').trim()
-  if (!rawId) return ''
-  const cleaned = rawId.replace(/^model:/i, '').replace(/^active:/i, '')
-  const parts = cleaned.split(':').map((part) => part.trim()).filter(Boolean)
-  return parts.at(-1) || cleaned
-}
-
 function applyModelHeightOffset(entry: ModelTilesetEntry, offsetMeters: number): void {
   const surface = Cesium.Cartesian3.fromRadians(entry.longitude, entry.latitude, 0)
   const offset = Cesium.Cartesian3.fromRadians(entry.longitude, entry.latitude, offsetMeters)
@@ -524,13 +514,13 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
 
   const saveModelHeightOffset = useCallback(async () => {
     const activeLayer = activeModelLayers[0]
-    const datasetId = resolveLayerDatasetId(activeLayer)
-    if (!datasetId) {
+    const targetDatasetId = activeLayer?.datasetId || (activeLayer?.id ? activeLayer.id.replace('model:', '') : null)
+    if (!targetDatasetId) {
       await modal.alert('Height not saved', 'Open a saved 3D model from the Data Catalog before saving height.')
       return
     }
     try {
-      await updateDatasetOwnerMetadata(projectId, datasetId, {
+      await updateDatasetOwnerMetadata(projectId, targetDatasetId, {
         height_offset: modelHeightOffset,
       })
       await modal.alert('Height saved', '3D model height offset saved. It will be restored on reload.')
@@ -740,15 +730,20 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
         maximumScreenSpaceError: MODEL_SCREEN_SPACE_ERROR,
         cacheBytes: MODEL_TILE_CACHE_BYTES,
         maximumCacheOverflowBytes: MODEL_TILE_CACHE_OVERFLOW_BYTES,
-        skipLevelOfDetail: false,
-        dynamicScreenSpaceError: false,
+        skipLevelOfDetail: true,
+        baseScreenSpaceError: 1024,
+        skipScreenSpaceErrorFactor: 16,
+        skipLevels: 1,
+        immediatelyLoadDesiredLevelOfDetail: true,
+        loadSiblings: false,
+        dynamicScreenSpaceError: true,
         progressiveResolutionHeightFraction: 0,
         cullRequestsWhileMoving: false,
         preferLeaves: true,
         backFaceCulling: false,
       })
       tileset.maximumScreenSpaceError = MODEL_SCREEN_SPACE_ERROR
-      tileset.dynamicScreenSpaceError = false
+      tileset.dynamicScreenSpaceError = true
       const cartographic = Cesium.Cartographic.fromCartesian(tileset.boundingSphere.center)
       const entry: ModelTilesetEntry = {
         tileset,
@@ -1159,34 +1154,27 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       setViewerReady(false)
     }
 
-    const modelTilesets = modelTilesetsRef.current
-    const vectorSources = vectorSourcesRef.current
     return () => {
       handler?.destroy()
-      if (pointCloudRef.current) {
-        viewer?.scene.primitives.remove(pointCloudRef.current)
-        pointCloudRef.current = null
+      if (viewerRef.current) {
+        try {
+          viewerRef.current.entities.removeAll()
+          viewerRef.current.scene.primitives.removeAll()
+          viewerRef.current.dataSources.removeAll(true)
+          viewerRef.current.imageryLayers.removeAll(true)
+          viewerRef.current.destroy()
+        } catch (error) {
+          console.warn('Cesium viewer cleanup skipped:', error)
+        } finally {
+          viewerRef.current = null
+        }
       }
-      for (const entry of modelTilesets.values()) {
-        viewer?.scene.primitives.remove(entry.tileset)
-      }
-      modelTilesets.clear()
-      if (orthomosaicLayerRef.current) {
-        viewer?.imageryLayers.remove(orthomosaicLayerRef.current, true)
-        orthomosaicLayerRef.current = null
-      }
-      for (const source of vectorSources.values()) {
-        viewer?.dataSources.remove(source, true)
-      }
-      vectorSources.clear()
-      for (const id of measureEntityIdsRef.current) {
-        const entity = viewer?.entities.getById(id)
-        if (entity) viewer?.entities.remove(entity)
-      }
+      pointCloudRef.current = null
+      modelTilesetsRef.current.clear()
+      vectorSourcesRef.current.clear()
+      orthomosaicLayerRef.current = null
       measureEntityIdsRef.current = []
       measurePointsRef.current = []
-      viewer?.destroy()
-      viewerRef.current = null
       setViewerReady(false)
     }
   }, [])

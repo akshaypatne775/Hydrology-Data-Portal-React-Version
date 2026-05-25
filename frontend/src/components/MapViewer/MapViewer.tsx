@@ -461,39 +461,54 @@ function MapController({
 
     const datasetName = activeCog.name.replace(/\.tiff?$/i, '')
     const boundsUrl = `${API_BASE}/api/datasets/${encodeURIComponent(projectId)}/${encodeURIComponent(datasetName)}/bounds`
-    const backendBounds = fetch(boundsUrl, { credentials: 'include' })
-      .then((res) => (res.ok ? res.json() as Promise<{ bounds?: [number, number, number, number] | null }> : null))
-      .then((data) => wgs84Bounds(data?.bounds))
-      .catch(() => null)
-    const tilesetBounds = fetchStaticTileMeta(tileUrl)
-      .then((meta) => {
-        if (meta?.bounds_wgs84 && meta.bounds_wgs84.length === 4) {
-          const [west, south, east, north] = meta.bounds_wgs84
-          return [
-            [south, west],
-            [north, east],
-          ] as FitBounds
+    void (async () => {
+      try {
+        const res = await fetch(boundsUrl, { credentials: 'include' })
+        if (cancelled) return
+        if (res.ok) {
+          const data = (await res.json()) as { bounds?: [number, number, number, number] | null }
+          const backendFit = wgs84Bounds(data?.bounds)
+          if (backendFit) {
+            fitNow(backendFit)
+            return
+          }
         }
-        return null
-      })
-      .catch(() => null)
-    const kmlBounds = fetch(`${base}doc.kml`, { credentials: 'include' })
-      .then(async (res) => (res.ok ? parseKmlLatLonBounds(await res.text()) : null))
-      .catch(() => null)
-    const tileMapResourceBounds = fetch(`${base}tilemapresource.xml`, { credentials: 'include' })
-      .then(async (res) => (res.ok ? parseTileMapResourceBounds(await res.text()) : null))
-      .catch(() => null)
+      } catch {
+        // Fall back to local tile metadata only when backend bounds are unavailable.
+      }
 
-    void backendBounds.then(fitNow)
-    void Promise.any(
-      [tilesetBounds, kmlBounds, tileMapResourceBounds].map((promise) => (
-        promise.then((bounds) => (bounds ? bounds : Promise.reject(new Error('No bounds'))))
-      )),
-    )
-      .then(fitNow)
-      .catch(() => {
+      if (cancelled || didFit) return
+
+      const tilesetBounds = fetchStaticTileMeta(tileUrl)
+        .then((meta) => {
+          if (meta?.bounds_wgs84 && meta.bounds_wgs84.length === 4) {
+            const [west, south, east, north] = meta.bounds_wgs84
+            return [
+              [south, west],
+              [north, east],
+            ] as FitBounds
+          }
+          return null
+        })
+        .catch(() => null)
+      const kmlBounds = fetch(`${base}doc.kml`, { credentials: 'include' })
+        .then(async (res) => (res.ok ? parseKmlLatLonBounds(await res.text()) : null))
+        .catch(() => null)
+      const tileMapResourceBounds = fetch(`${base}tilemapresource.xml`, { credentials: 'include' })
+        .then(async (res) => (res.ok ? parseTileMapResourceBounds(await res.text()) : null))
+        .catch(() => null)
+
+      try {
+        const fallbackBounds = await Promise.any(
+          [tilesetBounds, kmlBounds, tileMapResourceBounds].map((promise) => (
+            promise.then((bounds) => (bounds ? bounds : Promise.reject(new Error('No bounds'))))
+          )),
+        )
+        fitNow(fallbackBounds)
+      } catch {
         // Ignore auto-zoom fallback failure and keep the map usable.
-      })
+      }
+    })()
 
     return () => {
       cancelled = true

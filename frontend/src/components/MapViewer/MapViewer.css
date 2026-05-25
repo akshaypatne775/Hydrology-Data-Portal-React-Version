@@ -414,7 +414,7 @@
   flex: 1;
   min-height: 0;
   min-width: 0;
-  background: #ffffff;
+  background: #ffffff !important;
 }
 
 .mv-maps--split .mv-map-wrap--compare {
@@ -476,14 +476,14 @@
 
 .mv-leaflet {
   z-index: 0;
-  background: #ffffff;
+  background: #ffffff !important;
 }
 
 .mv-leaflet .leaflet-container {
   height: 100%;
   width: 100%;
   font-family: inherit;
-  background: #ffffff;
+  background: #ffffff !important;
 }
 
 .leaflet-container {
