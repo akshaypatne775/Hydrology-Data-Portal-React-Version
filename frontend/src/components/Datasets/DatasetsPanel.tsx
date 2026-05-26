@@ -43,6 +43,11 @@ type DatasetRow = {
   datasetType?: string
   processedSize?: string
   height_offset?: number | string
+  cogPath?: string
+  cogRelPath?: string
+  rescaleMin?: number | string
+  rescaleMax?: number | string
+  boundsWgs84?: [number, number, number, number]
 }
 
 type DatasetsPanelProps = {
@@ -277,6 +282,18 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
       : (file.layer_url || '').toLowerCase().endsWith('tileset.json')
         ? `${API_BASE}/data/${file.rel_path.replace(/\/tileset\.json$/i, '').replace(/\/$/, '')}/{z}/{x}/{y}.png`
         : toSameOriginBackendUrl(file.layer_url)
+  const parseBounds = (value?: string): [number, number, number, number] | undefined => {
+    if (!value) return undefined
+    try {
+      const parsed = JSON.parse(value) as unknown
+      if (!Array.isArray(parsed) || parsed.length !== 4) return undefined
+      const bounds = parsed.map((item) => Number(item))
+      if (bounds.every(Number.isFinite)) return bounds as [number, number, number, number]
+    } catch {
+      return undefined
+    }
+    return undefined
+  }
   return {
     id: file.dataset_id ? `dataset-${file.dataset_id}` : `file-${file.rel_path}`,
     fileName: file.name,
@@ -298,6 +315,11 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
     datasetType: file.dataset_type,
     processedSize: file.processed_size,
     height_offset: file.height_offset,
+    cogPath: file.cog_path,
+    cogRelPath: file.cog_rel_path,
+    rescaleMin: file.rescale_min,
+    rescaleMax: file.rescale_max,
+    boundsWgs84: parseBounds(file.bounds_wgs84),
   }
 }
 
@@ -332,6 +354,11 @@ function buildActiveLayer(projectId: string, row: DatasetRow) {
     processedSize: row.processedSize || row.size,
     uploadDate: row.uploadDateRaw,
     height_offset: row.height_offset,
+    cogPath: row.cogPath,
+    cogRelPath: row.cogRelPath,
+    rescaleMin: row.rescaleMin,
+    rescaleMax: row.rescaleMax,
+    boundsWgs84: row.boundsWgs84,
   }
 }
 

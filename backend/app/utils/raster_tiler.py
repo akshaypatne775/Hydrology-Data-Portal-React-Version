@@ -47,6 +47,131 @@ def _normalize_dataset_type(value: str, fallback_name: str = "") -> str:
     return "ortho"
 
 
+def calculate_percentile_rescale(raster_path: str | Path) -> dict[str, float] | None:
+    try:
+        import rasterio
+        from rasterio.enums import Resampling
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("Percentile rescale calculation needs rasterio installed.") from exc
+
+    with rasterio.open(Path(raster_path).resolve()) as dataset:
+        if dataset.count < 1:
+            return None
+        max_preview_size = 1024
+        scale = max(dataset.width / max_preview_size, dataset.height / max_preview_size, 1)
+        out_width = max(1, int(dataset.width / scale))
+        out_height = max(1, int(dataset.height / scale))
+        data = dataset.read(
+            1,
+            out_shape=(out_height, out_width),
+            masked=True,
+            resampling=Resampling.bilinear,
+        )
+
+    values = data.compressed() if np.ma.isMaskedArray(data) else data.reshape(-1)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return None
+    low, high = np.percentile(values, [5, 95])
+    if float(low) == float(high):
+        high = low + 1
+    return {
+        "min": round(float(low), 3),
+        "max": round(float(high), 3),
+    }
+
+
+def convert_tif_to_cog(
+    input_tif: str,
+    output_cog: str,
+    dataset_name: str,
+    dataset_type: str,
+    local_data_path: str,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
+) -> dict[str, object]:
+    try:
+        import rasterio
+        from rasterio.warp import transform_bounds
+        from rio_cogeo.cogeo import cog_translate
+        from rio_cogeo.profiles import cog_profiles
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("COG conversion needs rasterio, rio-cogeo, and rio-tiler installed.") from exc
+
+    normalized_type = _normalize_dataset_type(dataset_type, dataset_name)
+    in_abs = Path(input_tif).resolve()
+    out_abs = Path(output_cog).resolve()
+    local_root = Path(local_data_path).resolve()
+    if not out_abs.is_relative_to(local_root):
+        raise RuntimeError("Refusing to write COG outside Project_Data")
+    out_abs.parent.mkdir(parents=True, exist_ok=True)
+    out_abs.unlink(missing_ok=True)
+    last_progress_emit = 0.0
+
+    def emit_progress(stage: str, progress: float, **extra: object) -> None:
+        nonlocal last_progress_emit
+        if not progress_callback:
+            return
+        now = time.time()
+        if progress < 99 and now - last_progress_emit < 0.5:
+            return
+        last_progress_emit = now
+        progress_callback(
+            {
+                "stage": stage,
+                "progress_percent": round(max(1.0, min(99.0, progress)), 1),
+                **extra,
+            },
+        )
+
+    emit_progress("Opening GeoTIFF", 8)
+    with rasterio.open(in_abs) as src:
+        if not src.crs:
+            raise RuntimeError("TIFF has no CRS. Please export with EPSG/CRS before upload.")
+        bounds_wgs84_raw = transform_bounds(src.crs, "EPSG:4326", *src.bounds, densify_pts=21)
+        bounds_wgs84 = [
+            max(-180.0, float(bounds_wgs84_raw[0])),
+            max(-85.05112878, float(bounds_wgs84_raw[1])),
+            min(180.0, float(bounds_wgs84_raw[2])),
+            min(85.05112878, float(bounds_wgs84_raw[3])),
+        ]
+        source_crs = str(src.crs)
+        band_count = int(src.count)
+
+    profile_name = "deflate"
+    dst_profile = cog_profiles.get(profile_name)
+    dst_profile.update(
+        {
+            "BIGTIFF": "IF_SAFER",
+            "BLOCKSIZE": 512,
+            "OVERVIEWS": "AUTO",
+        },
+    )
+    emit_progress("Converting GeoTIFF to COG", 35)
+    started = time.time()
+    cog_translate(
+        str(in_abs),
+        str(out_abs),
+        dst_profile,
+        in_memory=False,
+        quiet=True,
+    )
+    emit_progress("Calculating DEM display range", 86)
+    rescale = calculate_percentile_rescale(out_abs) if normalized_type in {"dtm", "dsm"} else None
+    elapsed = round(time.time() - started, 2)
+    emit_progress("Finalizing COG", 99, eta_seconds=0)
+    return {
+        "engine": "rio-cogeo",
+        "cog_path": str(out_abs),
+        "bounds_wgs84": bounds_wgs84,
+        "source_crs": source_crs,
+        "band_count": band_count,
+        "dataset_type": normalized_type,
+        "rescale": rescale,
+        "elapsed_seconds": elapsed,
+        "bytes_written": out_abs.stat().st_size if out_abs.is_file() else 0,
+    }
+
+
 def _zoom_for_raster_resolution(ground_res_m: float, latitude: float, max_zoom_limit: int) -> int:
     if not math.isfinite(ground_res_m) or ground_res_m <= 0:
         return min(max_zoom_limit, 18)

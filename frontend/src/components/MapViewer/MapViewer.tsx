@@ -61,6 +61,12 @@ type ViewerLayer = {
   name: string
   url: string
   rawPath?: string
+  layerType?: string
+  cogPath?: string
+  cogRelPath?: string
+  rescaleMin?: number | string
+  rescaleMax?: number | string
+  boundsWgs84?: [number, number, number, number]
   datasetId?: string
   datasetType?: string
   month?: string
@@ -279,7 +285,8 @@ function isStaticXyzTileTemplate(url: string): boolean {
   return (
     (url.includes('/tiles/') || url.includes('/data/')) &&
     url.includes('{z}/{x}/{y}.png') &&
-    !url.includes('/api/cog/')
+    !url.includes('/api/cog/') &&
+    !url.includes('/api/titiler/')
   )
 }
 
@@ -293,6 +300,30 @@ type StaticTileMeta = {
   zoom_max?: number
   zoom_min?: number
   bounds_wgs84?: [number, number, number, number]
+}
+
+function buildTitilerTileUrl(layer: {
+  url?: string
+  layerType?: string
+  datasetType?: string
+  cogPath?: string
+  rescaleMin?: number | string
+  rescaleMax?: number | string
+}): string {
+  const sourcePath = String(layer.cogPath || '').trim()
+  if (!sourcePath) {
+    return toSameOriginBackendUrl(layer.url || '') || layer.url || ''
+  }
+  const params = new URLSearchParams()
+  params.set('url', sourcePath.replace(/\\/g, '/'))
+  const rasterType = String(layer.layerType || layer.datasetType || '').toLowerCase()
+  const min = Number(layer.rescaleMin)
+  const max = Number(layer.rescaleMax)
+  if ((rasterType === 'dtm' || rasterType === 'dsm') && Number.isFinite(min) && Number.isFinite(max) && min !== max) {
+    params.set('colormap_name', 'agisoft_dem')
+    params.set('rescale', `${min},${max}`)
+  }
+  return `${API_BASE}/api/titiler/tiles/WebMercatorQuad/{z}/{x}/{y}@1x?${params.toString()}`
 }
 
 async function fetchStaticTileMeta(tileUrl: string): Promise<StaticTileMeta | null> {
@@ -420,9 +451,9 @@ function MapController({
     const activeCog = layers.find((layer) => layer.projectId === projectId && layer.url === selectedUrl) ?? layers[0]
     if (!activeCog) return
 
-    const rawPath = activeCog.rawPath ?? null
+    const rawPath = activeCog.rawPath ?? activeCog.cogPath ?? null
     const tileUrl = activeCog.url
-    const fitKey = rawPath ?? (isStaticXyzTileTemplate(tileUrl) ? tileUrl : null)
+    const fitKey = rawPath ?? activeCog.boundsWgs84?.join(',') ?? (isStaticXyzTileTemplate(tileUrl) ? tileUrl : null)
     if (!fitKey) return
 
     let cancelled = false
@@ -442,8 +473,16 @@ function MapController({
       ]
     }
 
+    const metadataBounds = wgs84Bounds(activeCog.boundsWgs84)
+    if (metadataBounds) {
+      fitNow(metadataBounds)
+      return () => {
+        cancelled = true
+      }
+    }
+
     if (rawPath) {
-      void fetch(`${API_BASE}/api/cog/info?url=${encodeURIComponent(rawPath)}`, {
+      void fetch(`${API_BASE}/api/titiler/info?url=${encodeURIComponent(rawPath)}`, {
         credentials: 'include',
       })
         .then((res) => res.json() as Promise<{ bounds?: [number, number, number, number] }>)
@@ -1038,32 +1077,70 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const projectCogLayers = useMemo<ViewerLayer[]>(() => {
     const fromFiles = projectFiles
       .filter((file) => file.layer_url && file.status === 'Web-Ready' && file.type === 'cog')
-      .map((file) => ({
-        id: file.dataset_id || file.rel_path || file.name,
-        projectId: projectId || '',
-        name: file.name,
-        url: toSameOriginBackendUrl(file.layer_url) || file.layer_url,
-        rawPath: undefined,
-        datasetId: file.dataset_id,
-        datasetType: file.dataset_type,
-        month: file.month,
-      }))
+      .map((file) => {
+        const bounds = (() => {
+          if (!file.bounds_wgs84) return undefined
+          try {
+            const parsed = JSON.parse(file.bounds_wgs84) as unknown
+            if (!Array.isArray(parsed) || parsed.length !== 4) return undefined
+            const values = parsed.map((item) => Number(item))
+            return values.every(Number.isFinite) ? values as [number, number, number, number] : undefined
+          } catch {
+            return undefined
+          }
+        })()
+        const layerType = file.layer_type || (['dtm', 'dsm', 'ortho'].includes(String(file.dataset_type).toLowerCase())
+          ? String(file.dataset_type).toUpperCase().replace('ORTHO', 'Ortho')
+          : 'cog')
+        const baseLayer = {
+          id: file.dataset_id || file.rel_path || file.name,
+          projectId: projectId || '',
+          name: file.name,
+          url: toSameOriginBackendUrl(file.layer_url) || file.layer_url,
+          rawPath: file.cog_path,
+          layerType,
+          cogPath: file.cog_path,
+          cogRelPath: file.cog_rel_path,
+          rescaleMin: file.rescale_min,
+          rescaleMax: file.rescale_max,
+          boundsWgs84: bounds,
+          datasetId: file.dataset_id,
+          datasetType: file.dataset_type,
+          month: file.month,
+        }
+        return {
+          ...baseLayer,
+          url: buildTitilerTileUrl(baseLayer),
+        }
+      })
     const fromContext = activeLayers
       .filter((item) => (
         item.projectId === projectId &&
         ['cog', 'Ortho', 'DTM', 'DSM'].includes(String(item.layerType)) &&
         Boolean(item.url)
       ))
-      .map((item) => ({
-        id: item.id,
-        projectId: item.projectId,
-        name: item.name,
-        url: item.url,
-        rawPath: item.rawPath,
-        datasetId: item.datasetId,
-        datasetType: item.datasetType,
-        month: item.month,
-      }))
+      .map((item) => {
+        const baseLayer = {
+          id: item.id,
+          projectId: item.projectId,
+          name: item.name,
+          url: item.url,
+          rawPath: item.rawPath || item.cogPath,
+          layerType: item.layerType,
+          cogPath: item.cogPath,
+          cogRelPath: item.cogRelPath,
+          rescaleMin: item.rescaleMin,
+          rescaleMax: item.rescaleMax,
+          boundsWgs84: item.boundsWgs84,
+          datasetId: item.datasetId,
+          datasetType: item.datasetType,
+          month: item.month,
+        }
+        return {
+          ...baseLayer,
+          url: buildTitilerTileUrl(baseLayer),
+        }
+      })
     const seen = new Set<string>()
     return [...fromFiles, ...fromContext].filter((layer) => {
       const key = layer.datasetId || layer.url || layer.id
@@ -1319,6 +1396,27 @@ export function MapViewer({ projectId }: MapViewerProps) {
       return
     }
     const layer = projectCogLayers.find((item) => item.url === cogTileUrl)
+    if (layer?.boundsWgs84) {
+      const [minX, minY, maxX, maxY] = layer.boundsWgs84
+      setCogBounds([[minY, minX], [maxY, maxX]])
+      return
+    }
+    if (layer?.cogPath) {
+      let cancelled = false
+      void fetch(`${API_BASE}/api/titiler/info?url=${encodeURIComponent(layer.cogPath)}`, { credentials: 'include' })
+        .then((res) => res.ok ? res.json() as Promise<{ bounds?: [number, number, number, number] | null }> : null)
+        .then((data) => {
+          if (cancelled || !data?.bounds) return
+          const [minX, minY, maxX, maxY] = data.bounds
+          setCogBounds([[minY, minX], [maxY, maxX]])
+        })
+        .catch(() => {
+          if (!cancelled) setCogBounds(null)
+        })
+      return () => {
+        cancelled = true
+      }
+    }
     const datasetName = layer?.name?.replace(/\.tiff?$/i, '')
     if (!datasetName) {
       setCogBounds(null)

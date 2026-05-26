@@ -26,6 +26,11 @@ export type ActiveLayerConfig = {
   processedSize?: string
   uploadDate?: string
   height_offset?: number | string
+  cogPath?: string
+  cogRelPath?: string
+  rescaleMin?: number | string
+  rescaleMax?: number | string
+  boundsWgs84?: [number, number, number, number]
 }
 
 export function useWorkspaceState() {

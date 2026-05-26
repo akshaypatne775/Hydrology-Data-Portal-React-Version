@@ -26,6 +26,10 @@ export type DatasetStatusResponse = {
   estimated_tiles?: string | number
   error?: string
   cog_path?: string
+  cog_rel_path?: string
+  rescale_min?: string | number
+  rescale_max?: string | number
+  bounds_wgs84?: string
   cog_tile_url_template?: string
 }
 
@@ -53,6 +57,11 @@ export type ProjectFile = {
   processed_size?: string
   upload_date?: string
   height_offset?: string | number
+  cog_path?: string
+  cog_rel_path?: string
+  rescale_min?: string | number
+  rescale_max?: string | number
+  bounds_wgs84?: string
   size_bytes: string
   status: string
   updated_at?: string

@@ -311,7 +311,7 @@ if errorlevel 1 (
   goto menu
 )
 
-start "Droid Cloud - Backend" /D "%BACKEND_DIR%" cmd /k "venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000"
+start "Droid Cloud - Backend" /D "%BACKEND_DIR%" cmd /k ""venv\Scripts\python.exe" -m uvicorn app.main:app --app-dir "%BACKEND_DIR%" --reload --host 127.0.0.1 --port 8000"
 start "Droid Cloud - Frontend" /D "%FRONTEND_DIR%" cmd /k "npm run dev"
 
 echo [SUCCESS] Backend and frontend windows launched.

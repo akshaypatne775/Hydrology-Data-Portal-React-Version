@@ -28,6 +28,7 @@ from email.message import EmailMessage
 
 from fastapi import (
     BackgroundTasks,
+    Depends,
     FastAPI,
     File,
     Form,
@@ -38,16 +39,16 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 import laspy
 import numpy as np
 from PIL import Image
 from pydantic import BaseModel
+from rio_tiler import colormap as rio_colormap
 from titiler.core.factory import TilerFactory
 
 from app.core.database import configure_database, ensure_tables, get_db_connection
-from app.utils.raster_tiler import run_rasterio_tiler
+from app.utils.raster_tiler import convert_tif_to_cog, run_rasterio_tiler
 
 # Project_Data lives beside backend/ and frontend/ (repo root).
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -76,9 +77,8 @@ _load_local_env_file()
 _DEFAULT_PROJECT_DATA = BASE_DIR / "Project_Data"
 LOCAL_DATA_PATH = os.getenv("LOCAL_DATA_PATH", str(_DEFAULT_PROJECT_DATA))
 
-# Map tiles, ortho, DEM, terrain quantized-mesh, videos, etc.
-# - `/data` â€” preferred URL prefix for files under Project_Data (see StaticFiles mount).
-# - `/tiles` â€” same directory, kept for flood/media and older clients.
+# Map tiles, ortho, DEM, terrain quantized-mesh, videos, etc. are served only
+# through authenticated routes below. Do not mount Project_Data as StaticFiles.
 ISSUES_DB_PATH = Path(LOCAL_DATA_PATH) / "issues.db"
 
 Path(LOCAL_DATA_PATH).mkdir(parents=True, exist_ok=True)
@@ -140,13 +140,44 @@ SESSION_SIGNING_SECRET_RAW = _load_persistent_session_secret()
 SESSION_SIGNING_SECRET = SESSION_SIGNING_SECRET_RAW.encode("utf-8")
 _PROJECT_FILES_CACHE: dict[str, tuple[float, list[dict[str, str]]]] = {}
 FRONTEND_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv(
-        "FRONTEND_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173",
-    ).split(",")
-    if origin.strip()
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://portal.droidminingsolutions.com",
 ]
+RATE_LIMIT_WINDOW_SECONDS = 60.0
+RATE_LIMIT_HEAVY_REQUESTS = 5
+_RATE_LIMIT_BUCKETS: dict[str, list[float]] = {}
+
+
+def _build_agisoft_dem_colormap() -> dict[int, tuple[int, int, int, int]]:
+    stops = [
+        (0.00, (0, 0, 130)),
+        (0.25, (0, 255, 255)),
+        (0.50, (0, 255, 0)),
+        (0.75, (255, 255, 0)),
+        (1.00, (139, 0, 0)),
+    ]
+    color_map: dict[int, tuple[int, int, int, int]] = {}
+    for index in range(256):
+        position = index / 255
+        for stop_index in range(len(stops) - 1):
+            left_pos, left_color = stops[stop_index]
+            right_pos, right_color = stops[stop_index + 1]
+            if left_pos <= position <= right_pos:
+                ratio = (position - left_pos) / (right_pos - left_pos)
+                rgb = tuple(
+                    int(round(left_color[channel] + ratio * (right_color[channel] - left_color[channel])))
+                    for channel in range(3)
+                )
+                color_map[index] = (*rgb, 255)
+                break
+    return color_map
+
+
+rio_colormap.cmap = rio_colormap.cmap.register(
+    {"agisoft_dem": _build_agisoft_dem_colormap()},
+    overwrite=True,
+)
 
 app = FastAPI(
     title="Hydrology & Mapping Portal API",
@@ -246,20 +277,11 @@ app.include_router(
     prefix="/api/cog",
     tags=["COG"],
 )
-
-app.mount(
-    "/tiles",
-    StaticFiles(directory=LOCAL_DATA_PATH),
-    name="local-tiles",
+app.include_router(
+    cog_tiler.router,
+    prefix="/api/titiler",
+    tags=["TiTiler"],
 )
-app.mount(
-    "/data",
-    StaticFiles(directory=str(LOCAL_DATA_PATH)),
-    name="data",
-)
-# Static files under Project_Data, e.g.:
-# /data/projects/{project_id}/processed/{tile_folder}/{z}/{x}/{y}.png
-# /data/pointclouds/{project_id}/{tileset_id}/tileset.json
 
 # Study metrics placeholders for report/demo API responses (PDF scope 964 Acres).
 CATCHMENT_STATS: list[dict[str, str]] = [
@@ -587,6 +609,23 @@ def _format_size_bytes(size_bytes: int) -> str:
         return f"{gb:.2f} GB"
     mb = size_bytes / (1024 * 1024)
     return f"{mb:.0f} MB"
+
+
+def _titiler_tile_url_template(
+    base_url: str,
+    cog_path: str,
+    layer_type: str = "",
+    rescale_min: str = "",
+    rescale_max: str = "",
+) -> str:
+    params = {"url": cog_path.replace("\\", "/")}
+    if layer_type in {"DTM", "DSM"} and rescale_min and rescale_max:
+        params["colormap_name"] = "agisoft_dem"
+        params["rescale"] = f"{rescale_min},{rescale_max}"
+    return (
+        f"{base_url.rstrip('/')}/api/titiler/tiles/WebMercatorQuad/"
+        f"{{z}}/{{x}}/{{y}}@1x?{urlencode(params)}"
+    )
 
 
 def _upload_session_dir(filename: str, total_chunks: int, project_id: str) -> Path:
@@ -1288,7 +1327,8 @@ async def process_dataset_background(
     tile_output_dir: str,
     tile_folder: str,
 ) -> None:
-    tiles_dir = str(Path(tile_output_dir).resolve())
+    output_dir = Path(tile_output_dir).resolve()
+    cog_path = output_dir / f"{tile_folder}.cog.tif"
     existing_status = _read_dataset_status(project_id, dataset_id) or {}
     common_status = {
         "dataset_id": dataset_id,
@@ -1303,8 +1343,8 @@ async def process_dataset_background(
         dataset_id,
         {
             **common_status,
-            "status": "Generating XYZ tiles",
-            "stage": "Queued for tiling",
+            "status": "Converting COG",
+            "stage": "Queued for COG conversion",
             "progress_percent": "5",
             "eta_seconds": "",
             "started_at": _now_iso(),
@@ -1320,13 +1360,10 @@ async def process_dataset_background(
             eta_seconds = str(payload.get("eta_seconds", ""))
             status_payload = {
                 **common_status,
-                "status": "Generating XYZ tiles",
+                "status": "Converting COG",
                 "stage": stage,
                 "progress_percent": progress_percent,
                 "eta_seconds": eta_seconds,
-                "tiles_written": str(payload.get("tiles_written", "")),
-                "estimated_tiles": str(payload.get("estimated_tiles", "")),
-                "zoom_max": str(payload.get("zoom_max", "")),
                 "updated_at": _now_iso(),
             }
             _write_dataset_status(project_id, dataset_id, status_payload)
@@ -1344,17 +1381,28 @@ async def process_dataset_background(
                 },
             )
 
-        await process_tif_to_tiles(
+        result = await asyncio.to_thread(
+            convert_tif_to_cog,
             input_tif,
-            tiles_dir,
-            project_id,
+            str(cog_path),
             file_name or Path(input_tif).name,
             str(common_status.get("dataset_type", "")),
+            LOCAL_DATA_PATH,
             update_progress,
         )
-        tiles_rel = Path(tiles_dir).resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
-        processed_size_bytes = calculate_folder_size(Path(tiles_dir))
+        cog_abs = Path(str(result.get("cog_path") or cog_path)).resolve()
+        cog_rel = cog_abs.relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+        processed_size_bytes = cog_abs.stat().st_size if cog_abs.is_file() else calculate_folder_size(output_dir)
         processed_size = _format_size_bytes(processed_size_bytes)
+        layer_type = _raster_layer_type(str(common_status.get("dataset_type", "")), file_name or Path(input_tif).name)
+        rescale = result.get("rescale")
+        rescale_min = ""
+        rescale_max = ""
+        if isinstance(rescale, dict):
+            rescale_min = str(rescale.get("min") or "")
+            rescale_max = str(rescale.get("max") or "")
+        bounds_wgs84 = result.get("bounds_wgs84")
+        bounds_text = json.dumps(bounds_wgs84) if isinstance(bounds_wgs84, list) else ""
         _upsert_processing_job(
             project_id,
             {
@@ -1363,7 +1411,12 @@ async def process_dataset_background(
                 "file_name": file_name or Path(input_tif).name,
                 "status": "Completed",
                 "updated_at": _now_iso(),
-                "result_url": f"/data/{tiles_rel}",
+                "result_url": f"/data/{cog_rel}",
+                "cog_path": str(cog_abs),
+                "cog_rel_path": cog_rel,
+                "rescale_min": rescale_min,
+                "rescale_max": rescale_max,
+                "bounds_wgs84": bounds_text,
             },
         )
         _invalidate_project_files_cache(project_id)
@@ -1374,7 +1427,15 @@ async def process_dataset_background(
                 **common_status,
                 "status": "Web-Ready",
                 "updated_at": _now_iso(),
-                "tiles_rel_path": tiles_rel,
+                "layer_type": layer_type,
+                "cog_path": str(cog_abs),
+                "cog_rel_path": cog_rel,
+                "tiles_rel_path": "",
+                "bounds_wgs84": bounds_text,
+                "rescale_min": rescale_min,
+                "rescale_max": rescale_max,
+                "source_crs": str(result.get("source_crs") or ""),
+                "cog_engine": str(result.get("engine") or "rio-cogeo"),
                 "processed_size_bytes": str(processed_size_bytes),
                 "processed_size": processed_size,
                 "stage": "Web-ready",
@@ -2013,7 +2074,19 @@ def _sync_dataset_metadata_to_processing_job(project_id: str, dataset_id: str, s
         item["file_name"] = str(st.get("dataset_name") or item.get("file_name") or dataset_id)
         item["status"] = str(st.get("status") or item.get("status") or "Completed")
         item["updated_at"] = str(st.get("updated_at") or _now_iso())
-        for key in ("height_offset", "dataset_type", "month", "raw_rel_path", "tiles_rel_path", "tileset_rel_path"):
+        for key in (
+            "height_offset",
+            "dataset_type",
+            "month",
+            "raw_rel_path",
+            "tiles_rel_path",
+            "tileset_rel_path",
+            "cog_path",
+            "cog_rel_path",
+            "rescale_min",
+            "rescale_max",
+            "bounds_wgs84",
+        ):
             if key in st:
                 item[key] = str(st.get(key) or "")
         break
@@ -2404,6 +2477,45 @@ def _require_admin(request: Request) -> dict[str, str | int]:
     return user
 
 
+def verify_admin(request: Request) -> dict[str, str | int]:
+    return _require_admin(request)
+
+
+def _client_ip_for_limit(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    forwarded_ip = forwarded_for.split(",", 1)[0].strip()
+    return forwarded_ip or (request.client.host if request.client else "unknown")
+
+
+def _enforce_rate_limit(
+    request: Request,
+    bucket_name: str,
+    limit: int = RATE_LIMIT_HEAVY_REQUESTS,
+    window_seconds: float = RATE_LIMIT_WINDOW_SECONDS,
+) -> None:
+    now = time.monotonic()
+    cutoff = now - window_seconds
+    ip_address = _client_ip_for_limit(request)
+    key = f"{bucket_name}:{ip_address}"
+    bucket = [stamp for stamp in _RATE_LIMIT_BUCKETS.get(key, []) if stamp >= cutoff]
+    if len(bucket) >= limit:
+        retry_after = max(1, int(window_seconds - (now - bucket[0])))
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many requests. Please try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)},
+        )
+    bucket.append(now)
+    _RATE_LIMIT_BUCKETS[key] = bucket
+    if len(_RATE_LIMIT_BUCKETS) > 10_000:
+        for stale_key in list(_RATE_LIMIT_BUCKETS):
+            _RATE_LIMIT_BUCKETS[stale_key] = [
+                stamp for stamp in _RATE_LIMIT_BUCKETS[stale_key] if stamp >= cutoff
+            ]
+            if not _RATE_LIMIT_BUCKETS[stale_key]:
+                _RATE_LIMIT_BUCKETS.pop(stale_key, None)
+
+
 def _is_admin_user_id(user_id: int) -> bool:
     with get_db_connection() as connection:
         row = connection.execute(
@@ -2690,8 +2802,10 @@ def auth_me(request: Request) -> dict[str, str | int]:
 
 
 @app.get("/api/admin/users/activity")
-def admin_user_activity(request: Request) -> dict[str, list[dict[str, str | int]]]:
-    _require_admin(request)
+def admin_user_activity(
+    request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
+) -> dict[str, list[dict[str, str | int]]]:
     now = datetime.now(timezone.utc)
     active_cutoff = now.timestamp() - 15 * 60
     with get_db_connection() as connection:
@@ -2763,8 +2877,11 @@ def admin_user_activity(request: Request) -> dict[str, list[dict[str, str | int]
 
 
 @app.get("/api/admin/users/{user_id}/projects")
-def admin_user_projects(user_id: int, request: Request) -> dict[str, list[ProjectOut]]:
-    _require_admin(request)
+def admin_user_projects(
+    user_id: int,
+    request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
+) -> dict[str, list[ProjectOut]]:
     with get_db_connection() as connection:
         rows = connection.execute(
             """
@@ -2795,8 +2912,8 @@ def admin_approve_user(
     user_id: int,
     payload: AdminUserApprovalPayload,
     request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
 ) -> dict[str, str]:
-    _require_admin(request)
     role = "admin" if payload.role.strip().lower() == "admin" else "user"
     with get_db_connection() as connection:
         row = connection.execute(
@@ -2834,8 +2951,8 @@ def admin_assign_user_role(
     user_id: int,
     payload: AdminUserRolePayload,
     request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
 ) -> dict[str, str]:
-    _require_admin(request)
     role = "admin" if payload.role.strip().lower() == "admin" else "user"
     with get_db_connection() as connection:
         row = connection.execute(
@@ -2865,8 +2982,11 @@ def admin_assign_user_role(
 
 
 @app.post("/api/admin/users/{user_id}/disapprove")
-def admin_disapprove_user(user_id: int, request: Request) -> dict[str, str]:
-    _require_admin(request)
+def admin_disapprove_user(
+    user_id: int,
+    request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
+) -> dict[str, str]:
     with get_db_connection() as connection:
         row = connection.execute(
             "SELECT email FROM users WHERE id = ?",
@@ -2894,8 +3014,11 @@ def admin_disapprove_user(user_id: int, request: Request) -> dict[str, str]:
 
 
 @app.delete("/api/admin/users/{user_id}")
-def admin_delete_user(user_id: int, request: Request) -> dict[str, str]:
-    _require_admin(request)
+def admin_delete_user(
+    user_id: int,
+    request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
+) -> dict[str, str]:
     with get_db_connection() as connection:
         row = connection.execute(
             "SELECT id FROM users WHERE id = ?",
@@ -2924,8 +3047,11 @@ def admin_delete_user(user_id: int, request: Request) -> dict[str, str]:
 
 
 @app.delete("/api/admin/users/{user_id}/advanced")
-def admin_advanced_delete_user(user_id: int, request: Request) -> dict[str, str | int]:
-    _require_admin(request)
+def admin_advanced_delete_user(
+    user_id: int,
+    request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
+) -> dict[str, str | int]:
     with get_db_connection() as connection:
         user_row = connection.execute(
             "SELECT id FROM users WHERE id = ?",
@@ -2965,8 +3091,11 @@ def admin_advanced_delete_user(user_id: int, request: Request) -> dict[str, str 
 
 
 @app.get("/api/admin/override/project/{project_id}")
-def admin_get_project_override(project_id: str, request: Request) -> dict[str, object]:
-    _require_admin(request)
+def admin_get_project_override(
+    project_id: str,
+    request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
+) -> dict[str, object]:
     safe_project_id = _safe_project_id(project_id)
     with get_db_connection() as connection:
         row = connection.execute(
@@ -3000,8 +3129,8 @@ def admin_patch_project_override(
     project_id: str,
     payload: AdminProjectPatchPayload,
     request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
 ) -> dict[str, object]:
-    _require_admin(request)
     safe_project_id = _safe_project_id(project_id)
     updates: dict[str, str] = {}
     for key in ("name", "location", "date", "status", "type"):
@@ -3009,7 +3138,7 @@ def admin_patch_project_override(
         if value is not None:
             updates[key] = value.strip()
     if not updates:
-        return admin_get_project_override(safe_project_id, request)
+        return admin_get_project_override(safe_project_id, request, admin_user)
     assignments = ", ".join(f"{key} = ?" for key in updates)
     values = [*updates.values(), safe_project_id]
     with get_db_connection() as connection:
@@ -3367,6 +3496,7 @@ async def upload_chunk(
     Chunks are written to a temp folder under LOCAL_DATA_PATH/uploads/chunks/.
     """
     user = _require_user(request)
+    _enforce_rate_limit(request, "upload")
     safe_project = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project)
     safe_name = _safe_pointcloud_basename(filename)
@@ -3411,6 +3541,7 @@ async def complete_upload(
     Uses streaming copy + per-chunk delete to limit peak disk and avoid RAM spikes.
     """
     user = _require_user(request)
+    _enforce_rate_limit(request, "upload")
     safe_project_id = _safe_project_id(payload.project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
     safe_name = _safe_pointcloud_basename(payload.filename)
@@ -3559,6 +3690,7 @@ async def process_dataset(
     month: str = Form(""),
 ) -> ProcessDatasetOut:
     user = _require_user(request)
+    _enforce_rate_limit(request, "upload")
     safe_project_id = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
     safe_name = _safe_dataset_upload_basename(file.filename or "")
@@ -3803,6 +3935,7 @@ async def process_dataset(
             "layer_type": _raster_layer_type(normalized_type, safe_name),
             "month": normalized_month,
             "raw_rel_path": raw_rel,
+            "cog_path": str((output_tile_dir / f"{tile_output_folder}.cog.tif").resolve()),
         },
     )
     _upsert_processing_job(
@@ -3827,17 +3960,19 @@ async def process_dataset(
         tile_output_folder,
     )
 
-    tiles_rel = output_tile_dir.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
-    tile_template = (
-        f"{str(request.base_url).rstrip('/')}/data/{tiles_rel}/{{z}}/{{x}}/{{y}}.png"
+    pending_cog_path = (output_tile_dir / f"{tile_output_folder}.cog.tif").resolve()
+    tile_template = _titiler_tile_url_template(
+        str(request.base_url),
+        str(pending_cog_path),
+        _raster_layer_type(normalized_type, safe_name),
     )
     return ProcessDatasetOut(
         status="success",
-        message="Dataset uploaded. Python Rasterio XYZ tiling started in background.",
+        message="Dataset uploaded. COG conversion started in background.",
         project_id=safe_project_id,
         dataset_id=dataset_id,
         dataset_name=safe_name,
-        cog_path="",
+        cog_path=str(pending_cog_path),
         cog_tile_url_template=tile_template,
     )
 
@@ -3850,6 +3985,7 @@ async def generate_contours(
     background_tasks: BackgroundTasks,
 ) -> ProcessDatasetOut:
     user = _require_user(request)
+    _enforce_rate_limit(request, "generate-contours")
     safe_project_id = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
     if payload.interval <= 0:
@@ -4108,6 +4244,7 @@ async def dataset_metadata(
     project_id: str = Form(...),
 ) -> dict[str, str]:
     user = _require_user(request)
+    _enforce_rate_limit(request, "upload")
     safe_project_id = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
     safe_name = _safe_dataset_upload_basename(file.filename or "")
@@ -4163,11 +4300,15 @@ def dataset_status(project_id: str, dataset_id: str, request: Request) -> dict[s
         status["cog_tile_url_template"] = f"{base}/data/{tiles_rel}/{{z}}/{{x}}/{{y}}.png"
     else:
         cog_path = status.get("cog_path", "")
+        if not cog_path and status.get("cog_rel_path", ""):
+            cog_path = str((Path(LOCAL_DATA_PATH) / status.get("cog_rel_path", "")).resolve())
         if cog_path:
-            encoded_cog_path = quote(cog_path.replace("\\", "/"), safe="")
-            status["cog_tile_url_template"] = (
-                f"{base}/api/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
-                f"?url={encoded_cog_path}"
+            status["cog_tile_url_template"] = _titiler_tile_url_template(
+                base,
+                cog_path,
+                str(status.get("layer_type") or _raster_layer_type(str(status.get("dataset_type") or ""), str(status.get("dataset_name") or ""))),
+                str(status.get("rescale_min") or ""),
+                str(status.get("rescale_max") or ""),
             )
     return status
 
@@ -4640,6 +4781,41 @@ def get_dataset_bounds(project_id: str, dataset_name: str, request: Request) -> 
     safe_dataset_name = dataset_name.strip()
     if not safe_dataset_name or "/" in safe_dataset_name or "\\" in safe_dataset_name or ".." in safe_dataset_name:
         raise HTTPException(status_code=400, detail="Invalid dataset_name")
+    for st in _project_dataset_statuses(safe_project_id):
+        dataset_id = str(st.get("dataset_id") or "")
+        status_name = str(st.get("dataset_name") or "")
+        tile_folder = str(st.get("tile_folder") or "")
+        cog_rel_path = str(st.get("cog_rel_path") or "")
+        candidates = {
+            dataset_id,
+            status_name,
+            Path(status_name).stem,
+            tile_folder,
+            Path(cog_rel_path).stem,
+        }
+        if safe_dataset_name in candidates:
+            bounds_text = str(st.get("bounds_wgs84") or "")
+            if bounds_text:
+                try:
+                    bounds = json.loads(bounds_text)
+                    if isinstance(bounds, list) and len(bounds) == 4:
+                        return {"bounds": [float(value) for value in bounds]}
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+            cog_path_text = str(st.get("cog_path") or "")
+            if not cog_path_text and cog_rel_path:
+                cog_path_text = str((Path(LOCAL_DATA_PATH) / cog_rel_path).resolve())
+            if cog_path_text:
+                try:
+                    import rasterio
+                    from rasterio.warp import transform_bounds
+
+                    with rasterio.open(Path(cog_path_text).resolve()) as src:
+                        if src.crs:
+                            minx, miny, maxx, maxy = transform_bounds(src.crs, "EPSG:4326", *src.bounds, densify_pts=21)
+                            return {"bounds": [float(minx), float(miny), float(maxx), float(maxy)]}
+                except Exception as exc:  # noqa: BLE001
+                    print(f"Error reading COG bounds: {exc}")
     tiles_dir = _resolve_dataset_tiles_dir(safe_project_id, safe_dataset_name)
     if not tiles_dir:
         return {"bounds": None}
@@ -4718,8 +4894,8 @@ def admin_update_dataset_metadata(
     project_id: str,
     payload: AdminDatasetMetaPayload,
     request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
 ) -> dict[str, str]:
-    _require_admin(request)
     safe_project_id = _safe_project_id(project_id)
     dataset_id = _safe_dataset_id(payload.dataset_id)
     st = _read_dataset_status(safe_project_id, dataset_id)
@@ -4749,8 +4925,8 @@ def admin_update_dataset_metadata(
 
 
 def _admin_dataset_status_by_key(project_id: str, dataset_key: str) -> tuple[str, dict[str, str]]:
-    clean_key = dataset_key.strip().strip("/")
-    if not clean_key or ".." in clean_key or "\\" in clean_key:
+    clean_key = os.path.basename(dataset_key.replace("\\", "/").strip().strip("/"))
+    if not clean_key or clean_key in {".", ".."}:
         raise HTTPException(status_code=400, detail="Invalid dataset_name")
     decoded = clean_key
     for st in _project_dataset_statuses(project_id):
@@ -4798,6 +4974,7 @@ def _dataset_status_matches_rel(project_id: str, st: dict[str, str], rel_path: s
         str(st.get("tileset_rel_path") or ""),
         str(st.get("vector_rel_path") or ""),
         str(st.get("model_rel_path") or ""),
+        str(st.get("cog_rel_path") or ""),
     ]
     tile_folder = str(st.get("tile_folder") or "").strip()
     if tile_folder:
@@ -4825,7 +5002,7 @@ def _find_dataset_status_for_rel(project_id: str, rel_path: str) -> tuple[str, d
 
 def _delete_dataset_artifacts(project_id: str, dataset_id: str, st: dict[str, str]) -> int:
     removed = 0
-    for key in ("raw_rel_path", "tiles_rel_path", "tileset_rel_path", "vector_rel_path", "model_rel_path"):
+    for key in ("raw_rel_path", "tiles_rel_path", "tileset_rel_path", "vector_rel_path", "model_rel_path", "cog_rel_path"):
         rel = str(st.get(key) or "").strip().replace("\\", "/").lstrip("/")
         if rel and ".." not in rel:
             removed += _safe_remove_dataset_path(Path(LOCAL_DATA_PATH) / rel)
@@ -4850,12 +5027,11 @@ def admin_update_dataset_metadata_by_name(
     dataset_name: str,
     payload: AdminDatasetPathMetaPayload,
     request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
 ) -> dict[str, str]:
-    user = _require_user(request)
     safe_project_id = _safe_project_id(project_id)
-    if str(user.get("role", "")).lower() != "admin":
-        _ensure_project_owner(int(user["id"]), safe_project_id)
-    dataset_id, st = _admin_dataset_status_by_key(safe_project_id, dataset_name)
+    safe_dataset_name = os.path.basename(dataset_name.replace("\\", "/").strip().strip("/"))
+    dataset_id, st = _admin_dataset_status_by_key(safe_project_id, safe_dataset_name)
     if payload.name is not None and payload.name.strip():
         st["dataset_name"] = payload.name.strip()
     if payload.month is not None:
@@ -4881,10 +5057,11 @@ def admin_delete_dataset_by_name(
     project_id: str,
     dataset_name: str,
     request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
 ) -> dict[str, str | int]:
-    _require_admin(request)
     safe_project_id = _safe_project_id(project_id)
-    dataset_id, st = _admin_dataset_status_by_key(safe_project_id, dataset_name)
+    safe_dataset_name = os.path.basename(dataset_name.replace("\\", "/").strip().strip("/"))
+    dataset_id, st = _admin_dataset_status_by_key(safe_project_id, safe_dataset_name)
     removed = _delete_dataset_artifacts(safe_project_id, dataset_id, st)
     return {"status": "success", "dataset_id": dataset_id, "removed_paths": removed}
 
@@ -5104,6 +5281,11 @@ def _dataset_extra_response_fields(st: dict[str, str]) -> dict[str, str]:
         "stage": str(st.get("stage") or ""),
         "progress_percent": str(st.get("progress_percent") or ""),
         "eta_seconds": str(st.get("eta_seconds") or ""),
+        "cog_path": str(st.get("cog_path") or ""),
+        "cog_rel_path": str(st.get("cog_rel_path") or ""),
+        "rescale_min": str(st.get("rescale_min") or ""),
+        "rescale_max": str(st.get("rescale_max") or ""),
+        "bounds_wgs84": str(st.get("bounds_wgs84") or ""),
     }
 
 
@@ -5112,6 +5294,86 @@ def _ensure_project_file_access(request: Request, project_id: str) -> dict[str, 
     if str(user.get("role", "")).lower() != "admin":
         _ensure_project_owner(int(user["id"]), project_id)
     return user
+
+
+def _safe_project_file_response_path(project_id: str, file_path: str) -> Path:
+    safe_project_id = _safe_project_id(project_id)
+    base_dir = (Path(LOCAL_DATA_PATH) / "projects" / safe_project_id).resolve()
+    cleaned_path = file_path.replace("\\", "/").lstrip("/")
+    if "\x00" in cleaned_path:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    target_path = (base_dir / cleaned_path).resolve()
+    base_abs = os.path.abspath(str(base_dir))
+    target_abs = os.path.abspath(str(target_path))
+    if target_abs != base_abs and not target_abs.startswith(base_abs + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    if not target_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return target_path
+
+
+def _serve_project_data_file(project_id: str, file_path: str, request: Request) -> FileResponse:
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_file_access(request, safe_project_id)
+    target_path = _safe_project_file_response_path(safe_project_id, file_path)
+    return FileResponse(str(target_path))
+
+
+def _serve_pointcloud_data_file(project_id: str, file_path: str, request: Request) -> FileResponse:
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_file_access(request, safe_project_id)
+    base_dir = (Path(LOCAL_DATA_PATH) / "pointclouds" / safe_project_id).resolve()
+    cleaned_path = file_path.replace("\\", "/").lstrip("/")
+    if "\x00" in cleaned_path:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    target_path = (base_dir / cleaned_path).resolve()
+    base_abs = os.path.abspath(str(base_dir))
+    target_abs = os.path.abspath(str(target_path))
+    if target_abs != base_abs and not target_abs.startswith(base_abs + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    if not target_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(str(target_path))
+
+
+@app.get("/api/data/projects/{project_id}/{file_path:path}")
+def secure_project_data_file(project_id: str, file_path: str, request: Request) -> FileResponse:
+    return _serve_project_data_file(project_id, file_path, request)
+
+
+@app.get("/api/data/pointclouds/{project_id}/{file_path:path}")
+def secure_pointcloud_data_file(project_id: str, file_path: str, request: Request) -> FileResponse:
+    return _serve_pointcloud_data_file(project_id, file_path, request)
+
+
+@app.get("/data/projects/{project_id}/{file_path:path}")
+def secure_legacy_project_data_file(project_id: str, file_path: str, request: Request) -> FileResponse:
+    return _serve_project_data_file(project_id, file_path, request)
+
+
+@app.get("/data/pointclouds/{project_id}/{file_path:path}")
+def secure_legacy_pointcloud_data_file(project_id: str, file_path: str, request: Request) -> FileResponse:
+    return _serve_pointcloud_data_file(project_id, file_path, request)
+
+
+@app.get("/tiles/{file_path:path}")
+def secure_legacy_tiles_file(file_path: str, request: Request) -> FileResponse:
+    _require_user(request)
+    cleaned_path = file_path.replace("\\", "/").lstrip("/")
+    parts = [part for part in cleaned_path.split("/") if part]
+    if len(parts) >= 2 and parts[0] in {"projects", "pointclouds"}:
+        _ensure_project_file_access(request, _safe_project_id(parts[1]))
+    if "\x00" in cleaned_path:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    base_dir = Path(LOCAL_DATA_PATH).resolve()
+    target_path = (base_dir / cleaned_path).resolve()
+    base_abs = os.path.abspath(str(base_dir))
+    target_abs = os.path.abspath(str(target_path))
+    if target_abs != base_abs and not target_abs.startswith(base_abs + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    if not target_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(str(target_path))
 
 
 def _secure_dataset_file(project_id: str, dataset_id: str, report_only: bool = False) -> tuple[Path, dict[str, str]]:
@@ -5317,6 +5579,42 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     )
                     listed_rel_paths.add(vector_rel)
                 continue
+            cog_rel_path = str(st.get("cog_rel_path") or "").strip()
+            cog_path = Path(str(st.get("cog_path") or "")).resolve() if str(st.get("cog_path") or "").strip() else None
+            if cog_rel_path and (not cog_path or not cog_path.is_file()):
+                cog_path = (Path(LOCAL_DATA_PATH) / cog_rel_path).resolve()
+            if cog_path and cog_path.is_file():
+                rel_base = cog_path.relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+                layer_type = str(st.get("layer_type") or _raster_layer_type(str(st.get("dataset_type") or ""), display_name))
+                layer_url = _titiler_tile_url_template(
+                    base_url,
+                    str(cog_path),
+                    layer_type,
+                    str(st.get("rescale_min") or ""),
+                    str(st.get("rescale_max") or ""),
+                )
+                files.append(
+                    {
+                        "name": display_name,
+                        "kind": "Web-Optimized Data",
+                        "type": "cog",
+                        "layer_type": layer_type,
+                        "size_bytes": str(cog_path.stat().st_size),
+                        "status": str(st.get("status") or jobs_by_file.get(display_name, {}).get("status", "Web-Ready")),
+                        "updated_at": str(st.get("updated_at") or ""),
+                        "file_url": f"{base_url}/data/{rel_base}",
+                        "layer_url": layer_url,
+                        "file_path": str(cog_path),
+                        "rel_path": rel_base,
+                        "dataset_id": str(st.get("dataset_id") or job_dir.name),
+                        "dataset_type": str(st.get("dataset_type") or _infer_dataset_type(display_name)),
+                        "month": str(st.get("month") or ""),
+                        "raw_rel_path": raw_rel_path,
+                        **_dataset_extra_response_fields(st),
+                    },
+                )
+                listed_rel_paths.add(rel_base)
+                continue
             if not tile_folder:
                 continue
             tiles_rel_path = str(st.get("tiles_rel_path") or "").strip()
@@ -5383,6 +5681,38 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
 
     # Include manual processed folders even when not synced/tracked yet.
     if processed_root.is_dir():
+        for cog_file in sorted(
+            [*processed_root.glob("*/*.cog.tif"), *processed_root.glob("*/*.cog.tiff")],
+            key=lambda p: p.name.lower(),
+        ):
+            rel = cog_file.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            if rel in listed_rel_paths:
+                continue
+            display_name = cog_file.name.replace(".cog.tif", ".tif").replace(".cog.tiff", ".tiff")
+            layer_type = _raster_layer_type(_infer_dataset_type(display_name), display_name)
+            files.append(
+                {
+                    "name": display_name,
+                    "kind": "Web-Optimized Data",
+                    "type": "cog",
+                    "layer_type": layer_type,
+                    "size_bytes": str(cog_file.stat().st_size),
+                    "status": "Web-Ready",
+                    "updated_at": datetime.fromtimestamp(cog_file.stat().st_mtime, timezone.utc).isoformat(),
+                    "file_url": f"{base_url}/data/{rel}",
+                    "layer_url": _titiler_tile_url_template(base_url, str(cog_file.resolve()), layer_type),
+                    "file_path": str(cog_file.resolve()),
+                    "rel_path": rel,
+                    "dataset_id": cog_file.parent.name,
+                    "dataset_type": _infer_dataset_type(display_name),
+                    "month": "",
+                    "raw_rel_path": "",
+                    "cog_path": str(cog_file.resolve()),
+                    "cog_rel_path": rel,
+                },
+            )
+            listed_rel_paths.add(rel)
+
         for vector_path in sorted(
             [*processed_root.glob("*/*.kml"), *processed_root.glob("*/*.geojson")],
             key=lambda p: p.name.lower(),
@@ -5624,8 +5954,8 @@ def admin_force_delete_project_file(
     project_id: str,
     payload: FileDeletePayload,
     request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
 ) -> dict[str, str]:
-    _require_admin(request)
     safe_project_id = _safe_project_id(project_id)
     rel = (payload.rel_path or "").replace("\\", "/").lstrip("/")
     if ".." in rel:
