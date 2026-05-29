@@ -8,12 +8,21 @@ import {
 } from 'react'
 import { API_BASE, formatApiNetworkError } from '../lib/apiBase'
 import { ApiError } from '../services/api'
-import { getDatasetStatus, processDatasetTif } from '../services/datasetService'
+import {
+  completeDatasetUpload,
+  getDatasetStatus,
+  processDatasetTif,
+  uploadDatasetChunk,
+  type ProcessDatasetResponse,
+} from '../services/datasetService'
 import { completeUpload, getPointCloudStatus, uploadChunk } from '../services/pointCloudService'
 import { saveWebReadyCogLayer } from '../utils/datasetLayerStorage'
 import { readUploadedTilesets, writeUploadedTilesets } from '../utils/pointCloudStorage'
 
-const CHUNK_SIZE_BYTES = 10 * 1024 * 1024
+const POINT_CLOUD_CHUNK_SIZE_BYTES = 10 * 1024 * 1024
+const DATASET_CHUNK_SIZE_BYTES = 8 * 1024 * 1024
+const LARGE_RASTER_DIRECT_UPLOAD_LIMIT_BYTES = 1024 * 1024 * 1024
+const DATASET_CHUNK_MAX_RETRIES = 4
 
 export type UploadTask = {
   id: string
@@ -59,6 +68,10 @@ function estimateEtaFromProgress(startedAt: number | undefined, progressPercent:
   return formatEta(remaining)
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
 export function UploadProvider({ children }: PropsWithChildren) {
   const [tasks, setTasks] = useState<UploadTask[]>([])
 
@@ -89,12 +102,12 @@ export function UploadProvider({ children }: PropsWithChildren) {
         startedAt: Date.now(),
       })
 
-      const totalChunks = Math.ceil(file.size / CHUNK_SIZE_BYTES)
+      const totalChunks = Math.ceil(file.size / POINT_CLOUD_CHUNK_SIZE_BYTES)
 
       try {
         for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
-          const start = chunkIndex * CHUNK_SIZE_BYTES
-          const end = Math.min(start + CHUNK_SIZE_BYTES, file.size)
+          const start = chunkIndex * POINT_CLOUD_CHUNK_SIZE_BYTES
+          const end = Math.min(start + POINT_CLOUD_CHUNK_SIZE_BYTES, file.size)
           const chunk = file.slice(start, end)
           const chunkForm = new FormData()
           chunkForm.append('filename', file.name)
@@ -174,6 +187,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
   const startDatasetUpload = useCallback(
     async (file: File, projectId: string, metadata?: { datasetType?: string; month?: string }) => {
       const id = taskId('dataset', projectId, file.name)
+      const startedAt = Date.now()
       createTask({
         id,
         kind: 'dataset',
@@ -185,7 +199,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
         state: 'uploading',
         stage: 'Uploading file',
         etaText: file.size > 0 ? 'Estimating...' : '',
-        startedAt: Date.now(),
+        startedAt,
       })
 
       try {
@@ -193,13 +207,93 @@ export function UploadProvider({ children }: PropsWithChildren) {
         const isCsv = lowerFileName.endsWith('.csv')
         const isPdf = lowerFileName.endsWith('.pdf')
         const isZip = lowerFileName.endsWith('.zip')
+        const isRaster = lowerFileName.endsWith('.tif') || lowerFileName.endsWith('.tiff')
         const is3DModel = (metadata?.datasetType || '').toLowerCase() === '3dmodel'
-        const form = new FormData()
-        form.append('project_id', projectId)
-        form.append('file', file)
-        if (metadata?.datasetType) form.append('dataset_type', metadata.datasetType)
-        if (metadata?.month) form.append('month', metadata.month)
-        const created = await processDatasetTif(form)
+        const useChunkedRasterUpload = isRaster && file.size > LARGE_RASTER_DIRECT_UPLOAD_LIMIT_BYTES
+        let created: ProcessDatasetResponse
+        if (useChunkedRasterUpload) {
+          const totalChunks = Math.ceil(file.size / DATASET_CHUNK_SIZE_BYTES)
+          for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+            const start = chunkIndex * DATASET_CHUNK_SIZE_BYTES
+            const end = Math.min(start + DATASET_CHUNK_SIZE_BYTES, file.size)
+            let uploaded = false
+            let lastError: Error | null = null
+            for (let attempt = 1; attempt <= DATASET_CHUNK_MAX_RETRIES; attempt += 1) {
+              const chunk = file.slice(start, end)
+              const chunkForm = new FormData()
+              chunkForm.append('filename', file.name)
+              chunkForm.append('project_id', projectId)
+              chunkForm.append('chunkIndex', String(chunkIndex))
+              chunkForm.append('totalChunks', String(totalChunks))
+              chunkForm.append('chunk', chunk, `${file.name}.part.${chunkIndex}`)
+              try {
+                const chunkResponse = await uploadDatasetChunk(chunkForm)
+                if (chunkResponse.ok) {
+                  uploaded = true
+                  break
+                }
+                let detail = ''
+                try {
+                  const data = (await chunkResponse.json()) as { detail?: unknown }
+                  detail = data.detail ? `: ${String(data.detail)}` : ''
+                } catch {
+                  detail = ''
+                }
+                lastError = new Error(`Dataset chunk upload failed (${chunkResponse.status})${detail}`)
+                if (![408, 429, 500, 502, 503, 504].includes(chunkResponse.status)) {
+                  ;(lastError as Error & { nonRetryable?: boolean }).nonRetryable = true
+                  throw lastError
+                }
+              } catch (error) {
+                lastError = error instanceof Error ? error : new Error('Dataset chunk upload failed')
+                if ((lastError as Error & { nonRetryable?: boolean }).nonRetryable) throw lastError
+                if (attempt >= DATASET_CHUNK_MAX_RETRIES) break
+                upsertTask(id, {
+                  progressPercent: Math.min(40, 10 + (chunkIndex / totalChunks) * 30),
+                  state: 'uploading',
+                  stage: `Retrying upload chunk ${chunkIndex + 1}/${totalChunks}`,
+                  etaText: estimateEtaFromProgress(startedAt, 10 + (chunkIndex / totalChunks) * 30),
+                  statusText: `Network timeout. Retrying part ${chunkIndex + 1}/${totalChunks} (${attempt + 1}/${DATASET_CHUNK_MAX_RETRIES})...`,
+                })
+                await wait(1500 * attempt)
+              }
+            }
+            if (!uploaded) throw lastError || new Error(`Dataset chunk upload failed at part ${chunkIndex + 1}`)
+            const uploadedPercent = 10 + ((chunkIndex + 1) / totalChunks) * 30
+            upsertTask(id, {
+              progressPercent: Math.min(40, uploadedPercent),
+              state: 'uploading',
+              stage: 'Uploading file in chunks',
+              etaText: estimateEtaFromProgress(startedAt, uploadedPercent),
+              statusText: `Uploading ${file.name} (${chunkIndex + 1}/${totalChunks})...`,
+            })
+          }
+          upsertTask(id, {
+            progressPercent: 42,
+            state: 'processing',
+            stage: 'Merging uploaded chunks',
+            etaText: 'Almost done',
+            statusText: `Merging ${file.name} on server...`,
+          })
+          created = await completeDatasetUpload({
+            filename: file.name,
+            totalChunks,
+            project_id: projectId,
+            dataset_type: metadata?.datasetType,
+            month: metadata?.month,
+            created_at: metadata?.month && /^\d{4}-\d{2}-\d{2}$/.test(metadata.month) ? metadata.month : undefined,
+          })
+        } else {
+          const form = new FormData()
+          form.append('project_id', projectId)
+          form.append('file', file)
+          if (metadata?.datasetType) form.append('dataset_type', metadata.datasetType)
+          if (metadata?.month) {
+            form.append('month', metadata.month)
+            if (/^\d{4}-\d{2}-\d{2}$/.test(metadata.month)) form.append('created_at', metadata.month)
+          }
+          created = await processDatasetTif(form)
+        }
         upsertTask(id, {
           datasetId: created.dataset_id,
           progressPercent: 45,
@@ -276,7 +370,9 @@ export function UploadProvider({ children }: PropsWithChildren) {
             state: 'processing',
             progressPercent: nextProgress,
             stage,
-            etaText: status.eta_seconds !== undefined && status.eta_seconds !== ''
+            etaText: useChunkedRasterUpload && (status.eta_seconds === undefined || status.eta_seconds === '')
+              ? 'Large raster processing...'
+              : status.eta_seconds !== undefined && status.eta_seconds !== ''
               ? formatEta(status.eta_seconds)
               : estimateEtaFromProgress(start, nextProgress),
             statusText: `${stage} - ${file.name}`,

@@ -14,11 +14,11 @@ from PIL import Image
 
 DEM_COLOR_STOPS = np.array(
     [
-        [0.00, 30, 50, 200],
-        [0.25, 0, 225, 225],
-        [0.50, 0, 210, 0],
-        [0.75, 230, 230, 0],
-        [1.00, 230, 30, 30],
+        [0.00, 0, 0, 130],
+        [0.25, 0, 255, 255],
+        [0.50, 0, 255, 0],
+        [0.75, 255, 255, 0],
+        [1.00, 139, 0, 0],
     ],
     dtype=np.float32,
 )
@@ -81,6 +81,74 @@ def calculate_percentile_rescale(raster_path: str | Path) -> dict[str, float] | 
     }
 
 
+def _scale_rgb_to_uint8(data: np.ndarray) -> np.ndarray:
+    values = np.nan_to_num(data.astype("float32"), nan=0.0, posinf=255.0, neginf=0.0)
+    if values.size and float(np.nanmax(values)) <= 1.0:
+        values = values * 255.0
+    return np.clip(values, 0, 255).astype("uint8")
+
+
+def _scale_alpha_to_uint8(data: np.ndarray) -> np.ndarray:
+    values = np.nan_to_num(data.astype("float32"), nan=0.0, posinf=255.0, neginf=0.0)
+    if values.size and float(np.nanmax(values)) <= 1.0:
+        values = values * 255.0
+    return np.clip(values, 0, 255).astype("uint8")
+
+
+def _build_ortho_masked_source(input_tif: Path, masked_tif: Path) -> Path:
+    import rasterio
+
+    with rasterio.open(input_tif) as src:
+        if src.count < 3:
+            return input_tif
+
+        profile = src.profile.copy()
+        profile.update(
+            driver="GTiff",
+            count=3,
+            dtype="uint8",
+            nodata=None,
+            tiled=True,
+            blockxsize=512,
+            blockysize=512,
+            compress="deflate",
+            predictor=2,
+            BIGTIFF="IF_SAFER",
+        )
+        profile.pop("photometric", None)
+        profile.pop("alpha", None)
+
+        masked_tif.unlink(missing_ok=True)
+        with rasterio.open(masked_tif, "w", **profile) as dst:
+            for _, window in src.block_windows(1):
+                raw = src.read([1, 2, 3], window=window, masked=True)
+                rgb = _scale_rgb_to_uint8(np.ma.filled(raw, 0))
+                alpha = np.full(rgb.shape[1:], 255, dtype="uint8")
+
+                if np.ma.isMaskedArray(raw):
+                    alpha[np.any(np.ma.getmaskarray(raw), axis=0)] = 0
+
+                masks = src.read_masks([1, 2, 3], window=window)
+                alpha[np.any(masks == 0, axis=0)] = 0
+
+                if src.nodata is not None and np.isfinite(float(src.nodata)):
+                    nodata_values = src.read([1, 2, 3], window=window, masked=False)
+                    alpha[np.any(np.isclose(nodata_values, float(src.nodata)), axis=0)] = 0
+
+                if src.count >= 4:
+                    source_alpha = _scale_alpha_to_uint8(src.read(4, window=window, masked=False))
+                    alpha = np.minimum(alpha, source_alpha)
+
+                white_padding = np.all(rgb >= 248, axis=0)
+                black_padding = np.all(rgb <= 3, axis=0)
+                alpha[white_padding | black_padding] = 0
+
+                dst.write(rgb, window=window)
+                dst.write_mask(alpha, window=window)
+
+    return masked_tif
+
+
 def convert_tif_to_cog(
     input_tif: str,
     output_cog: str,
@@ -137,24 +205,61 @@ def convert_tif_to_cog(
         source_crs = str(src.crs)
         band_count = int(src.count)
 
-    profile_name = "deflate"
-    dst_profile = cog_profiles.get(profile_name)
-    dst_profile.update(
-        {
-            "BIGTIFF": "IF_SAFER",
-            "BLOCKSIZE": 512,
-            "OVERVIEWS": "AUTO",
-        },
-    )
+    translate_source = in_abs
+    temporary_source: Path | None = None
+
+    if normalized_type in {"dtm", "dsm"}:
+        profile_name = "deflate"
+        dst_profile = dict(cog_profiles.get(profile_name))
+        dst_profile.update(
+            {
+                "bigtiff": "IF_SAFER",
+                "blockxsize": 512,
+                "blockysize": 512,
+                "predictor": 3,
+                "num_threads": "ALL_CPUS",
+                "OVERVIEWS": "AUTO",
+            },
+        )
+    else:
+        emit_progress("Preparing fast Ortho COG profile", 18)
+        profile_name = "jpeg"
+        dst_profile = dict(cog_profiles.get(profile_name))
+        dst_profile.update(
+            {
+                "compress": "JPEG",
+                "bigtiff": "IF_SAFER",
+                "blockxsize": 512,
+                "blockysize": 512,
+                "photometric": "YCbCr",
+                "quality": 85,
+                "num_threads": "ALL_CPUS",
+                "OVERVIEWS": "AUTO",
+            },
+        )
     emit_progress("Converting GeoTIFF to COG", 35)
     started = time.time()
-    cog_translate(
-        str(in_abs),
-        str(out_abs),
-        dst_profile,
-        in_memory=False,
-        quiet=True,
-    )
+    try:
+        try:
+            cog_translate(
+                str(translate_source),
+                str(out_abs),
+                dst_profile,
+                in_memory=False,
+                quiet=True,
+                add_mask=normalized_type not in {"dtm", "dsm"},
+            )
+        except TypeError:
+            cog_translate(
+                str(translate_source),
+                str(out_abs),
+                dst_profile,
+                in_memory=False,
+                quiet=True,
+            )
+    finally:
+        if temporary_source and temporary_source != in_abs:
+            temporary_source.unlink(missing_ok=True)
     emit_progress("Calculating DEM display range", 86)
     rescale = calculate_percentile_rescale(out_abs) if normalized_type in {"dtm", "dsm"} else None
     elapsed = round(time.time() - started, 2)

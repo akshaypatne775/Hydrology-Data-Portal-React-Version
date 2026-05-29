@@ -74,6 +74,10 @@ def ensure_tables() -> None:
             )
         if "approved_at" not in user_columns:
             connection.execute("ALTER TABLE users ADD COLUMN approved_at TEXT")
+        if "can_access_catalog" not in user_columns:
+            connection.execute(
+                "ALTER TABLE users ADD COLUMN can_access_catalog INTEGER NOT NULL DEFAULT 1"
+            )
         if "approval_token_hash" not in user_columns:
             connection.execute("ALTER TABLE users ADD COLUMN approval_token_hash TEXT")
         connection.execute(

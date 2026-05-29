@@ -30,7 +30,7 @@ echo  ==================================================================
 echo.
 echo   [1] One Click Install / Repair ^(safe, keeps your data^)
 echo   [2] Save New Dependencies ^(Update requirements.txt^)
-echo   [3] Start the Portal
+echo   [3] Start the Portal ^(Backend first, then Frontend^)
 echo   [4] Exit
 echo.
 choice /c 1234 /n /m "Select an option (1-4): "
@@ -273,52 +273,154 @@ if errorlevel 1 (
 )
 exit /b 0
 
-:start_portal
-cls
-echo [INFO] Starting Droid Cloud Portal...
-echo.
+:wait_for_backend_ready
+echo [INFO] Waiting for backend API to become ready...
+for /L %%I in (1,1,90) do (
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "try { ^$res=Invoke-WebRequest -Uri 'http://127.0.0.1:8000/health' -UseBasicParsing -TimeoutSec 2; if(^$res.StatusCode -ge 200 -and ^$res.StatusCode -lt 500){ exit 0 }; exit 1 } catch { exit 1 }" >nul 2>&1
+  if not errorlevel 1 (
+    echo [OK] Backend is ready on http://127.0.0.1:8000
+    exit /b 0
+  )
+  timeout /t 1 >nul
+)
+echo [ERROR] Backend did not become ready within 90 seconds.
+echo [FIX] Check the "Droid Cloud - Backend" window for the real error, then start again.
+exit /b 1
 
+:prepare_portal_start
 call :check_folders
 if errorlevel 1 (
-  pause
-  goto menu
+  exit /b 1
 )
 
 if not exist "%BACKEND_DIR%\venv\Scripts\activate.bat" (
   echo [ERROR] Backend venv not found. Run option 1 first.
-  pause
-  goto menu
+  exit /b 1
 )
 
 "%BACKEND_DIR%\venv\Scripts\python.exe" -c "import sys" >nul 2>&1
 if errorlevel 1 (
   echo [ERROR] Backend venv is broken. Run option 1 to repair it safely.
-  pause
-  goto menu
+  exit /b 1
 )
 
 "%BACKEND_DIR%\venv\Scripts\python.exe" -c "import uvicorn, fastapi" >nul 2>&1
 if errorlevel 1 (
   echo [ERROR] Backend dependencies are missing from venv.
   echo [FIX] Run option 1 ^(One Click Install / Repair^) first.
-  pause
-  goto menu
+  exit /b 1
 )
 
 call :ensure_backend_public_origin
 if errorlevel 1 (
-  pause
-  goto menu
+  exit /b 1
+)
+exit /b 0
+
+:start_backend_process
+call :prepare_portal_start
+if errorlevel 1 exit /b 1
+set "BACKEND_ALREADY_RUNNING=0"
+set "BACKEND_PORT_CONFLICT=0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { ^$res=Invoke-WebRequest -Uri 'http://127.0.0.1:8000/health' -UseBasicParsing -TimeoutSec 2; if(^$res.StatusCode -ge 200 -and ^$res.StatusCode -lt 500){ exit 0 }; exit 2 } catch { try { ^$tcp=New-Object Net.Sockets.TcpClient; ^$iar=^$tcp.BeginConnect('127.0.0.1',8000,^$null,^$null); if(^$iar.AsyncWaitHandle.WaitOne(500)){ ^$tcp.EndConnect(^$iar); ^$tcp.Close(); exit 2 }; ^$tcp.Close() } catch {}; exit 1 }" >nul 2>&1
+if errorlevel 2 set "BACKEND_PORT_CONFLICT=1"
+if not errorlevel 1 set "BACKEND_ALREADY_RUNNING=1"
+
+if "%BACKEND_PORT_CONFLICT%"=="1" (
+  echo [ERROR] Port 8000 is already used by another server.
+  echo [FIX] Close the other backend window, then choose Start Portal again.
+  exit /b 1
+) else if "%BACKEND_ALREADY_RUNNING%"=="1" (
+  echo [OK] Backend is already running on http://127.0.0.1:8000
+) else (
+  echo [STEP] Starting backend...
+  start "Droid Cloud - Backend" /D "%BACKEND_DIR%" cmd /k ""venv\Scripts\python.exe" -m uvicorn app.main:app --app-dir "%BACKEND_DIR%" --reload --host 127.0.0.1 --port 8000"
+)
+exit /b 0
+
+:start_frontend_process
+call :check_folders
+if errorlevel 1 exit /b 1
+
+call :wait_for_backend_ready
+if errorlevel 1 (
+  exit /b 1
 )
 
-start "Droid Cloud - Backend" /D "%BACKEND_DIR%" cmd /k ""venv\Scripts\python.exe" -m uvicorn app.main:app --app-dir "%BACKEND_DIR%" --reload --host 127.0.0.1 --port 8000"
+echo [STEP] Starting frontend after backend is ready...
 start "Droid Cloud - Frontend" /D "%FRONTEND_DIR%" cmd /k "npm run dev"
-
-echo [SUCCESS] Backend and frontend windows launched.
+echo [OK] Frontend window launched.
 echo [URL] Frontend: http://localhost:5173
 echo [URL] Public:   %PUBLIC_PORTAL_URL%
 echo [URL] Backend:  http://127.0.0.1:8000/health
+exit /b 0
+
+:start_portal
+cls
 echo.
+echo  ==================================================================
+echo                  START DROID CLOUD PORTAL
+echo  ==================================================================
+echo.
+echo   [1] Start Backend only
+echo   [2] Start Frontend only ^(waits for backend^)
+echo   [3] Start Backend then Frontend ^(auto^)
+echo   [4] Back to Main Menu
+echo.
+choice /c 1234 /n /m "Select an option (1-4): "
+
+if errorlevel 4 goto menu
+if errorlevel 3 goto start_portal_auto
+if errorlevel 2 goto start_frontend_only
+if errorlevel 1 goto start_backend_only
+
+goto start_portal
+
+:start_backend_only
+cls
+echo [INFO] Starting backend only...
+echo.
+call :start_backend_process
+if errorlevel 1 (
+  pause
+  goto start_portal
+)
+echo.
+echo [SUCCESS] Backend command sent. Wait until the backend window says it is ready.
+echo [NEXT] Come back here and choose option 2 to start frontend.
+pause
+goto start_portal
+
+:start_frontend_only
+cls
+echo [INFO] Starting frontend only...
+echo.
+call :start_frontend_process
+if errorlevel 1 (
+  pause
+  goto start_portal
+)
+echo.
+echo [SUCCESS] Frontend command sent.
+pause
+goto start_portal
+
+:start_portal_auto
+cls
+echo [INFO] Starting backend first, then frontend...
+echo.
+call :start_backend_process
+if errorlevel 1 (
+  pause
+  goto start_portal
+)
+call :start_frontend_process
+if errorlevel 1 (
+  pause
+  goto start_portal
+)
+echo.
+echo [SUCCESS] Backend and frontend windows launched.
 echo [NOTE] Keep both opened command windows running. If /api shows ECONNREFUSED, the backend window stopped or port 8000 is busy.
 pause
 goto menu

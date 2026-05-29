@@ -39,13 +39,14 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 import laspy
 import numpy as np
 from PIL import Image
 from pydantic import BaseModel
 from rio_tiler import colormap as rio_colormap
-from titiler.core.factory import TilerFactory
+from rio_tiler.io import Reader
 
 from app.core.database import configure_database, ensure_tables, get_db_connection
 from app.utils.raster_tiler import convert_tif_to_cog, run_rasterio_tiler
@@ -147,9 +148,10 @@ FRONTEND_ORIGINS = [
 RATE_LIMIT_WINDOW_SECONDS = 60.0
 RATE_LIMIT_HEAVY_REQUESTS = 5
 _RATE_LIMIT_BUCKETS: dict[str, list[float]] = {}
+DIRECT_RASTER_UPLOAD_LIMIT_BYTES = 1024 * 1024 * 1024
 
 
-def _build_agisoft_dem_colormap() -> dict[int, tuple[int, int, int, int]]:
+def _build_dji_terra_colormap() -> dict[int, tuple[int, int, int, int]]:
     stops = [
         (0.00, (0, 0, 130)),
         (0.25, (0, 255, 255)),
@@ -174,10 +176,16 @@ def _build_agisoft_dem_colormap() -> dict[int, tuple[int, int, int, int]]:
     return color_map
 
 
+DJI_TERRA_DEM_CMAP = _build_dji_terra_colormap()
 rio_colormap.cmap = rio_colormap.cmap.register(
-    {"agisoft_dem": _build_agisoft_dem_colormap()},
+    {
+        "agisoft_dem": DJI_TERRA_DEM_CMAP,
+        "dji_terra_dem": DJI_TERRA_DEM_CMAP,
+    },
     overwrite=True,
 )
+
+from titiler.core.factory import TilerFactory
 
 app = FastAPI(
     title="Hydrology & Mapping Portal API",
@@ -251,6 +259,37 @@ class ActivityTrackingMiddleware(BaseHTTPMiddleware):
 class ProtectedDataPathMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path.replace("\\", "/").lower()
+        if path.startswith("/api/titiler/") or path.startswith("/api/dji-terra/") or path.startswith("/api/ortho-cog/"):
+            source_url = request.query_params.get("url")
+            if source_url:
+                try:
+                    local_root = Path(LOCAL_DATA_PATH).resolve()
+                    clean_source = source_url
+                    if clean_source.lower().startswith("file:///"):
+                        clean_source = clean_source[8:]
+                    elif clean_source.lower().startswith("file://"):
+                        clean_source = clean_source[7:]
+                    target = Path(os.path.abspath(clean_source)).resolve()
+                    if target != local_root and not target.is_relative_to(local_root):
+                        return Response(status_code=403)
+                except Exception:  # noqa: BLE001
+                    return Response(status_code=403)
+        admin_only_upload = (
+            path.startswith("/api/upload")
+            or path.startswith("/api/complete-upload")
+            or path.startswith("/api/complete-dataset-upload")
+            or path in {"/api/process-dataset", "/api/process-pointcloud", "/api/dataset-metadata"}
+            or "metadata-probe" in path
+            or re.match(r"^/api/datasets/[^/]+/(sync|open-manual-folder)$", path) is not None
+            or ("manual" in path and ("folder" in path or "sync" in path))
+        )
+        if admin_only_upload and request.method.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            try:
+                user = _require_user(request)
+                if str(user.get("role", "")).lower() != "admin":
+                    return Response(status_code=403)
+            except HTTPException:
+                return Response(status_code=403)
         if path.startswith("/data/") and ("/raw/" in path or path.endswith(".pdf")):
             # Raw assets and PDFs must be served through authenticated /api endpoints
             # so project paths are not exposed in the browser.
@@ -271,11 +310,6 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-)
-app.include_router(
-    cog_tiler.router,
-    prefix="/api/cog",
-    tags=["COG"],
 )
 app.include_router(
     cog_tiler.router,
@@ -330,6 +364,15 @@ class CompleteUploadPayload(BaseModel):
     filename: str
     totalChunks: int
     project_id: str = "default-project"
+
+
+class CompleteDatasetUploadPayload(BaseModel):
+    filename: str
+    totalChunks: int
+    project_id: str = "default-project"
+    dataset_type: str = ""
+    month: str = ""
+    created_at: str = ""
 
 
 class AuthPayload(BaseModel):
@@ -619,12 +662,260 @@ def _titiler_tile_url_template(
     rescale_max: str = "",
 ) -> str:
     params = {"url": cog_path.replace("\\", "/")}
+    if layer_type == "Ortho":
+        return (
+            f"{base_url.rstrip('/')}/api/ortho-cog/tiles/WebMercatorQuad/"
+            f"{{z}}/{{x}}/{{y}}@1x?{urlencode(params)}"
+        )
     if layer_type in {"DTM", "DSM"} and rescale_min and rescale_max:
-        params["colormap_name"] = "agisoft_dem"
         params["rescale"] = f"{rescale_min},{rescale_max}"
+        return (
+            f"{base_url.rstrip('/')}/api/dji-terra/tiles/WebMercatorQuad/"
+            f"{{z}}/{{x}}/{{y}}@1x?{urlencode(params)}"
+        )
     return (
         f"{base_url.rstrip('/')}/api/titiler/tiles/WebMercatorQuad/"
         f"{{z}}/{{x}}/{{y}}@1x?{urlencode(params)}"
+    )
+
+
+def _transparent_png_tile() -> bytes:
+    output = io.BytesIO()
+    Image.fromarray(np.zeros((1, 1, 4), dtype=np.uint8), mode="RGBA").save(output, format="PNG")
+    return output.getvalue()
+
+
+TRANSPARENT_PNG_TILE = _transparent_png_tile()
+
+
+def _parse_rescale_pair(value: str | None) -> tuple[float, float] | None:
+    if not value:
+        return None
+    try:
+        low_raw, high_raw = value.split(",", 1)
+        low = float(low_raw)
+        high = float(high_raw)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(low) and math.isfinite(high)) or low == high:
+        return None
+    return (min(low, high), max(low, high))
+
+
+def _secure_local_cog_path(raw_url: str) -> Path:
+    clean_source = (raw_url or "").strip()
+    if clean_source.lower().startswith("file:///"):
+        clean_source = clean_source[8:]
+    elif clean_source.lower().startswith("file://"):
+        clean_source = clean_source[7:]
+    if not clean_source:
+        raise HTTPException(status_code=400, detail="Missing COG path.")
+    target = Path(os.path.abspath(clean_source)).resolve()
+    local_root = Path(LOCAL_DATA_PATH).resolve()
+    if target != local_root and not target.is_relative_to(local_root):
+        raise HTTPException(status_code=403, detail="COG path is outside project storage.")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="COG file not found.")
+    return target
+
+
+def _render_dji_terra_dem_png(tile_array, rescale: tuple[float, float]) -> bytes:
+    band = tile_array[0]
+    values = np.ma.filled(band, np.nan).astype("float64")
+    mask = np.ma.getmaskarray(band) | ~np.isfinite(values)
+    low, high = rescale
+
+    normalized = np.clip((values - low) / max(high - low, 1e-9), 0, 1)
+    color_indexes = np.nan_to_num(normalized * 255, nan=0).astype("uint8")
+    lookup = np.array([DJI_TERRA_DEM_CMAP[index] for index in range(256)], dtype="uint8")
+    rgba = lookup[color_indexes].astype("float64")
+
+    valid_values = values[~mask]
+    fill_value = float(np.nanmean(valid_values)) if valid_values.size else 0.0
+    elevation = np.where(mask, fill_value, values)
+
+    dy, dx = np.gradient(elevation * 3.0)
+    slope = np.arctan(np.sqrt((dx * dx) + (dy * dy)))
+    aspect = np.arctan2(dy, -dx)
+    azimuth = np.deg2rad(315.0)
+    altitude = np.deg2rad(45.0)
+    hillshade = (
+        (np.sin(altitude) * np.cos(slope))
+        + (np.cos(altitude) * np.sin(slope) * np.cos(azimuth - aspect))
+    )
+    hillshade = np.clip(np.nan_to_num(hillshade, nan=0.0, posinf=1.0, neginf=0.0), 0, 1)
+
+    detail_shade = 0.32 + (0.68 * hillshade)
+    rgba[..., :3] = np.clip(rgba[..., :3] * detail_shade[..., np.newaxis], 0, 255)
+    rgba[mask, 3] = 0
+
+    output = io.BytesIO()
+    Image.fromarray(rgba.astype("uint8"), mode="RGBA").save(output, format="PNG")
+    return output.getvalue()
+
+
+def _render_dji_terra_tile(cog_path: Path, z: int, x: int, y: int, rescale: tuple[float, float]) -> bytes:
+    with Reader(str(cog_path)) as dataset:
+        tile = dataset.tile(x, y, z, tilesize=256)
+    return _render_dji_terra_dem_png(tile.array, rescale)
+
+
+def _edge_connected_padding_mask(candidate: np.ndarray) -> np.ndarray:
+    """Return only candidate pixels connected to the tile edge.
+
+    Drone orthos often have white/black padding around the real footprint.
+    Masking every white pixel hides valid bright imagery, so only remove
+    padding that touches the tile boundary.
+    """
+    if candidate.ndim != 2 or not np.any(candidate):
+        return np.zeros(candidate.shape, dtype=bool)
+    height, width = candidate.shape
+    visited = np.zeros(candidate.shape, dtype=bool)
+    stack: list[tuple[int, int]] = []
+
+    for col in range(width):
+        if candidate[0, col]:
+            stack.append((0, col))
+        if height > 1 and candidate[height - 1, col]:
+            stack.append((height - 1, col))
+    for row in range(1, max(height - 1, 1)):
+        if candidate[row, 0]:
+            stack.append((row, 0))
+        if width > 1 and candidate[row, width - 1]:
+            stack.append((row, width - 1))
+
+    while stack:
+        row, col = stack.pop()
+        if visited[row, col] or not candidate[row, col]:
+            continue
+        visited[row, col] = True
+        if row > 0 and not visited[row - 1, col] and candidate[row - 1, col]:
+            stack.append((row - 1, col))
+        if row + 1 < height and not visited[row + 1, col] and candidate[row + 1, col]:
+            stack.append((row + 1, col))
+        if col > 0 and not visited[row, col - 1] and candidate[row, col - 1]:
+            stack.append((row, col - 1))
+        if col + 1 < width and not visited[row, col + 1] and candidate[row, col + 1]:
+            stack.append((row, col + 1))
+
+    return visited
+
+
+def _render_ortho_cog_png(tile_array) -> bytes:
+    data = np.ma.filled(tile_array, 0) if np.ma.isMaskedArray(tile_array) else np.asarray(tile_array)
+    if data.shape[0] < 3:
+        return TRANSPARENT_PNG_TILE
+
+    rgb = np.moveaxis(data[:3], 0, -1).astype("float64")
+    if rgb.max(initial=0) <= 1:
+        rgb *= 255.0
+    rgb = np.clip(rgb, 0, 255).astype("uint8")
+    alpha = np.full(rgb.shape[:2], 255, dtype="uint8")
+
+    if data.shape[0] >= 4:
+        source_alpha = data[3].astype("float64")
+        if source_alpha.max(initial=0) <= 1:
+            source_alpha *= 255.0
+        alpha = np.minimum(alpha, np.clip(source_alpha, 0, 255).astype("uint8"))
+
+    if np.ma.isMaskedArray(tile_array):
+        mask = np.any(np.ma.getmaskarray(tile_array[:3]), axis=0)
+        alpha[mask] = 0
+
+    white_padding = _edge_connected_padding_mask(np.all(rgb >= 253, axis=2))
+    black_padding = _edge_connected_padding_mask(np.all(rgb <= 2, axis=2))
+    alpha[white_padding | black_padding] = 0
+
+    output = io.BytesIO()
+    Image.fromarray(np.dstack([rgb, alpha]), mode="RGBA").save(output, format="PNG")
+    return output.getvalue()
+
+
+def _render_ortho_cog_tile(cog_path: Path, z: int, x: int, y: int) -> bytes:
+    with Reader(str(cog_path)) as dataset:
+        tile = dataset.tile(x, y, z, tilesize=256)
+    return _render_ortho_cog_png(tile.array)
+
+
+@app.get("/api/dji-terra/tiles/WebMercatorQuad/{z}/{x}/{y}@{scale}x")
+async def dji_terra_dem_tile(
+    request: Request,
+    z: int,
+    x: int,
+    y: int,
+    scale: int,
+    url: str,
+    rescale: str = "",
+):
+    _require_user(request)
+    del scale
+    parsed_rescale = _parse_rescale_pair(rescale)
+    if parsed_rescale is None:
+        raise HTTPException(status_code=422, detail="rescale=min,max is required for DJI Terra DEM tiles.")
+    cog_path = _secure_local_cog_path(url)
+    try:
+        tile_bytes = await run_in_threadpool(_render_dji_terra_tile, cog_path, z, x, y, parsed_rescale)
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc).lower()
+        expected_empty_tile = any(
+            text in message
+            for text in (
+                "outside bounds",
+                "outside image bounds",
+                "does not overlap",
+                "empty",
+                "no data",
+                "nodata",
+            )
+        )
+        headers = {"Cache-Control": "public, max-age=300"}
+        if not expected_empty_tile:
+            headers["X-Tile-Error"] = str(exc)[:200]
+        return Response(content=TRANSPARENT_PNG_TILE, media_type="image/png", headers=headers)
+
+    return Response(
+        content=tile_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.get("/api/ortho-cog/tiles/WebMercatorQuad/{z}/{x}/{y}@{scale}x")
+async def ortho_cog_tile(
+    request: Request,
+    z: int,
+    x: int,
+    y: int,
+    scale: int,
+    url: str,
+):
+    _require_user(request)
+    del scale
+    cog_path = _secure_local_cog_path(url)
+    try:
+        tile_bytes = await run_in_threadpool(_render_ortho_cog_tile, cog_path, z, x, y)
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc).lower()
+        expected_empty_tile = any(
+            text in message
+            for text in (
+                "outside bounds",
+                "outside image bounds",
+                "does not overlap",
+                "empty",
+                "no data",
+                "nodata",
+            )
+        )
+        headers = {"Cache-Control": "public, max-age=300"}
+        if not expected_empty_tile:
+            headers["X-Tile-Error"] = str(exc)[:200]
+        return Response(content=TRANSPARENT_PNG_TILE, media_type="image/png", headers=headers)
+
+    return Response(
+        content=tile_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=300"},
     )
 
 
@@ -635,6 +926,15 @@ def _upload_session_dir(filename: str, total_chunks: int, project_id: str) -> Pa
         f"{project_id}\0{safe_name}\0{total_chunks}".encode("utf-8"),
     ).hexdigest()
     return Path(LOCAL_DATA_PATH) / "uploads" / "chunks" / digest
+
+
+def _dataset_upload_session_dir(filename: str, total_chunks: int, project_id: str) -> Path:
+    """Stable temp folder for one large raster dataset upload."""
+    safe_name = _safe_dataset_upload_basename(filename)
+    digest = hashlib.sha256(
+        f"dataset\0{project_id}\0{safe_name}\0{total_chunks}".encode("utf-8"),
+    ).hexdigest()
+    return Path(LOCAL_DATA_PATH) / "uploads" / "dataset_chunks" / digest
 
 
 def _ensure_disk_space_for_bytes(path_on_volume: Path, required_extra: int) -> None:
@@ -1520,11 +1820,11 @@ def _write_conversion_cache(data: dict[str, str]) -> None:
 
 _AGISOFT_DTM_STOPS = np.array(
     [
-        [0.00, 30, 50, 200],
-        [0.25, 0, 225, 225],
-        [0.50, 0, 210, 0],
-        [0.75, 230, 230, 0],
-        [1.00, 230, 30, 30],
+        [0.00, 0, 0, 130],
+        [0.25, 0, 255, 255],
+        [0.50, 0, 255, 0],
+        [0.75, 255, 255, 0],
+        [1.00, 139, 0, 0],
     ],
     dtype=np.float32,
 )
@@ -1598,7 +1898,7 @@ def _elevation_to_agisoft_rgba(
     rgb[valid] = lut[(norm[valid] * 255.0).astype(np.uint8)].astype(np.float32)
 
     shade = _compute_tile_hillshade(data, valid, pixel_size[0], pixel_size[1])
-    rgb[valid] *= (0.62 + 0.38 * shade[valid, np.newaxis])
+    rgb[valid] *= (0.32 + 0.68 * shade[valid, np.newaxis])
     out[valid, :3] = np.clip(rgb[valid], 0, 255).astype(np.uint8)
     out[valid, 3] = 255
     return out
@@ -2444,7 +2744,7 @@ def _require_user(request: Request) -> dict[str, str | int]:
     with get_db_connection() as connection:
         row = connection.execute(
             """
-            SELECT u.id AS user_id, u.email, u.role, u.approval_status
+            SELECT u.id AS user_id, u.email, u.role, u.approval_status, u.can_access_catalog
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.token_hash = ? AND s.expires_at >= ?
@@ -2459,6 +2759,7 @@ def _require_user(request: Request) -> dict[str, str | int]:
         "id": int(row["user_id"]),
         "email": str(row["email"]),
         "role": str(row["role"] or "user"),
+        "can_access_catalog": bool(row["can_access_catalog"]),
         "approval_status": str(row["approval_status"] or "pending"),
     }
 
@@ -2688,7 +2989,7 @@ def auth_login(payload: AuthPayload, response: Response) -> dict[str, str]:
         raise HTTPException(status_code=400, detail="Invalid email")
     with get_db_connection() as connection:
         row = connection.execute(
-            "SELECT id, password_hash, role, approval_status FROM users WHERE email = ?",
+            "SELECT id, password_hash, role, approval_status, can_access_catalog FROM users WHERE email = ?",
             (email,),
         ).fetchone()
     if not row or not _verify_password(payload.password, str(row["password_hash"])):
@@ -2811,7 +3112,7 @@ def admin_user_activity(
     with get_db_connection() as connection:
         users = connection.execute(
             """
-            SELECT id, email, role, requested_role, approval_status, created_at
+            SELECT id, email, role, requested_role, approval_status, created_at, can_access_catalog
             FROM users
             ORDER BY created_at ASC
             """
@@ -2848,6 +3149,7 @@ def admin_user_activity(
                 "email": str(user_row["email"]),
                 "role": str(user_row["role"] or "user"),
                 "requested_role": str(user_row["requested_role"] or user_row["role"] or "user"),
+                "can_access_catalog": bool(user_row["can_access_catalog"]),
                 "approval_status": str(user_row["approval_status"] or "pending"),
                 "status": (
                     "Offline"
@@ -2979,6 +3281,29 @@ def admin_assign_user_role(
         f"Your Droid Cloud role is now: {role}.\n\nLogin: {PUBLIC_PORTAL_URL}\n",
     )
     return {"status": "success", "role": role}
+
+
+@app.patch("/api/admin/users/{user_id}/catalog-access")
+def admin_set_user_catalog_access(
+    user_id: int,
+    payload: dict[str, bool],
+    admin: dict[str, str] = Depends(verify_admin),
+) -> dict[str, object]:
+    del admin
+    enabled = bool(payload.get("enabled", True))
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT id, email FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+        connection.execute(
+            "UPDATE users SET can_access_catalog = ? WHERE id = ?",
+            (1 if enabled else 0, user_id),
+        )
+        connection.commit()
+    return {"status": "success", "user_id": user_id, "can_access_catalog": enabled}
 
 
 @app.post("/api/admin/users/{user_id}/disapprove")
@@ -3456,7 +3781,7 @@ async def run_flood_engine() -> dict[str, str]:
 
 @app.post("/api/process-pointcloud")
 async def process_pointcloud_request(payload: PointCloudProcessPayload, request: Request) -> dict[str, str]:
-    user = _require_user(request)
+    user = verify_admin(request)
     _ensure_project_owner(int(user["id"]), _safe_project_id(payload.project_id))
     # Simulate running py3dtiles conversion:
     # input .las/.laz -> output directory containing tileset.json and .pnts files.
@@ -3495,7 +3820,7 @@ async def upload_chunk(
     Accept one binary chunk of a larger LAS/LAZ upload.
     Chunks are written to a temp folder under LOCAL_DATA_PATH/uploads/chunks/.
     """
-    user = _require_user(request)
+    user = verify_admin(request)
     _enforce_rate_limit(request, "upload")
     safe_project = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project)
@@ -3520,8 +3845,12 @@ async def upload_chunk(
 
     part_path = session_dir / f"{chunkIndex:08d}.part"
     # Stream body to disk (do not load entire chunk into memory at once).
-    with open(part_path, "wb") as dest:
-        shutil.copyfileobj(chunk.file, dest, length=MERGE_COPY_BUFFER_BYTES)
+    def write_part() -> None:
+        with open(part_path, "wb") as dest:
+            shutil.copyfileobj(chunk.file, dest, length=MERGE_COPY_BUFFER_BYTES)
+
+    await run_in_threadpool(write_part)
+    await chunk.close()
 
     return {
         "status": "success",
@@ -3540,7 +3869,7 @@ async def complete_upload(
     Merge chunk files in order into a single LAS/LAZ under projects/<id>/raw/.
     Uses streaming copy + per-chunk delete to limit peak disk and avoid RAM spikes.
     """
-    user = _require_user(request)
+    user = verify_admin(request)
     _enforce_rate_limit(request, "upload")
     safe_project_id = _safe_project_id(payload.project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
@@ -3680,6 +4009,177 @@ async def complete_upload(
     }
 
 
+@app.post("/api/upload-dataset-chunk")
+async def upload_dataset_chunk(
+    request: Request,
+    chunk: UploadFile = File(...),
+    filename: str = Form(...),
+    project_id: str = Form(...),
+    chunkIndex: int = Form(...),
+    totalChunks: int = Form(...),
+) -> dict[str, str]:
+    user = verify_admin(request)
+    safe_project = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project)
+    safe_name = _safe_dataset_upload_basename(filename)
+    if Path(safe_name).suffix.lower() not in (".tif", ".tiff"):
+        raise HTTPException(status_code=400, detail="Chunked dataset upload is available for .tif/.tiff raster files.")
+    if totalChunks < 1 or totalChunks > 500_000:
+        raise HTTPException(status_code=400, detail="Invalid totalChunks")
+    if chunkIndex < 0 or chunkIndex >= totalChunks:
+        raise HTTPException(status_code=400, detail="Invalid chunkIndex")
+
+    session_dir = _dataset_upload_session_dir(safe_name, totalChunks, safe_project)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    part_path = session_dir / f"{chunkIndex:08d}.part"
+    def write_part() -> None:
+        with open(part_path, "wb") as dest:
+            shutil.copyfileobj(chunk.file, dest, length=MERGE_COPY_BUFFER_BYTES)
+
+    await run_in_threadpool(write_part)
+    await chunk.close()
+    return {
+        "status": "success",
+        "message": f"Stored dataset chunk {chunkIndex + 1}/{totalChunks} for {safe_name}",
+        "chunkIndex": str(chunkIndex),
+    }
+
+
+@app.post("/api/complete-dataset-upload", response_model=ProcessDatasetOut)
+async def complete_dataset_upload(
+    payload: CompleteDatasetUploadPayload,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> ProcessDatasetOut:
+    user = verify_admin(request)
+    _enforce_rate_limit(request, "upload")
+    safe_project_id = _safe_project_id(payload.project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    safe_name = _safe_dataset_upload_basename(payload.filename)
+    ext = Path(safe_name).suffix.lower()
+    if ext not in (".tif", ".tiff"):
+        raise HTTPException(status_code=400, detail="Chunked dataset upload is available for .tif/.tiff raster files.")
+    total = payload.totalChunks
+    if total < 1 or total > 500_000:
+        raise HTTPException(status_code=400, detail="Invalid totalChunks")
+
+    session_dir = _dataset_upload_session_dir(safe_name, total, safe_project_id)
+    if not session_dir.is_dir():
+        raise HTTPException(status_code=400, detail="No chunks found for this dataset upload session")
+
+    part_paths: list[Path] = []
+    total_bytes = 0
+    for i in range(total):
+        part = session_dir / f"{i:08d}.part"
+        if not part.is_file():
+            raise HTTPException(status_code=400, detail=f"Missing chunk file for index {i}")
+        total_bytes += part.stat().st_size
+        part_paths.append(part)
+
+    normalized_type = _normalize_dataset_type(payload.dataset_type, safe_name)
+    if normalized_type == "3dmodel":
+        normalized_type = _infer_dataset_type(safe_name)
+        if normalized_type == "3dmodel":
+            normalized_type = "ortho"
+
+    submitted_date = (payload.created_at or "").strip()
+    submitted_month = (payload.month or "").strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", submitted_month):
+        submitted_date = submitted_date or submitted_month
+        submitted_month = submitted_month[:7]
+    ddmmyyyy_match = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", submitted_month)
+    if ddmmyyyy_match:
+        day, month_part, year = ddmmyyyy_match.groups()
+        submitted_date = submitted_date or f"{year}-{int(month_part):02d}-{int(day):02d}"
+        submitted_month = submitted_date[:7]
+    normalized_month = _normalize_month(submitted_month)
+
+    dataset_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(safe_name).stem).strip("-") or "dataset"
+    dataset_id = _safe_dataset_id(f"{dataset_stem[:40]}-{secrets.token_hex(6)}")
+    tile_output_folder = _safe_dataset_id(f"{dataset_stem[:56]}-{secrets.token_hex(4)}")
+    raw_dir, processed_dir = get_project_dataset_type_dirs(safe_project_id, normalized_type)
+    meta_dir = _dataset_dir(safe_project_id, dataset_id)
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    input_path = raw_dir / f"{tile_output_folder}{ext}"
+    output_tile_dir = processed_dir / tile_output_folder
+    output_tile_dir.mkdir(parents=True, exist_ok=True)
+
+    cog_headroom = max(
+        2 * 1024 * 1024 * 1024,
+        min(total_bytes // 5, 20 * 1024 * 1024 * 1024),
+    )
+    _ensure_disk_space_for_bytes(raw_dir, cog_headroom)
+    try:
+        with open(input_path, "wb") as out_f:
+            for part in part_paths:
+                with open(part, "rb") as in_f:
+                    shutil.copyfileobj(in_f, out_f, length=MERGE_COPY_BUFFER_BYTES)
+                part.unlink(missing_ok=True)
+    except OSError as exc:
+        input_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Dataset merge failed: {exc}") from exc
+
+    try:
+        session_dir.rmdir()
+    except OSError:
+        pass
+
+    raw_rel = input_path.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+    pending_cog_path = (output_tile_dir / f"{tile_output_folder}.cog.tif").resolve()
+    _write_dataset_status(
+        safe_project_id,
+        dataset_id,
+        {
+            "status": "Uploading",
+            "updated_at": _now_iso(),
+            "dataset_id": dataset_id,
+            "dataset_name": safe_name,
+            "tile_folder": tile_output_folder,
+            "dataset_type": normalized_type,
+            "layer_type": _raster_layer_type(normalized_type, safe_name),
+            "month": normalized_month,
+            "created_at": submitted_date,
+            "raw_rel_path": raw_rel,
+            "processed_size_bytes": str(total_bytes),
+            "processed_size": _format_size_bytes(total_bytes),
+            "cog_path": str(pending_cog_path),
+        },
+    )
+    _upsert_processing_job(
+        safe_project_id,
+        {
+            "job_id": dataset_id,
+            "kind": "dataset",
+            "file_name": safe_name,
+            "status": "Processing",
+            "updated_at": _now_iso(),
+        },
+    )
+    _invalidate_project_files_cache(safe_project_id)
+    background_tasks.add_task(
+        process_dataset_background,
+        safe_project_id,
+        dataset_id,
+        str(input_path),
+        safe_name,
+        str(output_tile_dir),
+        tile_output_folder,
+    )
+    return ProcessDatasetOut(
+        status="success",
+        message="Large dataset merged. COG conversion started in background.",
+        project_id=safe_project_id,
+        dataset_id=dataset_id,
+        dataset_name=safe_name,
+        cog_path=str(pending_cog_path),
+        cog_tile_url_template=_titiler_tile_url_template(
+            str(request.base_url),
+            str(pending_cog_path),
+            _raster_layer_type(normalized_type, safe_name),
+        ),
+    )
+
+
 @app.post("/api/process-dataset", response_model=ProcessDatasetOut)
 async def process_dataset(
     request: Request,
@@ -3688,8 +4188,9 @@ async def process_dataset(
     project_id: str = Form(...),
     dataset_type: str = Form(""),
     month: str = Form(""),
+    created_at: str = Form(""),
 ) -> ProcessDatasetOut:
-    user = _require_user(request)
+    user = verify_admin(request)
     _enforce_rate_limit(request, "upload")
     safe_project_id = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
@@ -3710,7 +4211,24 @@ async def process_dataset(
                 "Upload DTM, DSM, and Ortho datasets as .tif or .tiff files."
             ),
         )
-    normalized_month = _normalize_month(month)
+    submitted_date = (created_at or "").strip()
+    submitted_month = (month or "").strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", submitted_month):
+        submitted_date = submitted_date or submitted_month
+        submitted_month = submitted_month[:7]
+    ddmmyyyy_match = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", submitted_month)
+    if ddmmyyyy_match:
+        day, month_part, year = ddmmyyyy_match.groups()
+        submitted_date = submitted_date or f"{year}-{int(month_part):02d}-{int(day):02d}"
+        submitted_month = submitted_date[:7]
+    try:
+        normalized_month = _normalize_month(submitted_month)
+    except HTTPException as exc:
+        if exc.status_code == 400 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", submitted_month):
+            submitted_date = submitted_date or submitted_month
+            normalized_month = submitted_month[:7]
+        else:
+            raise
 
     dataset_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(safe_name).stem).strip("-") or "dataset"
     dataset_id = _safe_dataset_id(f"{dataset_stem[:40]}-{secrets.token_hex(6)}")
@@ -3724,6 +4242,14 @@ async def process_dataset(
 
     content_length = request.headers.get("content-length")
     expected_bytes = int(content_length) if content_length and content_length.isdigit() else 0
+    if ext in (".tif", ".tiff") and expected_bytes > DIRECT_RASTER_UPLOAD_LIMIT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "Large raster upload must use chunked upload. "
+                "Refresh the portal and try again, or use Sync Manual Folders for very large local files."
+            ),
+        )
     _ensure_disk_space_for_bytes(raw_dir, max(expected_bytes * 2, 512 * 1024 * 1024))
 
     output_tile_dir = processed_dir / tile_output_folder
@@ -3752,6 +4278,7 @@ async def process_dataset(
                 "dataset_type": "reports",
                 "layer_type": "Reports",
                 "month": normalized_month,
+                "created_at": submitted_date,
                 "raw_rel_path": raw_rel,
                 "report_rel_path": raw_rel,
                 "processed_size_bytes": str(input_path.stat().st_size),
@@ -3803,6 +4330,7 @@ async def process_dataset(
                 "dataset_type": asset_type,
                 "layer_type": "CAD" if asset_type == "cad" else "Vector",
                 "month": normalized_month,
+                "created_at": submitted_date,
                 "raw_rel_path": raw_rel,
                 "vector_rel_path": asset_rel,
                 "processed_size_bytes": str(asset_size_bytes),
@@ -3854,6 +4382,7 @@ async def process_dataset(
                 "dataset_type": "3dmodel",
                 "layer_type": "3DModel",
                 "month": normalized_month,
+                "created_at": submitted_date,
                 "raw_rel_path": raw_rel,
                 "tiles_rel_path": model_rel,
                 "tileset_rel_path": tileset_rel,
@@ -3895,6 +4424,7 @@ async def process_dataset(
                 "tile_folder": "",
                 "dataset_type": "csv",
                 "month": normalized_month,
+                "created_at": submitted_date,
                 "raw_rel_path": raw_rel,
                 "processed_size_bytes": str(input_path.stat().st_size),
                 "processed_size": _format_size_bytes(input_path.stat().st_size),
@@ -3934,6 +4464,7 @@ async def process_dataset(
             "dataset_type": normalized_type,
             "layer_type": _raster_layer_type(normalized_type, safe_name),
             "month": normalized_month,
+            "created_at": submitted_date,
             "raw_rel_path": raw_rel,
             "cog_path": str((output_tile_dir / f"{tile_output_folder}.cog.tif").resolve()),
         },
@@ -4063,13 +4594,14 @@ async def upload_dataset(
     file: UploadFile = File(...),
     project_id: str = Form(...),
 ) -> dict[str, str]:
+    verify_admin(request)
     await process_dataset(request, background_tasks, file, project_id)
     return {"status": "processing"}
 
 
 @app.post("/api/datasets/{project_id}/sync")
 def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
-    user = _require_user(request)
+    user = verify_admin(request)
     safe_project_id = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
 
@@ -4150,7 +4682,7 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
 
 @app.post("/api/datasets/{project_id}/open-manual-folder")
 def open_manual_dataset_folder(project_id: str, request: Request) -> dict[str, str]:
-    user = _require_user(request)
+    user = verify_admin(request)
     safe_project_id = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
     _, processed_dir = get_project_dirs(safe_project_id)
@@ -4243,7 +4775,7 @@ async def dataset_metadata(
     file: UploadFile = File(...),
     project_id: str = Form(...),
 ) -> dict[str, str]:
-    user = _require_user(request)
+    user = verify_admin(request)
     _enforce_rate_limit(request, "upload")
     safe_project_id = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
@@ -4480,6 +5012,255 @@ def _dataset_source_path(project_id: str, dataset_id: str) -> Path:
         if tile_folder and candidate.is_file():
             return candidate.resolve()
     raise HTTPException(status_code=404, detail="Source file not found")
+
+
+def _grid_coordinate_range(start: float, stop: float, step: float, descending: bool = False):
+    value = float(start)
+    stop_value = float(stop)
+    step_value = abs(float(step))
+    if descending:
+        while value >= stop_value:
+            yield value
+            value -= step_value
+    else:
+        while value <= stop_value:
+            yield value
+            value += step_value
+
+
+def _grid_sample_value(sample, nodata) -> float | None:
+    value = sample[0]
+    if np.ma.is_masked(value):
+        return None
+    value = float(value)
+    if not math.isfinite(value):
+        return None
+    if nodata is not None and np.isclose(value, float(nodata)):
+        return None
+    return value
+
+
+def _safe_export_stem(value: str, fallback: str = "dataset") -> str:
+    stem = Path(os.path.basename(value.strip() or fallback)).stem or fallback
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
+    return cleaned[:120] or fallback
+
+
+def _grid_export_raster_path(project_id: str, dataset_id: str) -> tuple[Path, dict[str, str]]:
+    st = _dataset_status_by_id(project_id, dataset_id)
+    layer_type = st.get("layer_type") or _raster_layer_type(
+        st.get("dataset_type", ""),
+        st.get("dataset_name", dataset_id),
+    )
+    if layer_type not in {"DTM", "DSM"}:
+        raise HTTPException(status_code=400, detail="Grid export is available only for DTM/DSM datasets.")
+
+    local_root = Path(LOCAL_DATA_PATH).resolve()
+    for key in ("cog_path", "raw_rel_path"):
+        value = (st.get(key) or "").strip()
+        if not value:
+            continue
+        path = Path(value).resolve() if key == "cog_path" else (local_root / value).resolve()
+        if path.is_file() and (path == local_root or path.is_relative_to(local_root)):
+            return path, st
+
+    cog_rel = (st.get("cog_rel_path") or "").strip()
+    if cog_rel:
+        path = (local_root / cog_rel).resolve()
+        if path.is_file() and path.is_relative_to(local_root):
+            return path, st
+
+    return _dataset_source_path(project_id, dataset_id), st
+
+
+def _validate_grid_export_request(dataset_path: Path, interval: float) -> tuple[int, int, int]:
+    if not math.isfinite(interval) or interval <= 0:
+        raise HTTPException(status_code=400, detail="Grid interval must be greater than zero.")
+    rasterio, _ = _require_rasterio()
+    with rasterio.open(str(dataset_path)) as dataset:
+        if dataset.count < 1:
+            raise HTTPException(status_code=400, detail="Raster has no elevation band.")
+        if dataset.crs and dataset.crs.is_geographic:
+            raise HTTPException(
+                status_code=400,
+                detail="Grid export needs a projected CRS in meters. Please use the projected DTM/DSM.",
+            )
+        width = abs(float(dataset.bounds.right) - float(dataset.bounds.left))
+        height = abs(float(dataset.bounds.top) - float(dataset.bounds.bottom))
+    x_count = int(math.floor(width / interval)) + 1
+    y_count = int(math.floor(height / interval)) + 1
+    point_count = max(0, x_count) * max(0, y_count)
+    return x_count, y_count, point_count
+
+
+def _csv_grid_generator(dataset_path: Path, interval: float):
+    rasterio, _ = _require_rasterio()
+    with rasterio.open(str(dataset_path)) as dataset:
+        bounds = dataset.bounds
+        nodata = dataset.nodata
+        batch_size = 5000
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["X", "Y", "Z"])
+        yield output.getvalue()
+
+        for y in _grid_coordinate_range(bounds.top, bounds.bottom, interval, descending=True):
+            batch: list[tuple[float, float]] = []
+            for x in _grid_coordinate_range(bounds.left, bounds.right, interval):
+                batch.append((x, y))
+                if len(batch) >= batch_size:
+                    yield _csv_grid_rows(dataset, nodata, batch)
+                    batch = []
+            if batch:
+                yield _csv_grid_rows(dataset, nodata, batch)
+
+
+def _csv_grid_rows(dataset, nodata, batch: list[tuple[float, float]]) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    for coord, sample in zip(batch, dataset.sample(batch, masked=True)):
+        z = _grid_sample_value(sample, nodata)
+        if z is not None:
+            writer.writerow([coord[0], coord[1], z])
+    return output.getvalue()
+
+
+def _dxf_grid_generator(dataset_path: Path, interval: float):
+    rasterio, _ = _require_rasterio()
+    yield "0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n6\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n"
+    with rasterio.open(str(dataset_path)) as dataset:
+        bounds = dataset.bounds
+        nodata = dataset.nodata
+        batch_size = 5000
+        for y in _grid_coordinate_range(bounds.top, bounds.bottom, interval, descending=True):
+            batch: list[tuple[float, float]] = []
+            for x in _grid_coordinate_range(bounds.left, bounds.right, interval):
+                batch.append((x, y))
+                if len(batch) >= batch_size:
+                    yield _dxf_grid_rows(dataset, nodata, batch)
+                    batch = []
+            if batch:
+                yield _dxf_grid_rows(dataset, nodata, batch)
+    yield "0\nENDSEC\n0\nEOF\n"
+
+
+def _dxf_grid_rows(dataset, nodata, batch: list[tuple[float, float]]) -> str:
+    parts: list[str] = []
+    for coord, sample in zip(batch, dataset.sample(batch, masked=True)):
+        z = _grid_sample_value(sample, nodata)
+        if z is not None:
+            parts.append(f"0\nPOINT\n8\nDROID_GRID\n10\n{coord[0]}\n20\n{coord[1]}\n30\n{z}\n")
+    return "".join(parts)
+
+
+def _grid_export_output_path(
+    project_id: str,
+    dataset_id: str,
+    output_name: str,
+) -> Path:
+    export_root = Path(LOCAL_DATA_PATH) / "projects" / project_id / "exports" / "grid" / dataset_id
+    export_root.mkdir(parents=True, exist_ok=True)
+    return export_root / os.path.basename(output_name)
+
+
+def _write_grid_export_metadata(
+    output_path: Path,
+    payload: dict[str, str | int | float],
+) -> None:
+    metadata_path = output_path.with_suffix(f"{output_path.suffix}.json")
+    try:
+        metadata_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _grid_export_is_current(output_path: Path, dataset_path: Path, interval: float, export_format: str) -> bool:
+    if not output_path.is_file() or output_path.stat().st_size <= 0:
+        return False
+    metadata_path = output_path.with_suffix(f"{output_path.suffix}.json")
+    if not metadata_path.is_file():
+        return output_path.stat().st_mtime_ns >= dataset_path.stat().st_mtime_ns
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
+    return (
+        str(metadata.get("source_path") or "") == str(dataset_path.resolve())
+        and str(metadata.get("source_mtime_ns") or "") == str(dataset_path.stat().st_mtime_ns)
+        and str(metadata.get("format") or "").lower() == export_format
+        and math.isclose(float(metadata.get("interval") or 0), float(interval), rel_tol=0.0, abs_tol=1e-9)
+    )
+
+
+def _generate_grid_export_file(
+    output_path: Path,
+    dataset_path: Path,
+    interval: float,
+    export_format: str,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_name(f"{output_path.name}.tmp")
+    generator = _csv_grid_generator(dataset_path, interval) if export_format == "csv" else _dxf_grid_generator(dataset_path, interval)
+    try:
+        with tmp_path.open("w", encoding="utf-8", newline="") as handle:
+            for chunk in generator:
+                if chunk:
+                    handle.write(chunk)
+        tmp_path.replace(output_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+@app.get("/api/datasets/{project_id}/{dataset_id}/grid-export")
+def export_dataset_grid(
+    project_id: str,
+    dataset_id: str,
+    request: Request,
+    interval: float = 2.0,
+    format: str = "csv",
+):
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    safe_dataset_id = _safe_dataset_id(dataset_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+
+    export_format = format.lower().strip()
+    if export_format not in {"csv", "dxf"}:
+        raise HTTPException(status_code=400, detail="Grid export format must be csv or dxf.")
+
+    dataset_path, st = _grid_export_raster_path(safe_project_id, safe_dataset_id)
+    _, _, point_count = _validate_grid_export_request(dataset_path, interval)
+    display_name = Path(st.get("dataset_name") or dataset_path.stem).stem
+    safe_name = _safe_export_stem(display_name, safe_dataset_id)
+    interval_token = str(interval).replace(".", "p")
+    output_name = f"{safe_name}_grid_{interval_token}m.{export_format}"
+    output_path = _grid_export_output_path(safe_project_id, safe_dataset_id, output_name)
+    if not _grid_export_is_current(output_path, dataset_path, interval, export_format):
+        _generate_grid_export_file(output_path, dataset_path, interval, export_format)
+        _write_grid_export_metadata(
+            output_path,
+            {
+                "name": output_name,
+                "kind": "Generated Grid Export",
+                "dataset_id": safe_dataset_id,
+                "dataset_name": str(st.get("dataset_name") or display_name),
+                "dataset_type": str(st.get("dataset_type") or ""),
+                "source_path": str(dataset_path.resolve()),
+                "source_mtime_ns": str(dataset_path.stat().st_mtime_ns),
+                "interval": float(interval),
+                "format": export_format,
+                "point_count": point_count,
+                "created_at": _now_iso(),
+            },
+        )
+        _invalidate_project_files_cache(safe_project_id)
+
+    return FileResponse(
+        str(output_path),
+        media_type="text/csv" if export_format == "csv" else "application/dxf",
+        filename=output_name,
+        content_disposition_type="attachment",
+    )
 
 
 def _require_rasterio():
@@ -5262,7 +6043,7 @@ def proxy_tiles(z: int, x: int, y: int, path: str):
     full_path = (Path(LOCAL_DATA_PATH) / path).resolve().as_posix()
     encoded_url = quote(full_path, safe="")
     return RedirectResponse(
-        f"/api/cog/tiles/WebMercatorQuad/{z}/{x}/{y}.png?url={encoded_url}"
+        f"/api/titiler/tiles/WebMercatorQuad/{z}/{x}/{y}.png?url={encoded_url}"
     )
 
 
@@ -5270,7 +6051,7 @@ def proxy_tiles(z: int, x: int, y: int, path: str):
 def proxy_info(path: str):
     full_path = (Path(LOCAL_DATA_PATH) / path).resolve().as_posix()
     encoded_url = quote(full_path, safe="")
-    return RedirectResponse(f"/api/cog/info?url={encoded_url}")
+    return RedirectResponse(f"/api/titiler/info?url={encoded_url}")
 
 
 def _dataset_extra_response_fields(st: dict[str, str]) -> dict[str, str]:
@@ -5913,6 +6694,47 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "file_path": str(report.resolve()),
                     "rel_path": rel,
                     "dataset_id": report_id,
+                },
+            )
+            listed_rel_paths.add(rel)
+
+    export_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "exports" / "grid"
+    if export_root.is_dir():
+        project_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id
+        for export_file in sorted(export_root.rglob("*"), key=lambda p: p.stat().st_mtime if p.is_file() else 0, reverse=True):
+            if not export_file.is_file() or export_file.suffix.lower() not in {".csv", ".dxf"}:
+                continue
+            rel = export_file.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            if rel in listed_rel_paths:
+                continue
+            metadata: dict[str, str] = {}
+            metadata_path = export_file.with_suffix(f"{export_file.suffix}.json")
+            if metadata_path.is_file():
+                try:
+                    loaded = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        metadata = {str(k): str(v) for k, v in loaded.items()}
+                except (OSError, json.JSONDecodeError, TypeError):
+                    metadata = {}
+            project_rel = export_file.relative_to(project_root).as_posix()
+            file_url = f"{base_url}/api/data/projects/{safe_project_id}/{project_rel}"
+            files.append(
+                {
+                    "name": str(metadata.get("name") or export_file.name),
+                    "kind": "Generated Grid Export",
+                    "type": export_file.suffix.lower().lstrip("."),
+                    "size_bytes": str(export_file.stat().st_size),
+                    "status": "Web-Ready",
+                    "updated_at": datetime.fromtimestamp(export_file.stat().st_mtime, timezone.utc).isoformat(),
+                    "file_url": file_url,
+                    "download_url": file_url,
+                    "layer_url": "",
+                    "file_path": str(export_file.resolve()),
+                    "rel_path": rel,
+                    "dataset_id": str(metadata.get("dataset_id") or export_file.parent.name),
+                    "dataset_type": "grid_export",
+                    "month": "",
+                    "raw_rel_path": "",
                 },
             )
             listed_rel_paths.add(rel)

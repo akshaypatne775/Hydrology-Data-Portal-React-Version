@@ -7,6 +7,7 @@ import { API_BASE, toSameOriginBackendUrl } from '../../lib/apiBase'
 import { forceDeleteAdminDataset, updateAdminDatasetMetadata } from '../../services/adminService'
 import {
   deleteProjectFile,
+  exportDatasetGrid,
   getProjectFiles,
   getProjectJobs,
   generateContours,
@@ -377,6 +378,8 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   const [detectingEpsg, setDetectingEpsg] = useState(false)
   const [reportViewer, setReportViewer] = useState<{ name: string; url: string; downloadUrl: string } | null>(null)
   const [generatingContours, setGeneratingContours] = useState<Record<string, boolean>>({})
+  const [exportingGrid, setExportingGrid] = useState<Record<string, string>>({})
+  const [exportToast, setExportToast] = useState<{ title: string; body: string } | null>(null)
   const [uploadForm, setUploadForm] = useState<UploadFormState>({
     name: '',
     type: 'Point Cloud',
@@ -394,7 +397,9 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     try {
       const [jobs, files] = await Promise.all([getProjectJobs(currentProjectId), getProjectFiles(currentProjectId)])
       if (cancelledRef()) return
-      const fileRows = files.filter((file) => file.kind !== 'Raw Survey Data').map(mapProjectFile)
+      const fileRows = files
+        .filter((file) => file.kind !== 'Raw Survey Data' && file.kind !== 'Generated Grid Export')
+        .map(mapProjectFile)
       const fileDatasetIds = new Set(fileRows.map((row) => row.datasetId).filter(Boolean))
       const jobRows: DatasetRow[] = jobs
         .filter((job: ProjectJob) => !fileDatasetIds.has(job.job_id))
@@ -495,9 +500,15 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     })
   }, [activeTasks, projectId])
 
+  useEffect(() => {
+    if (!exportToast) return
+    const timer = window.setTimeout(() => setExportToast(null), 5000)
+    return () => window.clearTimeout(timer)
+  }, [exportToast])
+
   const prepareFile = useCallback(
     async (file: File) => {
-      if (!projectId) return
+      if (!projectId || !isAdmin) return
       const ext = file.name.split('.').pop()?.toLowerCase() || ''
       if (!ALLOWED_EXTENSIONS.has(ext)) return
       const defaultName = file.name.replace(/\.[^.]+$/, '')
@@ -509,20 +520,25 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         epsg: '',
       })
     },
-    [projectId],
+    [isAdmin, projectId],
   )
 
   const onDropFile = useCallback(async (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
     event.stopPropagation()
     setIsDragging(false)
+    if (!isAdmin) return
     const droppedFile = event.dataTransfer.files?.[0]
     if (!droppedFile) return
     await prepareFile(droppedFile)
-  }, [prepareFile])
+  }, [isAdmin, prepareFile])
 
   const submitUpload = useCallback(async () => {
     if (!projectId || !selectedFile || !uploadForm.name.trim()) return
+    if (!isAdmin) {
+      await modal.alert('Admin access required', 'Only admins can upload or manage datasets.')
+      return
+    }
     const ext = selectedFile.name.split('.').pop() || 'dat'
     if (ext.toLowerCase() === 'zip' && uploadForm.type !== '3D Model') {
       await modal.alert('Upload type mismatch', 'ZIP upload is reserved for 3D Model tilesets. Upload DTM, DSM, and Ortho as .tif or .tiff so they open in Viewer (2D).')
@@ -542,7 +558,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     }
     invalidateProjectDataCache(projectId)
     setSelectedFile(null)
-  }, [modal, projectId, selectedFile, startDatasetUpload, startPointCloudUpload, uploadForm.date, uploadForm.name, uploadForm.type])
+  }, [isAdmin, modal, projectId, selectedFile, startDatasetUpload, startPointCloudUpload, uploadForm.date, uploadForm.name, uploadForm.type])
 
   const getActionLabel = useCallback((row: DatasetRow) => {
     if (['cog', 'Ortho', 'DTM', 'DSM'].includes(String(row.layerType))) return `Show ${row.type} on Map`
@@ -578,6 +594,35 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       setGeneratingContours((prev) => ({ ...prev, [contourKey]: false }))
     }
   }, [loadRows, modal, projectId])
+
+  const onExportGrid = useCallback(async (row: DatasetRow, format: 'csv' | 'dxf') => {
+    if (!projectId || !row.datasetId) return
+    const raw = await modal.prompt(`Export ${format.toUpperCase()} grid`, 'Grid interval in meters', '2')
+    if (raw === null) return
+    const interval = Number(raw)
+    if (!Number.isFinite(interval) || interval <= 0) {
+      await modal.alert('Invalid interval', 'Please enter a valid grid interval greater than zero.')
+      return
+    }
+    const key = `${row.datasetId}:${format}`
+    setExportingGrid((prev) => ({ ...prev, [key]: format }))
+    try {
+      const filename = await exportDatasetGrid(projectId, row.datasetId, { format, interval, fileName: row.fileName })
+      window.sessionStorage.removeItem(`datasets:rows:${projectId}`)
+      setExportToast({
+        title: 'Grid export ready',
+        body: `${filename} added to Data Downloads.`,
+      })
+    } catch (error) {
+      await modal.alert('Grid export failed', error instanceof Error ? error.message : 'Grid export failed')
+    } finally {
+      setExportingGrid((prev) => {
+        const next = { ...prev }
+        delete next[key]
+        return next
+      })
+    }
+  }, [modal, projectId])
 
   const onAdminEditMetadata = useCallback(async (row: DatasetRow) => {
     if (!projectId || !row.datasetId) return
@@ -740,12 +785,22 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         </div>
       </div>
     ) : null}
+    {exportToast ? (
+      <div className="dsp-toast" role="status" aria-live="polite">
+        <i className="fa-solid fa-circle-check" aria-hidden />
+        <div>
+          <strong>{exportToast.title}</strong>
+          <span>{exportToast.body}</span>
+        </div>
+      </div>
+    ) : null}
     <section className="dsp-root">
       <header className="dsp-head">
         <div>
           <h3>Dataset Management</h3>
-          <p>Upload only from this panel with metadata and automatic EPSG detection.</p>
+          <p>{isAdmin ? 'Upload only from this panel with metadata and automatic EPSG detection.' : 'View and download project datasets from this panel.'}</p>
         </div>
+        {isAdmin ? (
         <div className="dsp-head__actions">
           <button
             type="button"
@@ -764,8 +819,10 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
             {syncingManual ? 'Syncing...' : 'Sync Manual Folders'}
           </button>
         </div>
+        ) : null}
       </header>
 
+      {isAdmin ? (
       <div
         className={isDragging ? 'dsp-dropzone dsp-dropzone--dragging' : 'dsp-dropzone'}
         onClick={() => fileInputRef.current?.click()}
@@ -801,8 +858,13 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         <p className="dsp-dropzone__title">Drop or Select .las, .laz, .tif, .csv, .zip, .kml, .geojson, .dwg, .pdf files</p>
         <p className="dsp-dropzone__meta">After select, fill details and start upload</p>
       </div>
+      ) : (
+        <div className="dsp-readonly-note">
+          Uploads and manual sync are available only to Droid Cloud admins.
+        </div>
+      )}
 
-      {selectedFile ? (
+      {isAdmin && selectedFile ? (
         <div className="dsp-form">
           <label>
             Name
@@ -860,7 +922,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         </div>
       ) : null}
 
-      {primaryTask ? (
+      {isAdmin && primaryTask ? (
         <div className="dsp-progress" aria-live="polite">
           <div className="dsp-progress__summary">
             <strong>{primaryTask.fileName}</strong>
@@ -992,6 +1054,26 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                         disabled={Boolean(generatingContours[row.datasetId])}
                       >
                         {generatingContours[row.datasetId] ? '⏳ Generating...' : '🗺️ Generate Contours'}
+                      </button>
+                    ) : null}
+                    {row.datasetId && ['DTM', 'DSM'].includes(row.type) ? (
+                      <button
+                        type="button"
+                        className="dsp-action dsp-action--secondary"
+                        onClick={() => void onExportGrid(row, 'csv')}
+                        disabled={Boolean(exportingGrid[`${row.datasetId}:csv`])}
+                      >
+                        {exportingGrid[`${row.datasetId}:csv`] ? 'Exporting CSV...' : 'Export CSV'}
+                      </button>
+                    ) : null}
+                    {row.datasetId && ['DTM', 'DSM'].includes(row.type) ? (
+                      <button
+                        type="button"
+                        className="dsp-action dsp-action--secondary"
+                        onClick={() => void onExportGrid(row, 'dxf')}
+                        disabled={Boolean(exportingGrid[`${row.datasetId}:dxf`])}
+                      >
+                        {exportingGrid[`${row.datasetId}:dxf`] ? 'Exporting DXF...' : 'Export DXF'}
                       </button>
                     ) : null}
                     {isAdmin && row.datasetId ? (

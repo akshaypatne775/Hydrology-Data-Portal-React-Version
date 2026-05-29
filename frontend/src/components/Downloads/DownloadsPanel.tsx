@@ -3,7 +3,7 @@ import { getProjectFiles, type ProjectFile } from '../../services/datasetService
 import { toSameOriginBackendUrl } from '../../lib/apiBase'
 import './DownloadsPanel.css'
 
-type DownloadCategory = 'Raw Survey Data' | 'Web-Optimized Data' | 'Reports'
+type DownloadCategory = 'Raw Survey Data' | 'Web-Optimized Data' | 'Generated Exports' | 'Reports'
 
 type DownloadItem = {
   id: string
@@ -18,7 +18,7 @@ type DownloadsPanelProps = {
   projectId?: string
 }
 
-const CATEGORY_ORDER: DownloadCategory[] = ['Raw Survey Data', 'Web-Optimized Data', 'Reports']
+const CATEGORY_ORDER: DownloadCategory[] = ['Raw Survey Data', 'Web-Optimized Data', 'Generated Exports', 'Reports']
 
 function humanSize(sizeBytes: string): string {
   const n = Number(sizeBytes)
@@ -53,6 +53,8 @@ export function DownloadsPanel({ projectId }: DownloadsPanelProps) {
           const category: DownloadCategory =
             file.kind === 'Reports'
               ? 'Reports'
+              : file.kind === 'Generated Grid Export'
+                ? 'Generated Exports'
               : file.kind === 'Web-Optimized Data'
                 ? 'Web-Optimized Data'
                 : 'Raw Survey Data'

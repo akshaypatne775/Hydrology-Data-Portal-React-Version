@@ -70,6 +70,7 @@ type ViewerLayer = {
   datasetId?: string
   datasetType?: string
   month?: string
+  cacheKey?: string
 }
 type BaseMapKey = 'esri-imagery' | 'osm' | 'carto-light' | 'carto-voyager' | 'esri-topo'
 type BaseMapConfig = {
@@ -286,7 +287,9 @@ function isStaticXyzTileTemplate(url: string): boolean {
     (url.includes('/tiles/') || url.includes('/data/')) &&
     url.includes('{z}/{x}/{y}.png') &&
     !url.includes('/api/cog/') &&
-    !url.includes('/api/titiler/')
+    !url.includes('/api/titiler/') &&
+    !url.includes('/api/dji-terra/') &&
+    !url.includes('/api/ortho-cog/')
   )
 }
 
@@ -294,6 +297,16 @@ function tileTemplateToStaticBase(url: string): string | null {
   const suffix = '{z}/{x}/{y}.png'
   if (!url.endsWith(suffix)) return null
   return url.slice(0, -suffix.length)
+}
+
+function rasterSourceKeyFromTileUrl(url: string | null | undefined): string {
+  if (!url) return ''
+  try {
+    const parsed = new URL(url, window.location.origin)
+    return (parsed.searchParams.get('url') || parsed.pathname).replace(/\\/g, '/')
+  } catch {
+    return url.split('?')[0]?.replace(/\\/g, '/') || ''
+  }
 }
 
 type StaticTileMeta = {
@@ -307,6 +320,9 @@ function buildTitilerTileUrl(layer: {
   layerType?: string
   datasetType?: string
   cogPath?: string
+  cogRelPath?: string
+  datasetId?: string
+  cacheKey?: string
   rescaleMin?: number | string
   rescaleMax?: number | string
 }): string {
@@ -319,9 +335,14 @@ function buildTitilerTileUrl(layer: {
   const rasterType = String(layer.layerType || layer.datasetType || '').toLowerCase()
   const min = Number(layer.rescaleMin)
   const max = Number(layer.rescaleMax)
+  if (rasterType === 'ortho' || rasterType === 'orthomosaic') {
+    params.set('renderer', 'edge-mask-v2')
+    params.set('v', String(layer.cacheKey || layer.datasetId || layer.cogRelPath || '1'))
+    return `${API_BASE}/api/ortho-cog/tiles/WebMercatorQuad/{z}/{x}/{y}@1x?${params.toString()}`
+  }
   if ((rasterType === 'dtm' || rasterType === 'dsm') && Number.isFinite(min) && Number.isFinite(max) && min !== max) {
-    params.set('colormap_name', 'agisoft_dem')
     params.set('rescale', `${min},${max}`)
+    return `${API_BASE}/api/dji-terra/tiles/WebMercatorQuad/{z}/{x}/{y}@1x?${params.toString()}`
   }
   return `${API_BASE}/api/titiler/tiles/WebMercatorQuad/{z}/{x}/{y}@1x?${params.toString()}`
 }
@@ -733,9 +754,18 @@ function OrthomosaicTileLayerWithOptions({
   const paneName = 'orthomosaic-crop-pane'
   const [nativeZoom, setNativeZoom] = useState(22)
   const [nativeMinZoom, setNativeMinZoom] = useState(0)
+  const isDynamicCogLayer =
+    tileUrl.includes('/api/titiler/') || tileUrl.includes('/api/dji-terra/') || tileUrl.includes('/api/ortho-cog/')
+  const effectiveNativeZoom = isDynamicCogLayer ? 30 : nativeZoom
+  const effectiveNativeMinZoom = isDynamicCogLayer ? 0 : nativeMinZoom
 
   useEffect(() => {
     let cancelled = false
+    if (isDynamicCogLayer) {
+      return () => {
+        cancelled = true
+      }
+    }
     void fetchStaticTileMeta(tileUrl).then((meta) => {
       if (cancelled) return
       const zoomMax = Number(meta?.zoom_max)
@@ -754,7 +784,7 @@ function OrthomosaicTileLayerWithOptions({
     return () => {
       cancelled = true
     }
-  }, [tileUrl])
+  }, [isDynamicCogLayer, tileUrl])
 
   useEffect(
     () => applyTileClip(map, map.getPane(paneName) ?? null, cropEnabled ? cropFootprint ?? null : null),
@@ -768,8 +798,8 @@ function OrthomosaicTileLayerWithOptions({
         url={tileUrl}
         opacity={0.9}
         maxZoom={30}
-        maxNativeZoom={nativeZoom}
-        minNativeZoom={nativeMinZoom}
+        maxNativeZoom={effectiveNativeZoom}
+        minNativeZoom={effectiveNativeMinZoom}
         bounds={bounds}
         noWrap
         updateWhenIdle={false}
@@ -1107,6 +1137,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
           datasetId: file.dataset_id,
           datasetType: file.dataset_type,
           month: file.month,
+          cacheKey: file.updated_at || file.dataset_id || file.cog_rel_path,
         }
         return {
           ...baseLayer,
@@ -1135,6 +1166,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
           datasetId: item.datasetId,
           datasetType: item.datasetType,
           month: item.month,
+          cacheKey: item.datasetId || item.cogRelPath,
         }
         return {
           ...baseLayer,
@@ -1374,8 +1406,20 @@ export function MapViewer({ projectId }: MapViewerProps) {
       setCogBounds(null)
       return
     }
+    if (cogTileUrl && !projectCogLayers.some((layer) => layer.url === cogTileUrl)) {
+      const currentSource = rasterSourceKeyFromTileUrl(cogTileUrl)
+      const replacement =
+        projectCogLayers.find((layer) => rasterSourceKeyFromTileUrl(layer.url) === currentSource) ??
+        projectCogLayers[0]
+      setCogTileUrl(replacement?.url ?? null)
+    }
     if (!cogTileUrl && projectCogLayers[0]?.url) {
       setCogTileUrl(projectCogLayers[0].url)
+    }
+    if (compareCogTileUrl && !projectCogLayers.some((layer) => layer.url === compareCogTileUrl)) {
+      const currentSource = rasterSourceKeyFromTileUrl(compareCogTileUrl)
+      const replacement = projectCogLayers.find((layer) => rasterSourceKeyFromTileUrl(layer.url) === currentSource)
+      setCompareCogTileUrl(replacement?.url ?? null)
     }
     if (!compareCogTileUrl) {
       const compareLayer =

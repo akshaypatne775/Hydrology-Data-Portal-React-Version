@@ -799,7 +799,7 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
 
   // Example TiTiler COG XYZ layer (reference):
   // const cogLayer = new Cesium.UrlTemplateImageryProvider({
-  //   url: 'http://localhost:8000/api/cog/tiles/WebMercatorQuad/{z}/{x}/{y}?url=D:/Data/output.tif',
+  //   url: 'http://localhost:8000/api/titiler/tiles/WebMercatorQuad/{z}/{x}/{y}?url=D:/Data/output.tif',
   // })
 
   useEffect(() => {
@@ -1154,6 +1154,8 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       setViewerReady(false)
     }
 
+    const modelTilesets = modelTilesetsRef.current
+    const vectorSources = vectorSourcesRef.current
     return () => {
       handler?.destroy()
       if (viewerRef.current) {
@@ -1170,8 +1172,8 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
         }
       }
       pointCloudRef.current = null
-      modelTilesetsRef.current.clear()
-      vectorSourcesRef.current.clear()
+      modelTilesets.clear()
+      vectorSources.clear()
       orthomosaicLayerRef.current = null
       measureEntityIdsRef.current = []
       measurePointsRef.current = []

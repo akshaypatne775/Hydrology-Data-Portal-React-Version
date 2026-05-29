@@ -8,6 +8,7 @@ import {
   deleteAdminUser,
   disapproveAdminUser,
   getAdminUserActivity,
+  setAdminUserCatalogAccess,
   type AdminUserActivity,
 } from '../../services/adminService'
 import './AdminDashboard.css'
@@ -161,6 +162,7 @@ export default function AdminDashboard() {
               <th>Total Connected IPs</th>
               <th>Last Accessed Dataset</th>
               <th>Last Seen</th>
+              <th>Data Catalog</th>
               <th>Action</th>
               <th>Approval</th>
               <th>Role</th>
@@ -169,12 +171,12 @@ export default function AdminDashboard() {
           <tbody>
             {loading && users.length === 0 ? (
               <tr>
-                <td colSpan={10}>Loading activity...</td>
+                <td colSpan={11}>Loading activity...</td>
               </tr>
             ) : null}
             {error ? (
               <tr>
-                <td colSpan={10} className="admin-panel__error">{error}</td>
+                <td colSpan={11} className="admin-panel__error">{error}</td>
               </tr>
             ) : null}
             {users.map((user) => (
@@ -213,6 +215,15 @@ export default function AdminDashboard() {
                   {formatAccessLabel(user.last_accessed_data)}
                 </td>
                 <td>{formatLastSeen(user.last_seen_at)}</td>
+                <td>
+                  <button
+                    type="button"
+                    className={user.can_access_catalog === false ? 'admin-panel__action admin-panel__action--danger' : 'admin-panel__action admin-panel__action--approve'}
+                    onClick={() => void runUserAction(() => setAdminUserCatalogAccess(user.user_id, user.can_access_catalog === false))}
+                  >
+                    {user.can_access_catalog === false ? 'Hidden' : 'Visible'}
+                  </button>
+                </td>
                 <td>
                   <button
                     type="button"

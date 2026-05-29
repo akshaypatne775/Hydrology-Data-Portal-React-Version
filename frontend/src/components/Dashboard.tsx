@@ -85,7 +85,7 @@ function initialsFromEmail(email: string): string {
 }
 
 type DashboardProps = {
-  user: { id: number; email: string; role?: string }
+  user: { id: number; email: string; role?: string; can_access_catalog?: boolean }
   onLogout: () => void
 }
 
@@ -109,6 +109,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     setActiveViewerTab,
   } = useWorkspaceContext()
   const isAdmin = user.role === 'admin'
+  const canAccessDataCatalog = isAdmin || user.can_access_catalog !== false
   const { projects, loading: projectsLoading, error: projectsError, addProject, renameProject } = useProjects(managedUser?.userId)
   const [createProjectError, setCreateProjectError] = useState<string | null>(null)
   const [renamingProject, setRenamingProject] = useState(false)
@@ -123,8 +124,9 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   const visibleNavItems = useMemo(
     () =>
       (selectedProject ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.id === 'projects' || item.id === 'admin'))
-        .filter((item) => item.id !== 'admin' || isAdmin),
-    [isAdmin, selectedProject],
+        .filter((item) => item.id !== 'admin' || isAdmin)
+        .filter((item) => item.id !== 'datasets' || canAccessDataCatalog),
+    [canAccessDataCatalog, isAdmin, selectedProject],
   )
   const activePointCloudLayer = useMemo(
     () =>
@@ -140,6 +142,12 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     if (activeId !== 'map' && activeId !== 'globe') return activeId
     return activeViewerTab === '3D' ? 'globe' : 'map'
   }, [activeId, activeViewerTab])
+
+  useEffect(() => {
+    if (activeId === 'datasets' && !canAccessDataCatalog) {
+      setActiveId(selectedProject ? 'dashboard' : 'projects')
+    }
+  }, [activeId, canAccessDataCatalog, selectedProject, setActiveId])
 
   const handleShare = useCallback(async () => {
     const url = `${window.location.origin}${window.location.pathname}`

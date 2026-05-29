@@ -108,12 +108,54 @@ export async function processDatasetTif(form: FormData): Promise<ProcessDatasetR
   if (!res.ok) {
     let detail = ''
     try {
-      const data = (await res.json()) as { detail?: string }
-      detail = data.detail ? `: ${data.detail}` : ''
+      const data = (await res.json()) as { detail?: unknown }
+      if (Array.isArray(data.detail)) {
+        detail = `: ${data.detail
+          .map((item) => {
+            if (item && typeof item === 'object' && 'msg' in item) return String(item.msg)
+            return String(item)
+          })
+          .join(', ')}`
+      } else if (data.detail) {
+        detail = `: ${String(data.detail)}`
+      }
     } catch {
       detail = ''
     }
     throw new Error(`Dataset upload failed (${res.status})${detail}`)
+  }
+  return (await res.json()) as ProcessDatasetResponse
+}
+
+export async function uploadDatasetChunk(chunkForm: FormData): Promise<Response> {
+  return apiRequest('/api/upload-dataset-chunk', {
+    method: 'POST',
+    body: chunkForm,
+  })
+}
+
+export async function completeDatasetUpload(payload: {
+  filename: string
+  totalChunks: number
+  project_id: string
+  dataset_type?: string
+  month?: string
+  created_at?: string
+}): Promise<ProcessDatasetResponse> {
+  const res = await apiRequest('/api/complete-dataset-upload', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    let detail = ''
+    try {
+      const data = (await res.json()) as { detail?: unknown }
+      detail = data.detail ? `: ${String(data.detail)}` : ''
+    } catch {
+      detail = ''
+    }
+    throw new Error(`Dataset merge failed (${res.status})${detail}`)
   }
   return (await res.json()) as ProcessDatasetResponse
 }
@@ -221,6 +263,58 @@ export async function generateContours(
   if (!res.ok) throw new Error(`Contour generation failed (${res.status})`)
   invalidateProjectDataCache(projectId)
   return (await res.json()) as ProcessDatasetResponse
+}
+
+function filenameFromDisposition(disposition: string | null, fallback: string): string {
+  if (!disposition) return fallback
+  const match = disposition.match(/filename\*?=(?:UTF-8''|")?([^";]+)/i)
+  if (!match?.[1]) return fallback
+  try {
+    return decodeURIComponent(match[1].replace(/"/g, ''))
+  } catch {
+    return match[1].replace(/"/g, '')
+  }
+}
+
+export async function exportDatasetGrid(
+  projectId: string,
+  datasetId: string,
+  payload: { format: 'csv' | 'dxf'; interval: number; fileName?: string },
+): Promise<string> {
+  const params = new URLSearchParams({
+    format: payload.format,
+    interval: String(payload.interval),
+  })
+  const res = await apiRequest(
+    `/api/datasets/${encodeURIComponent(projectId)}/${encodeURIComponent(datasetId)}/grid-export?${params.toString()}`,
+    { method: 'GET' },
+  )
+  if (!res.ok) {
+    let detail = `Grid export failed (${res.status})`
+    try {
+      const data = (await res.json()) as { detail?: string }
+      if (data.detail) detail = data.detail
+    } catch {
+      // keep default detail
+    }
+    throw new Error(detail)
+  }
+  const blob = await res.blob()
+  const fallback = `${payload.fileName || datasetId}_grid.${payload.format}`
+  const filename = filenameFromDisposition(res.headers.get('content-disposition'), fallback)
+  const objectUrl = URL.createObjectURL(blob)
+  try {
+    const anchor = document.createElement('a')
+    anchor.href = objectUrl
+    anchor.download = filename
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 5000)
+  }
+  invalidateProjectDataCache(projectId)
+  return filename
 }
 
 export async function syncManualDatasetFolders(

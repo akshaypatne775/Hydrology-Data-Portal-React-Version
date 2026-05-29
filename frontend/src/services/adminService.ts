@@ -7,6 +7,7 @@ export type AdminUserActivity = {
   role: string
   requested_role?: string
   approval_status?: string
+  can_access_catalog?: boolean
   status: 'Active' | 'Offline'
   current_ip: string
   device_label?: string
@@ -48,6 +49,15 @@ export async function assignAdminUserRole(userId: number, role: 'admin' | 'user'
     body: JSON.stringify({ role }),
   })
   if (!res.ok) throw new Error(`Role update failed (${res.status})`)
+}
+
+export async function setAdminUserCatalogAccess(userId: number, enabled: boolean): Promise<void> {
+  const res = await apiRequest(`/api/admin/users/${encodeURIComponent(String(userId))}/catalog-access`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  })
+  if (!res.ok) throw new Error(`Data Catalog access update failed (${res.status})`)
 }
 
 export async function disapproveAdminUser(userId: number): Promise<void> {
