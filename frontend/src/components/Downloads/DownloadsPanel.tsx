@@ -29,6 +29,20 @@ function humanSize(sizeBytes: string): string {
   return `${mb.toFixed(1)} MB`
 }
 
+function isHiddenDownload(file: ProjectFile): boolean {
+  const type = String(file.type || '').toLowerCase()
+  const datasetType = String(file.dataset_type || '').toLowerCase()
+  const kind = String(file.kind || '').toLowerCase()
+  const name = String(file.name || '').toLowerCase()
+  return (
+    type === '3dmodel' ||
+    datasetType === '3dmodel' ||
+    kind.includes('3d photogrammetry') ||
+    type === 'zip' ||
+    name.endsWith('.zip')
+  )
+}
+
 export function DownloadsPanel({ projectId }: DownloadsPanelProps) {
   const [items, setItems] = useState<DownloadItem[]>([])
   const visibleItems = useMemo(() => (projectId ? items : []), [items, projectId])
@@ -49,7 +63,7 @@ export function DownloadsPanel({ projectId }: DownloadsPanelProps) {
       try {
         const files = await getProjectFiles(projectId)
         if (cancelled) return
-        const mapped: DownloadItem[] = files.map((file: ProjectFile) => {
+        const mapped: DownloadItem[] = files.filter((file) => !isHiddenDownload(file)).map((file: ProjectFile) => {
           const category: DownloadCategory =
             file.kind === 'Reports'
               ? 'Reports'

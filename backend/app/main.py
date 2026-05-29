@@ -188,8 +188,8 @@ rio_colormap.cmap = rio_colormap.cmap.register(
 from titiler.core.factory import TilerFactory
 
 app = FastAPI(
-    title="Hydrology & Mapping Portal API",
-    description="Backend services for hydrology data and mapping.",
+    title="Droid Survair Cloud Portal API",
+    description="Backend services for drone survey data and mapping.",
     version="0.1.0",
 )
 cog_tiler = TilerFactory()
@@ -822,9 +822,8 @@ def _render_ortho_cog_png(tile_array) -> bytes:
         mask = np.any(np.ma.getmaskarray(tile_array[:3]), axis=0)
         alpha[mask] = 0
 
-    white_padding = _edge_connected_padding_mask(np.all(rgb >= 253, axis=2))
-    black_padding = _edge_connected_padding_mask(np.all(rgb <= 2, axis=2))
-    alpha[white_padding | black_padding] = 0
+    white_background = np.all(rgb >= 248, axis=2)
+    alpha[white_background] = 0
 
     output = io.BytesIO()
     Image.fromarray(np.dstack([rgb, alpha]), mode="RGBA").save(output, format="PNG")
@@ -2296,6 +2295,17 @@ def _candidate_processed_tile_dirs(processed_root: Path) -> list[Path]:
     return candidates
 
 
+def _candidate_processed_cog_files(processed_root: Path) -> list[Path]:
+    if not processed_root.is_dir():
+        return []
+    files: dict[str, Path] = {}
+    for pattern in ("*.cog.tif", "*.cog.tiff", "*_cog.tif", "*_cog.tiff"):
+        for path in processed_root.rglob(pattern):
+            if path.is_file():
+                files[path.resolve().as_posix()] = path
+    return sorted(files.values(), key=lambda p: p.name.lower())
+
+
 def _candidate_processed_model_dirs(processed_root: Path) -> list[Path]:
     if not processed_root.is_dir():
         return []
@@ -3676,8 +3686,8 @@ def project_stats() -> dict[str, list]:
     }
 
 
-@app.get("/api/hydrology-stats")
-def hydrology_stats() -> dict[str, list]:
+@app.get("/api/survair-stats")
+def survair_stats() -> dict[str, list]:
     return {
         "catchment_stats": CATCHMENT_STATS,
         "stream_stats": STREAM_STATS,
@@ -4622,15 +4632,29 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
         rel = (st.get("tiles_rel_path") or "").strip()
         if rel:
             tracked_folders.add(rel)
+        cog_rel = (st.get("cog_rel_path") or "").strip()
+        if cog_rel:
+            tracked_folders.add(cog_rel)
 
     found_new = 0
-    candidates: list[tuple[Path, str, str]] = [
-        *[(item, _raster_layer_type(_infer_dataset_type(item.name), item.name), _infer_dataset_type(item.name)) for item in _candidate_processed_tile_dirs(processed_dir)],
-        *[(item, "3DModel", "3dmodel") for item in _candidate_processed_model_dirs(processed_dir)],
+    candidates: list[tuple[Path, str, str, str]] = [
+        *[
+            (
+                item,
+                _raster_layer_type(_infer_dataset_type(f"{item.parent.name} {item.name}"), item.name),
+                _infer_dataset_type(f"{item.parent.name} {item.name}"),
+                "cog",
+            )
+            for item in _candidate_processed_cog_files(processed_dir)
+        ],
+        *[(item, _raster_layer_type(_infer_dataset_type(item.name), item.name), _infer_dataset_type(item.name), "folder") for item in _candidate_processed_tile_dirs(processed_dir)],
+        *[(item, "3DModel", "3dmodel", "folder") for item in _candidate_processed_model_dirs(processed_dir)],
     ]
-    for item, layer_kind, dataset_type in candidates:
+    for item, layer_kind, dataset_type, asset_kind in candidates:
         rel_path = item.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
         folder_name = _display_model_folder_name(item, processed_dir) if layer_kind == "3DModel" else item.name
+        if asset_kind == "cog":
+            folder_name = folder_name.replace(".cog.tiff", ".tiff").replace(".cog.tif", ".tif").replace("_cog.tiff", ".tiff").replace("_cog.tif", ".tif")
         if layer_kind != "3DModel":
             dataset_type = _normalize_dataset_type(dataset_type, folder_name)
             layer_kind = _raster_layer_type(dataset_type, folder_name)
@@ -4653,7 +4677,9 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
                 "layer_type": layer_kind,
                 "month": "",
                 "raw_rel_path": "",
-                "tiles_rel_path": rel_path,
+                "tiles_rel_path": "" if asset_kind == "cog" else rel_path,
+                "cog_path": str(item.resolve()) if asset_kind == "cog" else "",
+                "cog_rel_path": rel_path if asset_kind == "cog" else "",
             },
         )
         result_url = f"/data/{rel_path}/tileset.json" if layer_kind == "3DModel" else f"/data/{rel_path}"

@@ -1,11 +1,11 @@
-# Droid Cloud Hydrology Data Portal
+# Droid Survair Cloud Portal
 
-Professional project-based hydrology and geospatial portal built with React + FastAPI.  
+Professional project-based drone survey and geospatial data portal built with React + FastAPI.  
 It combines 2D map analysis, 3D globe point-cloud visualization, authentication, and project isolation in one scalable workspace.
 
 ## Project Description
 
-This platform helps teams manage hydrology workflows per project:
+This platform helps teams manage drone survey workflows per project:
 
 - Create user accounts and securely sign in
 - Create and manage project workspaces
@@ -20,12 +20,12 @@ The architecture is modular and production-oriented (`components`, `hooks`, `ser
 
 - Project-based dashboard with user-specific project visibility
 - Secure auth (signup, login, logout, session cookies)
-- 2D map workspace with hydrology layers and issue overlays
+- 2D map workspace with survey layers and issue overlays
 - 3D globe workspace with point cloud upload and rendering
 - Chunked upload + background processing for large LAS/LAZ files
 - Point-cloud processing status polling and conversion error reporting
 - Conversion caching (same file content is reused)
-- Recharts-based hydrology visualizations (line, bar, summary cards)
+- Recharts-based project visualizations (line, bar, summary cards)
 - Professional branded UI (Droid Cloud)
 - Environment-driven configuration for API URLs and security settings
 
@@ -56,7 +56,7 @@ The architecture is modular and production-oriented (`components`, `hooks`, `ser
 
 ```bash
 git clone <your-repo-url>
-cd "Hydrology Data Portal React Version"
+cd "Droid Survair Cloud Portal"
 ```
 
 ## 2) Frontend setup
@@ -148,7 +148,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 1. Sign up / log in
 2. Create or select a project
-3. Open **Map View** for 2D hydrology analysis
+3. Open **Map View** for 2D survey analysis
 4. Open **Globe View** to upload LAS/LAZ point clouds
 5. Wait for background conversion and status polling
 6. Review loaded 3D tileset inside Cesium globe
@@ -190,7 +190,7 @@ Add screenshots in a folder like `docs/screenshots/` and update links below.
 
 ![Project Dashboard](docs/screenshots/dashboard.png)
 
-### 3. Map View (Hydrology Analysis)
+### 3. Map View (Survey Analysis)
 
 ![Map View](docs/screenshots/map-view.png)
 

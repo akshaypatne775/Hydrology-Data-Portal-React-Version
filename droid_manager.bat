@@ -33,13 +33,16 @@ echo   [2] Save New Dependencies ^(Update requirements.txt^)
 echo   [3] Start the Portal ^(Backend first, then Frontend^)
 echo   [4] Exit
 echo.
-choice /c 1234 /n /m "Select an option (1-4): "
+set "MAIN_CHOICE="
+set /p "MAIN_CHOICE=Type 1, 2, 3, or 4 then press ENTER: "
 
-if errorlevel 4 goto end
-if errorlevel 3 goto start_portal
-if errorlevel 2 goto save_dependencies
-if errorlevel 1 goto one_click_install
+if "%MAIN_CHOICE%"=="4" goto end
+if "%MAIN_CHOICE%"=="3" goto start_portal
+if "%MAIN_CHOICE%"=="2" goto save_dependencies
+if "%MAIN_CHOICE%"=="1" goto one_click_install
 
+echo [WARN] Invalid option. Please type 1, 2, 3, or 4.
+timeout /t 1 >nul
 goto menu
 
 :check_folders
@@ -367,13 +370,16 @@ echo   [2] Start Frontend only ^(waits for backend^)
 echo   [3] Start Backend then Frontend ^(auto^)
 echo   [4] Back to Main Menu
 echo.
-choice /c 1234 /n /m "Select an option (1-4): "
+set "PORTAL_CHOICE="
+set /p "PORTAL_CHOICE=Type 1, 2, 3, or 4 then press ENTER: "
 
-if errorlevel 4 goto menu
-if errorlevel 3 goto start_portal_auto
-if errorlevel 2 goto start_frontend_only
-if errorlevel 1 goto start_backend_only
+if "%PORTAL_CHOICE%"=="4" goto menu
+if "%PORTAL_CHOICE%"=="3" goto start_portal_auto
+if "%PORTAL_CHOICE%"=="2" goto start_frontend_only
+if "%PORTAL_CHOICE%"=="1" goto start_backend_only
 
+echo [WARN] Invalid option. Please type 1, 2, 3, or 4.
+timeout /t 1 >nul
 goto start_portal
 
 :start_backend_only
@@ -385,8 +391,13 @@ if errorlevel 1 (
   pause
   goto start_portal
 )
+call :wait_for_backend_ready
+if errorlevel 1 (
+  pause
+  goto start_portal
+)
 echo.
-echo [SUCCESS] Backend command sent. Wait until the backend window says it is ready.
+echo [SUCCESS] Backend is running and ready.
 echo [NEXT] Come back here and choose option 2 to start frontend.
 pause
 goto start_portal

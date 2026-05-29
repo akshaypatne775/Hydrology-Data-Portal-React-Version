@@ -336,7 +336,7 @@ function buildTitilerTileUrl(layer: {
   const min = Number(layer.rescaleMin)
   const max = Number(layer.rescaleMax)
   if (rasterType === 'ortho' || rasterType === 'orthomosaic') {
-    params.set('renderer', 'edge-mask-v2')
+    params.set('renderer', 'reference-white-v3')
     params.set('v', String(layer.cacheKey || layer.datasetId || layer.cogRelPath || '1'))
     return `${API_BASE}/api/ortho-cog/tiles/WebMercatorQuad/{z}/{x}/{y}@1x?${params.toString()}`
   }
@@ -345,6 +345,13 @@ function buildTitilerTileUrl(layer: {
     return `${API_BASE}/api/dji-terra/tiles/WebMercatorQuad/{z}/{x}/{y}@1x?${params.toString()}`
   }
   return `${API_BASE}/api/titiler/tiles/WebMercatorQuad/{z}/{x}/{y}@1x?${params.toString()}`
+}
+
+function dynamicCogNativeZoom(tileUrl: string): number {
+  if (tileUrl.includes('/api/ortho-cog/')) return 22
+  if (tileUrl.includes('/api/dji-terra/')) return 22
+  if (tileUrl.includes('/api/titiler/')) return 22
+  return 22
 }
 
 async function fetchStaticTileMeta(tileUrl: string): Promise<StaticTileMeta | null> {
@@ -756,7 +763,7 @@ function OrthomosaicTileLayerWithOptions({
   const [nativeMinZoom, setNativeMinZoom] = useState(0)
   const isDynamicCogLayer =
     tileUrl.includes('/api/titiler/') || tileUrl.includes('/api/dji-terra/') || tileUrl.includes('/api/ortho-cog/')
-  const effectiveNativeZoom = isDynamicCogLayer ? 30 : nativeZoom
+  const effectiveNativeZoom = isDynamicCogLayer ? dynamicCogNativeZoom(tileUrl) : nativeZoom
   const effectiveNativeMinZoom = isDynamicCogLayer ? 0 : nativeMinZoom
 
   useEffect(() => {

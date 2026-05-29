@@ -95,12 +95,77 @@ def _scale_alpha_to_uint8(data: np.ndarray) -> np.ndarray:
     return np.clip(values, 0, 255).astype("uint8")
 
 
+def _edge_connected_mask(candidate: np.ndarray) -> np.ndarray:
+    if candidate.ndim != 2 or not np.any(candidate):
+        return np.zeros(candidate.shape, dtype=bool)
+
+    height, width = candidate.shape
+    visited = np.zeros(candidate.shape, dtype=bool)
+    stack: list[tuple[int, int]] = []
+
+    for col in range(width):
+        if candidate[0, col]:
+            stack.append((0, col))
+        if height > 1 and candidate[height - 1, col]:
+            stack.append((height - 1, col))
+    for row in range(1, max(height - 1, 1)):
+        if candidate[row, 0]:
+            stack.append((row, 0))
+        if width > 1 and candidate[row, width - 1]:
+            stack.append((row, width - 1))
+
+    while stack:
+        row, col = stack.pop()
+        if visited[row, col] or not candidate[row, col]:
+            continue
+        visited[row, col] = True
+        if row > 0 and not visited[row - 1, col] and candidate[row - 1, col]:
+            stack.append((row - 1, col))
+        if row + 1 < height and not visited[row + 1, col] and candidate[row + 1, col]:
+            stack.append((row + 1, col))
+        if col > 0 and not visited[row, col - 1] and candidate[row, col - 1]:
+            stack.append((row, col - 1))
+        if col + 1 < width and not visited[row, col + 1] and candidate[row, col + 1]:
+            stack.append((row, col + 1))
+
+    return visited
+
+
+def _build_ortho_preview_padding_mask(src, max_preview_size: int = 4096) -> np.ndarray:
+    from rasterio.enums import Resampling
+
+    scale = max(src.width / max_preview_size, src.height / max_preview_size, 1)
+    preview_width = max(1, int(src.width / scale))
+    preview_height = max(1, int(src.height / scale))
+    preview = src.read(
+        [1, 2, 3],
+        out_shape=(3, preview_height, preview_width),
+        masked=True,
+        resampling=Resampling.nearest,
+    )
+    rgb = _scale_rgb_to_uint8(np.ma.filled(preview, 0))
+    base_invalid = np.any(np.ma.getmaskarray(preview), axis=0)
+
+    white_padding = _edge_connected_mask(np.all(rgb >= 248, axis=0) & ~base_invalid)
+    black_padding = _edge_connected_mask(np.all(rgb <= 3, axis=0) & ~base_invalid)
+    return base_invalid | white_padding | black_padding
+
+
+def _preview_mask_for_window(preview_mask: np.ndarray, window, src_width: int, src_height: int) -> np.ndarray:
+    rows = np.arange(int(window.height), dtype=np.float64) + float(window.row_off) + 0.5
+    cols = np.arange(int(window.width), dtype=np.float64) + float(window.col_off) + 0.5
+    preview_rows = np.clip((rows * preview_mask.shape[0] / src_height).astype(np.int64), 0, preview_mask.shape[0] - 1)
+    preview_cols = np.clip((cols * preview_mask.shape[1] / src_width).astype(np.int64), 0, preview_mask.shape[1] - 1)
+    return preview_mask[np.ix_(preview_rows, preview_cols)]
+
+
 def _build_ortho_masked_source(input_tif: Path, masked_tif: Path) -> Path:
     import rasterio
 
     with rasterio.open(input_tif) as src:
         if src.count < 3:
             return input_tif
+        preview_padding_mask = _build_ortho_preview_padding_mask(src)
 
         profile = src.profile.copy()
         profile.update(
@@ -139,9 +204,7 @@ def _build_ortho_masked_source(input_tif: Path, masked_tif: Path) -> Path:
                     source_alpha = _scale_alpha_to_uint8(src.read(4, window=window, masked=False))
                     alpha = np.minimum(alpha, source_alpha)
 
-                white_padding = np.all(rgb >= 248, axis=0)
-                black_padding = np.all(rgb <= 3, axis=0)
-                alpha[white_padding | black_padding] = 0
+                alpha[_preview_mask_for_window(preview_padding_mask, window, src.width, src.height)] = 0
 
                 dst.write(rgb, window=window)
                 dst.write_mask(alpha, window=window)
@@ -247,7 +310,6 @@ def convert_tif_to_cog(
                 dst_profile,
                 in_memory=False,
                 quiet=True,
-                add_mask=normalized_type not in {"dtm", "dsm"},
             )
         except TypeError:
             cog_translate(
