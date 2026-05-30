@@ -119,6 +119,8 @@ const BASE_MAPS: BaseMapConfig[] = [
   },
 ]
 
+const ORTHO_RENDERER_VERSION = 'edge-padding-v4'
+
 function getBaseMap(key: BaseMapKey): BaseMapConfig {
   return BASE_MAPS.find((map) => map.key === key) ?? BASE_MAPS[0]!
 }
@@ -336,7 +338,7 @@ function buildTitilerTileUrl(layer: {
   const min = Number(layer.rescaleMin)
   const max = Number(layer.rescaleMax)
   if (rasterType === 'ortho' || rasterType === 'orthomosaic') {
-    params.set('renderer', 'reference-white-v3')
+    params.set('renderer', ORTHO_RENDERER_VERSION)
     params.set('v', String(layer.cacheKey || layer.datasetId || layer.cogRelPath || '1'))
     return `${API_BASE}/api/ortho-cog/tiles/WebMercatorQuad/{z}/{x}/{y}@1x?${params.toString()}`
   }
@@ -765,6 +767,9 @@ function OrthomosaicTileLayerWithOptions({
     tileUrl.includes('/api/titiler/') || tileUrl.includes('/api/dji-terra/') || tileUrl.includes('/api/ortho-cog/')
   const effectiveNativeZoom = isDynamicCogLayer ? dynamicCogNativeZoom(tileUrl) : nativeZoom
   const effectiveNativeMinZoom = isDynamicCogLayer ? 0 : nativeMinZoom
+  const effectiveMaxZoom = isDynamicCogLayer ? 22 : 30
+  const effectiveKeepBuffer = isDynamicCogLayer ? 1 : 6
+  const effectiveOpacity = isDynamicCogLayer ? 0.88 : 0.9
 
   useEffect(() => {
     let cancelled = false
@@ -801,17 +806,17 @@ function OrthomosaicTileLayerWithOptions({
   return (
     <Pane name={paneName} style={{ zIndex: 220 }}>
       <TileLayer
-        key={`cog-${tileUrl}-${cropEnabled ? 'crop' : 'full'}`}
+        key={`cog-${ORTHO_RENDERER_VERSION}-${tileUrl}-${cropEnabled ? 'crop' : 'full'}`}
         url={tileUrl}
-        opacity={0.9}
-        maxZoom={30}
+        opacity={effectiveOpacity}
+        maxZoom={effectiveMaxZoom}
         maxNativeZoom={effectiveNativeZoom}
         minNativeZoom={effectiveNativeMinZoom}
         bounds={bounds}
         noWrap
-        updateWhenIdle={false}
-        updateWhenZooming
-        keepBuffer={6}
+        updateWhenIdle={isDynamicCogLayer}
+        updateWhenZooming={!isDynamicCogLayer}
+        keepBuffer={effectiveKeepBuffer}
         detectRetina={false}
         crossOrigin
       />

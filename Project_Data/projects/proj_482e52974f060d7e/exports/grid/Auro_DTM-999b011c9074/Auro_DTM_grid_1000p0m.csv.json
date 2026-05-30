@@ -4,7 +4,7 @@
   "dataset_id": "Auro_DTM-999b011c9074",
   "dataset_name": "Auro_DTM.tif",
   "dataset_type": "dtm",
-  "source_path": "D:\\1_Portal_Workflows_development\\Hydrology Data Portal React Version\\Project_Data\\projects\\proj_482e52974f060d7e\\processed\\dtm\\Auro_DTM-ddc40fa3\\Auro_DTM-ddc40fa3.cog.tif",
+  "source_path": "D:\\1_Portal_Workflows_development\\Droid Survair Cloud Portal\\Project_Data\\projects\\proj_482e52974f060d7e\\processed\\dtm\\Auro_DTM-ddc40fa3\\Auro_DTM-ddc40fa3.cog.tif",
   "source_mtime_ns": "1779946285217182100",
   "interval": 1000.0,
   "format": "csv",

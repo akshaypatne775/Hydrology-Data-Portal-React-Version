@@ -376,6 +376,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   const [syncingManual, setSyncingManual] = useState(false)
   const [openingManualFolder, setOpeningManualFolder] = useState(false)
   const [detectingEpsg, setDetectingEpsg] = useState(false)
+  const [epsgStatus, setEpsgStatus] = useState('')
   const [reportViewer, setReportViewer] = useState<{ name: string; url: string; downloadUrl: string } | null>(null)
   const [generatingContours, setGeneratingContours] = useState<Record<string, boolean>>({})
   const [exportingGrid, setExportingGrid] = useState<Record<string, string>>({})
@@ -513,6 +514,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       if (!ALLOWED_EXTENSIONS.has(ext)) return
       const defaultName = file.name.replace(/\.[^.]+$/, '')
       setSelectedFile(file)
+      setEpsgStatus(['tif', 'tiff'].includes(ext) ? 'Not detected, enter manually' : '')
       setUploadForm({
         name: defaultName,
         type: inferDatasetType(file.name),
@@ -552,13 +554,14 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       await startDatasetUpload(renamed, projectId, {
         datasetType: toBackendDatasetType(uploadForm.type),
         month: uploadForm.date.slice(0, 7),
+        epsg: uploadForm.epsg.trim(),
       })
     } else {
       await startPointCloudUpload(renamed, projectId)
     }
     invalidateProjectDataCache(projectId)
     setSelectedFile(null)
-  }, [isAdmin, modal, projectId, selectedFile, startDatasetUpload, startPointCloudUpload, uploadForm.date, uploadForm.name, uploadForm.type])
+  }, [isAdmin, modal, projectId, selectedFile, startDatasetUpload, startPointCloudUpload, uploadForm.date, uploadForm.epsg, uploadForm.name, uploadForm.type])
 
   const getActionLabel = useCallback((row: DatasetRow) => {
     if (['cog', 'Ortho', 'DTM', 'DSM'].includes(String(row.layerType))) return `Show ${row.type} on Map`
@@ -733,26 +736,26 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   const onDetectEpsg = useCallback(async () => {
     if (!projectId || !selectedFile || detectingEpsg) return
     setDetectingEpsg(true)
+    setEpsgStatus('Detecting EPSG...')
     try {
       const epsg = await detectGeoTiffEpsgLocally(selectedFile)
       if (epsg === 'EPSG:4326' && ['Ortho', 'DTM', 'DSM'].includes(uploadForm.type)) {
         setUploadForm((s) => ({ ...s, epsg: '' }))
-        await modal.alert(
-          'Projected EPSG not found',
-          'The file only reports WGS84 geographic metadata (EPSG:4326). For drone Ortho/DTM/DSM, please enter the projected EPSG manually, for example the correct UTM zone.',
-        )
+        setEpsgStatus('Projected EPSG not found, enter manually')
         return
       }
       setUploadForm((s) => ({ ...s, epsg }))
       if (!epsg) {
-        await modal.alert('EPSG not found', 'EPSG auto detect failed. Please enter it manually if known.')
+        setEpsgStatus('Not detected, enter manually')
+      } else {
+        setEpsgStatus(`Detected ${epsg}`)
       }
     } catch {
-      await modal.alert('EPSG detect failed', 'EPSG detect failed. Please enter manually.')
+      setEpsgStatus('Detect failed, enter manually')
     } finally {
       setDetectingEpsg(false)
     }
-  }, [detectingEpsg, modal, projectId, selectedFile, uploadForm.type])
+  }, [detectingEpsg, projectId, selectedFile, uploadForm.type])
 
   return (
     <>
@@ -902,9 +905,14 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
             EPSG (auto-read)
             <input
               value={uploadForm.epsg}
-              onChange={(e) => setUploadForm((s) => ({ ...s, epsg: e.target.value }))}
+              onChange={(e) => {
+                const next = e.target.value
+                setUploadForm((s) => ({ ...s, epsg: next }))
+                setEpsgStatus(next.trim() ? 'Manual EPSG will be used if source CRS is missing' : 'Not detected, enter manually')
+              }}
               placeholder="EPSG:32644"
             />
+            {epsgStatus ? <span className="dsp-form__hint">{epsgStatus}</span> : null}
           </label>
           <div className="dsp-form__actions">
             <button

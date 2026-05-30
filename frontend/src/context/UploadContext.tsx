@@ -42,7 +42,7 @@ export type UploadTask = {
 
 type UploadContextValue = {
   tasks: UploadTask[]
-  startDatasetUpload: (file: File, projectId: string, metadata?: { datasetType?: string; month?: string }) => Promise<void>
+  startDatasetUpload: (file: File, projectId: string, metadata?: { datasetType?: string; month?: string; epsg?: string }) => Promise<void>
   startPointCloudUpload: (file: File, projectId: string) => Promise<void>
   dismissTask: (taskId: string) => void
 }
@@ -185,7 +185,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
   )
 
   const startDatasetUpload = useCallback(
-    async (file: File, projectId: string, metadata?: { datasetType?: string; month?: string }) => {
+    async (file: File, projectId: string, metadata?: { datasetType?: string; month?: string; epsg?: string }) => {
       const id = taskId('dataset', projectId, file.name)
       const startedAt = Date.now()
       createTask({
@@ -282,12 +282,14 @@ export function UploadProvider({ children }: PropsWithChildren) {
             dataset_type: metadata?.datasetType,
             month: metadata?.month,
             created_at: metadata?.month && /^\d{4}-\d{2}-\d{2}$/.test(metadata.month) ? metadata.month : undefined,
+            epsg: metadata?.epsg,
           })
         } else {
           const form = new FormData()
           form.append('project_id', projectId)
           form.append('file', file)
           if (metadata?.datasetType) form.append('dataset_type', metadata.datasetType)
+          if (metadata?.epsg) form.append('epsg', metadata.epsg)
           if (metadata?.month) {
             form.append('month', metadata.month)
             if (/^\d{4}-\d{2}-\d{2}$/.test(metadata.month)) form.append('created_at', metadata.month)

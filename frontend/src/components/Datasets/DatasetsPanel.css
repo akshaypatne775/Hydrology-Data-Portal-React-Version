@@ -97,6 +97,17 @@
   min-width: 0;
 }
 
+.dsp-form__hint {
+  min-height: 0.85rem;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .dsp-form__actions {
   display: flex;
   align-items: end;

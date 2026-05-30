@@ -141,6 +141,7 @@ export async function completeDatasetUpload(payload: {
   dataset_type?: string
   month?: string
   created_at?: string
+  epsg?: string
 }): Promise<ProcessDatasetResponse> {
   const res = await apiRequest('/api/complete-dataset-upload', {
     method: 'POST',

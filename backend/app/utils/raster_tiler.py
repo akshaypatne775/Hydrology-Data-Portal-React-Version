@@ -47,6 +47,17 @@ def _normalize_dataset_type(value: str, fallback_name: str = "") -> str:
     return "ortho"
 
 
+def _normalize_source_epsg(value: str) -> str:
+    clean = (value or "").strip().upper().replace(" ", "")
+    if not clean:
+        return ""
+    if clean.startswith("EPSG:"):
+        clean = clean[5:]
+    if not clean.isdigit() or len(clean) < 4 or len(clean) > 6:
+        raise RuntimeError("Invalid EPSG code. Use EPSG:32644 or 32644.")
+    return f"EPSG:{clean}"
+
+
 def calculate_percentile_rescale(raster_path: str | Path) -> dict[str, float] | None:
     try:
         import rasterio
@@ -219,9 +230,11 @@ def convert_tif_to_cog(
     dataset_type: str,
     local_data_path: str,
     progress_callback: Callable[[dict[str, object]], None] | None = None,
+    source_epsg: str = "",
 ) -> dict[str, object]:
     try:
         import rasterio
+        from rasterio.crs import CRS
         from rasterio.warp import transform_bounds
         from rio_cogeo.cogeo import cog_translate
         from rio_cogeo.profiles import cog_profiles
@@ -255,9 +268,20 @@ def convert_tif_to_cog(
         )
 
     emit_progress("Opening GeoTIFF", 8)
+    normalized_source_epsg = _normalize_source_epsg(source_epsg)
+    applied_epsg = ""
+    manual_crs = CRS.from_user_input(normalized_source_epsg) if normalized_source_epsg else None
+    with rasterio.open(in_abs) as src:
+        has_source_crs = bool(src.crs)
+    if not has_source_crs and manual_crs:
+        emit_progress(f"Assigning {normalized_source_epsg}", 10)
+        with rasterio.open(in_abs, "r+") as src:
+            src.crs = manual_crs
+        applied_epsg = normalized_source_epsg
+
     with rasterio.open(in_abs) as src:
         if not src.crs:
-            raise RuntimeError("TIFF has no CRS. Please export with EPSG/CRS before upload.")
+            raise RuntimeError("EPSG required: TIFF has no CRS. Enter EPSG manually (example EPSG:32644) and upload again.")
         bounds_wgs84_raw = transform_bounds(src.crs, "EPSG:4326", *src.bounds, densify_pts=21)
         bounds_wgs84 = [
             max(-180.0, float(bounds_wgs84_raw[0])),
@@ -272,14 +296,16 @@ def convert_tif_to_cog(
     temporary_source: Path | None = None
 
     if normalized_type in {"dtm", "dsm"}:
+        emit_progress("Preparing fast elevation COG profile", 18)
         profile_name = "deflate"
         dst_profile = dict(cog_profiles.get(profile_name))
         dst_profile.update(
             {
+                "compress": "LERC_ZSTD",
+                "max_z_error": 0.001,
                 "bigtiff": "IF_SAFER",
                 "blockxsize": 512,
                 "blockysize": 512,
-                "predictor": 3,
                 "num_threads": "ALL_CPUS",
                 "OVERVIEWS": "AUTO",
             },
@@ -331,6 +357,8 @@ def convert_tif_to_cog(
         "cog_path": str(out_abs),
         "bounds_wgs84": bounds_wgs84,
         "source_crs": source_crs,
+        "manual_epsg": normalized_source_epsg,
+        "applied_epsg": applied_epsg,
         "band_count": band_count,
         "dataset_type": normalized_type,
         "rescale": rescale,

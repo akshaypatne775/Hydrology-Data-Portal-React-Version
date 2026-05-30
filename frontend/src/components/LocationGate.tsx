@@ -1,10 +1,11 @@
 import { useState, type PropsWithChildren } from 'react'
+import { readCurrentDeviceLocation, saveCurrentDeviceLocation } from '../utils/locationSession'
 import './Auth/AuthScreen.css'
 
 type LocationState = 'checking' | 'granted' | 'blocked'
 
 export default function LocationGate({ children }: PropsWithChildren) {
-  const [state, setState] = useState<LocationState>('blocked')
+  const [state, setState] = useState<LocationState>(() => (readCurrentDeviceLocation() ? 'granted' : 'blocked'))
   const [message, setMessage] = useState('Location access is required to open the portal. Click Allow Location when you are ready.')
 
   const requestLocation = () => {
@@ -16,15 +17,7 @@ export default function LocationGate({ children }: PropsWithChildren) {
     }
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        window.localStorage.setItem(
-          'droid:location',
-          JSON.stringify({
-            lat: pos.coords.latitude,
-            lng: pos.coords.longitude,
-            accuracy: pos.coords.accuracy,
-            capturedAt: new Date().toISOString(),
-          }),
-        )
+        saveCurrentDeviceLocation(pos.coords)
         setState('granted')
       },
       () => {

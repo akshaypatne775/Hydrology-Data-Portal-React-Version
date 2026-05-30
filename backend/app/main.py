@@ -78,6 +78,33 @@ _load_local_env_file()
 _DEFAULT_PROJECT_DATA = BASE_DIR / "Project_Data"
 LOCAL_DATA_PATH = os.getenv("LOCAL_DATA_PATH", str(_DEFAULT_PROJECT_DATA))
 
+def _strip_file_scheme(value: str) -> str:
+    clean = (value or "").strip()
+    if clean.lower().startswith("file:///"):
+        return clean[8:]
+    if clean.lower().startswith("file://"):
+        return clean[7:]
+    return clean
+
+
+def _rebase_project_data_path(value: str) -> str:
+    clean = _strip_file_scheme(value)
+    if not clean:
+        return clean
+    normalized = clean.replace("\\", "/")
+    marker = f"/{Path(LOCAL_DATA_PATH).name.lower()}/"
+    marker_index = normalized.lower().rfind(marker)
+    if marker_index < 0:
+        return clean
+    rel = normalized[marker_index + len(marker):].lstrip("/")
+    if not rel or ".." in rel.split("/"):
+        return clean
+    return str((Path(LOCAL_DATA_PATH) / rel).resolve())
+
+
+def _local_data_path_from_user_value(value: str) -> Path:
+    return Path(os.path.abspath(_rebase_project_data_path(value))).resolve()
+
 # Map tiles, ortho, DEM, terrain quantized-mesh, videos, etc. are served only
 # through authenticated routes below. Do not mount Project_Data as StaticFiles.
 ISSUES_DB_PATH = Path(LOCAL_DATA_PATH) / "issues.db"
@@ -264,12 +291,7 @@ class ProtectedDataPathMiddleware(BaseHTTPMiddleware):
             if source_url:
                 try:
                     local_root = Path(LOCAL_DATA_PATH).resolve()
-                    clean_source = source_url
-                    if clean_source.lower().startswith("file:///"):
-                        clean_source = clean_source[8:]
-                    elif clean_source.lower().startswith("file://"):
-                        clean_source = clean_source[7:]
-                    target = Path(os.path.abspath(clean_source)).resolve()
+                    target = _local_data_path_from_user_value(source_url)
                     if target != local_root and not target.is_relative_to(local_root):
                         return Response(status_code=403)
                 except Exception:  # noqa: BLE001
@@ -373,6 +395,7 @@ class CompleteDatasetUploadPayload(BaseModel):
     dataset_type: str = ""
     month: str = ""
     created_at: str = ""
+    epsg: str = ""
 
 
 class AuthPayload(BaseModel):
@@ -538,6 +561,17 @@ def _safe_dataset_upload_basename(filename: str) -> str:
     return base
 
 
+def _normalize_epsg_input(value: str | None) -> str:
+    clean = (value or "").strip().upper().replace(" ", "")
+    if not clean:
+        return ""
+    if clean.startswith("EPSG:"):
+        clean = clean[5:]
+    if not re.fullmatch(r"\d{4,6}", clean):
+        raise HTTPException(status_code=400, detail="Invalid EPSG code. Use EPSG:32644 or 32644.")
+    return f"EPSG:{clean}"
+
+
 def _infer_dataset_type(name: str) -> str:
     lowered = name.lower()
     suffix = Path(lowered).suffix
@@ -686,6 +720,7 @@ def _transparent_png_tile() -> bytes:
 
 
 TRANSPARENT_PNG_TILE = _transparent_png_tile()
+ORTHO_RENDERER_VERSION = "edge-padding-v4"
 
 
 def _parse_rescale_pair(value: str | None) -> tuple[float, float] | None:
@@ -703,11 +738,7 @@ def _parse_rescale_pair(value: str | None) -> tuple[float, float] | None:
 
 
 def _secure_local_cog_path(raw_url: str) -> Path:
-    clean_source = (raw_url or "").strip()
-    if clean_source.lower().startswith("file:///"):
-        clean_source = clean_source[8:]
-    elif clean_source.lower().startswith("file://"):
-        clean_source = clean_source[7:]
+    clean_source = _rebase_project_data_path(raw_url)
     if not clean_source:
         raise HTTPException(status_code=400, detail="Missing COG path.")
     target = Path(os.path.abspath(clean_source)).resolve()
@@ -818,12 +849,19 @@ def _render_ortho_cog_png(tile_array) -> bytes:
             source_alpha *= 255.0
         alpha = np.minimum(alpha, np.clip(source_alpha, 0, 255).astype("uint8"))
 
+    has_source_mask = False
     if np.ma.isMaskedArray(tile_array):
         mask = np.any(np.ma.getmaskarray(tile_array[:3]), axis=0)
+        has_source_mask = bool(np.any(mask))
         alpha[mask] = 0
 
-    white_background = np.all(rgb >= 248, axis=2)
-    alpha[white_background] = 0
+    black_background = np.all(rgb < 8, axis=2)
+    if has_source_mask:
+        padding_mask = _edge_connected_padding_mask(black_background)
+    else:
+        white_background = np.all(rgb >= 248, axis=2)
+        padding_mask = _edge_connected_padding_mask(black_background | white_background)
+    alpha[padding_mask] = 0
 
     output = io.BytesIO()
     Image.fromarray(np.dstack([rgb, alpha]), mode="RGBA").save(output, format="PNG")
@@ -867,7 +905,7 @@ async def dji_terra_dem_tile(
                 "nodata",
             )
         )
-        headers = {"Cache-Control": "public, max-age=300"}
+        headers = {"Cache-Control": "public, max-age=3600"}
         if not expected_empty_tile:
             headers["X-Tile-Error"] = str(exc)[:200]
         return Response(content=TRANSPARENT_PNG_TILE, media_type="image/png", headers=headers)
@@ -875,7 +913,7 @@ async def dji_terra_dem_tile(
     return Response(
         content=tile_bytes,
         media_type="image/png",
-        headers={"Cache-Control": "public, max-age=300"},
+        headers={"Cache-Control": "public, max-age=3600"},
     )
 
 
@@ -906,7 +944,7 @@ async def ortho_cog_tile(
                 "nodata",
             )
         )
-        headers = {"Cache-Control": "public, max-age=300"}
+        headers = {"Cache-Control": "public, max-age=3600", "X-Ortho-Renderer": ORTHO_RENDERER_VERSION}
         if not expected_empty_tile:
             headers["X-Tile-Error"] = str(exc)[:200]
         return Response(content=TRANSPARENT_PNG_TILE, media_type="image/png", headers=headers)
@@ -914,7 +952,7 @@ async def ortho_cog_tile(
     return Response(
         content=tile_bytes,
         media_type="image/png",
-        headers={"Cache-Control": "public, max-age=300"},
+        headers={"Cache-Control": "public, max-age=3600", "X-Ortho-Renderer": ORTHO_RENDERER_VERSION},
     )
 
 
@@ -1625,10 +1663,13 @@ async def process_dataset_background(
     file_name: str | None,
     tile_output_dir: str,
     tile_folder: str,
+    source_epsg: str = "",
 ) -> None:
     output_dir = Path(tile_output_dir).resolve()
     cog_path = output_dir / f"{tile_folder}.cog.tif"
     existing_status = _read_dataset_status(project_id, dataset_id) or {}
+    if source_epsg and not existing_status.get("manual_epsg"):
+        existing_status["manual_epsg"] = source_epsg
     common_status = {
         "dataset_id": dataset_id,
         "dataset_name": file_name or Path(input_tif).name,
@@ -1688,6 +1729,7 @@ async def process_dataset_background(
             str(common_status.get("dataset_type", "")),
             LOCAL_DATA_PATH,
             update_progress,
+            source_epsg or str(common_status.get("manual_epsg") or ""),
         )
         cog_abs = Path(str(result.get("cog_path") or cog_path)).resolve()
         cog_rel = cog_abs.relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
@@ -1733,7 +1775,9 @@ async def process_dataset_background(
                 "bounds_wgs84": bounds_text,
                 "rescale_min": rescale_min,
                 "rescale_max": rescale_max,
-                "source_crs": str(result.get("source_crs") or ""),
+            "source_crs": str(result.get("source_crs") or ""),
+            "manual_epsg": str(result.get("manual_epsg") or source_epsg or common_status.get("manual_epsg") or ""),
+            "applied_epsg": str(result.get("applied_epsg") or ""),
                 "cog_engine": str(result.get("engine") or "rio-cogeo"),
                 "processed_size_bytes": str(processed_size_bytes),
                 "processed_size": processed_size,
@@ -4103,6 +4147,7 @@ async def complete_dataset_upload(
         submitted_date = submitted_date or f"{year}-{int(month_part):02d}-{int(day):02d}"
         submitted_month = submitted_date[:7]
     normalized_month = _normalize_month(submitted_month)
+    manual_epsg = _normalize_epsg_input(getattr(payload, "epsg", ""))
 
     dataset_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(safe_name).stem).strip("-") or "dataset"
     dataset_id = _safe_dataset_id(f"{dataset_stem[:40]}-{secrets.token_hex(6)}")
@@ -4153,6 +4198,8 @@ async def complete_dataset_upload(
             "processed_size_bytes": str(total_bytes),
             "processed_size": _format_size_bytes(total_bytes),
             "cog_path": str(pending_cog_path),
+            "manual_epsg": manual_epsg,
+            "applied_epsg": "",
         },
     )
     _upsert_processing_job(
@@ -4174,6 +4221,7 @@ async def complete_dataset_upload(
         safe_name,
         str(output_tile_dir),
         tile_output_folder,
+        manual_epsg,
     )
     return ProcessDatasetOut(
         status="success",
@@ -4199,6 +4247,7 @@ async def process_dataset(
     dataset_type: str = Form(""),
     month: str = Form(""),
     created_at: str = Form(""),
+    epsg: str = Form(""),
 ) -> ProcessDatasetOut:
     user = verify_admin(request)
     _enforce_rate_limit(request, "upload")
@@ -4239,6 +4288,8 @@ async def process_dataset(
             normalized_month = submitted_month[:7]
         else:
             raise
+
+    manual_epsg = _normalize_epsg_input(locals().get("epsg", "")) if locals().get("ext", "") in (".tif", ".tiff") else ""
 
     dataset_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(safe_name).stem).strip("-") or "dataset"
     dataset_id = _safe_dataset_id(f"{dataset_stem[:40]}-{secrets.token_hex(6)}")
@@ -4499,6 +4550,7 @@ async def process_dataset(
         safe_name,
         str(output_tile_dir),
         tile_output_folder,
+        manual_epsg,
     )
 
     pending_cog_path = (output_tile_dir / f"{tile_output_folder}.cog.tif").resolve()
@@ -6081,6 +6133,12 @@ def proxy_info(path: str):
 
 
 def _dataset_extra_response_fields(st: dict[str, str]) -> dict[str, str]:
+    cog_rel_path = str(st.get("cog_rel_path") or "")
+    cog_path = str(st.get("cog_path") or "")
+    if cog_rel_path:
+        cog_path = str((Path(LOCAL_DATA_PATH) / cog_rel_path).resolve())
+    elif cog_path:
+        cog_path = _rebase_project_data_path(cog_path)
     return {
         "processed_size": str(st.get("processed_size") or ""),
         "upload_date": str(st.get("upload_date") or st.get("date") or st.get("created_at") or ""),
@@ -6088,8 +6146,8 @@ def _dataset_extra_response_fields(st: dict[str, str]) -> dict[str, str]:
         "stage": str(st.get("stage") or ""),
         "progress_percent": str(st.get("progress_percent") or ""),
         "eta_seconds": str(st.get("eta_seconds") or ""),
-        "cog_path": str(st.get("cog_path") or ""),
-        "cog_rel_path": str(st.get("cog_rel_path") or ""),
+        "cog_path": cog_path,
+        "cog_rel_path": cog_rel_path,
         "rescale_min": str(st.get("rescale_min") or ""),
         "rescale_max": str(st.get("rescale_max") or ""),
         "bounds_wgs84": str(st.get("bounds_wgs84") or ""),
