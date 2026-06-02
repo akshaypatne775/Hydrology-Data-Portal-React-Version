@@ -1,0 +1,80 @@
+Droid Survair - Project Issue Fix Log
+Last updated: 2026-06-02
+
+Purpose:
+- This file is the shared project memory for important bugs, fixes, and troubleshooting notes.
+- Add every future issue fix here so the same problem can be recognized quickly later.
+- Keep entries short but complete: issue, root cause, files changed, fix, and verification.
+
+Entry format:
+
+===============================================================================
+Date: YYYY-MM-DD
+Area: Frontend / Backend / Database / Viewer / Upload / Auth / Other
+Issue:
+- What was broken?
+
+Root cause:
+- Why did it happen?
+
+Fix:
+- What was changed?
+
+Files touched:
+- path/to/file
+
+Verification:
+- What was tested or visually confirmed?
+
+Future note:
+- What to remember if this happens again?
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-02
+Area: Viewer / Backend / Ortho COG Rendering
+Issue:
+- Manual synced orthomosaic/ortho COG was not rendering fully in the Leaflet 2D Viewer.
+- At different zoom levels it appeared partial/half-rendered.
+- White no-data blocks appeared over the basemap.
+- Affected file:
+  Project_Data/projects/proj_482e52974f060d7e/processed/ortho/Ortho New/Ortho_New_038cab94808d_cog.tif
+
+Root cause:
+- Manual synced COG metadata was missing reliable bounds_wgs84 in processing_jobs.json.
+- Generic TiTiler info could return source CRS meter bounds such as EPSG:32644, but Leaflet needs WGS84 lat/lng bounds.
+- White/bright no-data padding pixels in the TIFF were rendering as opaque.
+- Dynamic COG layers could be affected by stale crop/bounds clipping and old cached tile URLs.
+
+Fix:
+- Backend calculates WGS84 bounds from the COG source CRS.
+- Added/used /api/ortho-cog/bounds?url=... for reliable COG bounds.
+- Manual COG sync detects and stores bounds_wgs84, source_crs, and detected_epsg.
+- Ortho and orthomosaic layers use the custom /api/ortho-cog renderer.
+- Ortho renderer removes edge-connected black/bright/near-white padding by making it transparent.
+- Renderer cache version bumped to edge-padding-v7.
+- Frontend rejects non-WGS84 bounds from generic TiTiler info fallback.
+- Frontend auto-fits selected COG layers using WGS84 bounds.
+- Frontend disables Leaflet bounds clipping for dynamic COG tile layers.
+- Frontend uses unique Leaflet panes per COG tile URL to avoid stale crop clip-path effects.
+
+Files touched:
+- backend/app/main.py
+- frontend/src/components/MapViewer/MapViewer.tsx
+- Project_Data/processing_jobs.json
+
+Verification:
+- Backend compile passed.
+- Frontend build passed.
+- Direct renderer diagnostics passed for zoom levels z13, z14, z15, z16, z17, and z18.
+- Live browser check passed:
+  - Ortho_New_038cab94808d.tif displayed fully.
+  - Zoom in worked without disappearing.
+  - Zoom out worked without disappearing.
+  - White no-data block was no longer visible.
+
+Future note:
+- For any future Ortho/COG issue, first check bounds_wgs84, source_crs, detected_epsg, tile URL renderer, and no-data transparency.
+- If a TIFF has missing/corrupt CRS, it must be assigned or repaired before reliable map placement is possible.
+===============================================================================

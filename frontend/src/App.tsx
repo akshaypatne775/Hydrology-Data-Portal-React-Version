@@ -45,7 +45,7 @@ function MobileUnavailable() {
 }
 
 function AppRoot() {
-  const { loading, user } = useAuthContext()
+  const { loading, user, isAdmin } = useAuthContext()
   const isAdminRoute = window.location.pathname.replace(/\/+$/, '') === '/admin'
   const mobileUnsupported = useMobileUnsupported()
 
@@ -57,6 +57,8 @@ function AppRoot() {
         <AdminAccessPage />
       ) : !user ? (
         <AuthPage />
+      ) : isAdmin ? (
+        <WorkspacePage />
       ) : (
         <LocationGate>
           <WorkspacePage />

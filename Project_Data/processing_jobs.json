@@ -57,17 +57,38 @@
   ],
   "proj_482e52974f060d7e": [
     {
+      "job_id": "manual-Ortho_New_038cab94808d.tif-dd338bc7",
+      "kind": "dataset",
+      "file_name": "Ortho_New_038cab94808d.tif",
+      "status": "Web-Ready",
+      "updated_at": "2026-06-01T07:58:24.565576+00:00",
+      "result_url": "/data/projects/proj_482e52974f060d7e/processed/ortho/Ortho New/Ortho_New_038cab94808d_cog.tif",
+      "dataset_type": "ortho",
+      "month": "",
+      "raw_rel_path": "",
+      "tiles_rel_path": "",
+      "cog_path": "D:\\1_Portal_Workflows_development\\Droid Survair Cloud Portal\\Project_Data\\projects\\proj_482e52974f060d7e\\processed\\ortho\\Ortho New\\Ortho_New_038cab94808d_cog.tif",
+      "cog_rel_path": "projects/proj_482e52974f060d7e/processed/ortho/Ortho New/Ortho_New_038cab94808d_cog.tif",
+      "layer_type": "Ortho",
+      "bounds_wgs84": "[79.05896809844366, 20.149505126341058, 79.1148738085006, 20.20122146040569]",
+      "source_crs": "EPSG:32644",
+      "detected_epsg": "EPSG:32644"
+    },
+    {
       "job_id": "AuroTrimmed-caf7c2ac0ecc",
       "kind": "dataset",
       "file_name": "AuroTrimmed.tif",
       "status": "Completed",
       "updated_at": "2026-05-28T07:27:00.431130+00:00",
       "result_url": "/data/projects/proj_482e52974f060d7e/processed/ortho/AuroTrimmed-2e03d7ee/AuroTrimmed-2e03d7ee.cog.tif",
-      "cog_path": "D:\\1_Portal_Workflows_development\\Droid Survair Cloud Portal\\Project_Data\\projects\\proj_482e52974f060d7e\\processed\\ortho\\AuroTrimmed-2e03d7ee\\AuroTrimmed-2e03d7ee.cog.tif",
+      "cog_path": "D:\\1_Portal_Workflows_development\\Hydrology Data Portal React Version\\Project_Data\\projects\\proj_482e52974f060d7e\\processed\\ortho\\AuroTrimmed-2e03d7ee\\AuroTrimmed-2e03d7ee.cog.tif",
       "cog_rel_path": "projects/proj_482e52974f060d7e/processed/ortho/AuroTrimmed-2e03d7ee/AuroTrimmed-2e03d7ee.cog.tif",
       "rescale_min": "",
       "rescale_max": "",
-      "bounds_wgs84": "[79.08553098301762, 20.157125335535916, 79.10002387983064, 20.171533347378407]"
+      "bounds_wgs84": "[79.08553098301762, 20.157125335535916, 79.10002387983064, 20.171533347378407]",
+      "dataset_type": "ortho",
+      "layer_type": "Ortho",
+      "source_crs": "EPSG:32644"
     },
     {
       "job_id": "Auro_DTM-999b011c9074",
@@ -76,11 +97,14 @@
       "status": "Completed",
       "updated_at": "2026-05-28T05:31:29.842188+00:00",
       "result_url": "/data/projects/proj_482e52974f060d7e/processed/dtm/Auro_DTM-ddc40fa3/Auro_DTM-ddc40fa3.cog.tif",
-      "cog_path": "D:\\1_Portal_Workflows_development\\Droid Survair Cloud Portal\\Project_Data\\projects\\proj_482e52974f060d7e\\processed\\dtm\\Auro_DTM-ddc40fa3\\Auro_DTM-ddc40fa3.cog.tif",
+      "cog_path": "D:\\1_Portal_Workflows_development\\Hydrology Data Portal React Version\\Project_Data\\projects\\proj_482e52974f060d7e\\processed\\dtm\\Auro_DTM-ddc40fa3\\Auro_DTM-ddc40fa3.cog.tif",
       "cog_rel_path": "projects/proj_482e52974f060d7e/processed/dtm/Auro_DTM-ddc40fa3/Auro_DTM-ddc40fa3.cog.tif",
       "rescale_min": "179.623",
       "rescale_max": "211.539",
-      "bounds_wgs84": "[79.08553098301762, 20.157125357609697, 79.10002354734151, 20.17153334378932]"
+      "bounds_wgs84": "[79.08553098301762, 20.157125357609697, 79.10002354734151, 20.17153334378932]",
+      "dataset_type": "dtm",
+      "layer_type": "DTM",
+      "source_crs": "EPSG:32644"
     },
     {
       "job_id": "AuroBindo-3D-aca837e43fda",
@@ -94,7 +118,8 @@
       "month": "2026-05",
       "raw_rel_path": "projects/proj_482e52974f060d7e/raw/3dmodel/AuroBindo-3D-2abf33bd.zip",
       "tiles_rel_path": "projects/proj_482e52974f060d7e/processed/3dmodel/AuroBindo-3D-2abf33bd/AuroBindo 3D",
-      "tileset_rel_path": "projects/proj_482e52974f060d7e/processed/3dmodel/AuroBindo-3D-2abf33bd/AuroBindo 3D/tileset.json"
+      "tileset_rel_path": "projects/proj_482e52974f060d7e/processed/3dmodel/AuroBindo-3D-2abf33bd/AuroBindo 3D/tileset.json",
+      "layer_type": "3DModel"
     }
   ]
 }

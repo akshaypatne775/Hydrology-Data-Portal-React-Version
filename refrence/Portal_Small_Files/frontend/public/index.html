@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Droid Mining Solutions - Field Node</title>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+    
+    <link rel="stylesheet" href="form-style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Droid Mining Solutions</h1>
+            <p>Acquisition & Legal Survey Node</p>
+        </div>
+        <form id="surveyForm">
+            <input type="hidden" id="spoofedLat" value="">
+            <input type="hidden" id="spoofedLng" value="">
+
+            <div style="display: flex; gap: 10px;">
+                <div class="form-group" style="flex: 1;"><label>Plot / Property ID</label><input type="text" id="propertyId" required></div>
+                <div class="form-group" style="flex: 2;"><label>Owner Name</label><input type="text" id="ownerName" required></div>
+            </div>
+
+            <div class="form-group">
+                <label>Structure Classification (Select all that apply)</label>
+                <div class="checkbox-group" id="structureCheckboxes">
+                    <label class="checkbox-item"><input type="checkbox" name="structure" value="RCC"> RCC (Permanent)</label>
+                    <label class="checkbox-item"><input type="checkbox" name="structure" value="Shed Tin"> Shed Tin</label>
+                    <label class="checkbox-item"><input type="checkbox" name="structure" value="Open Space"> Open Space / Plot</label>
+                    <label class="checkbox-item"><input type="checkbox" name="structure" value="Kaccha"> Kaccha</label>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>Total Plot Area (Sqft)</label>
+                <div style="display: flex; gap: 10px;">
+                    <input type="number" id="areaSqft" required min="1" step="0.01" style="flex: 1;">
+                    <button type="button" class="btn-map" onclick="openMapModal()">
+                        <i class="fas fa-draw-polygon"></i> Add Area Boundary
+                    </button>
+                </div>
+                <span id="drawStatus" style="font-size: 0.8em; color: #28a745; font-weight: 600; display: none; margin-top: 5px;">
+                    <i class="fas fa-check-circle"></i> Boundary shapes captured!
+                </span>
+            </div>
+
+            <div style="display: flex; gap: 10px;">
+                <div class="form-group" style="flex: 1;">
+                    <label>Acquisition stage</label>
+                    <select id="acquisitionStage" required>
+                        <option value="Notice 37(2) Distribution">Notice 37(2) Distribution</option>
+                        <option value="Samarpan Received">Samarpan Received</option>
+                        <option value="Field Survey">Field Survey</option>
+                        <option value="Owner Verification">Owner Verification</option>
+                        <option value="Structure Assessment">Structure Assessment</option>
+                        <option value="Compensation Calculation">Compensation Calculation</option>
+                        <option value="Payment Processing">Payment Processing</option>
+                        <option value="Land Possession">Land Possession</option>
+                        <option value="Complete (Land Bank)">Complete (Land Bank)</option>
+                        <option value="Dispute">Dispute</option>
+                        <option value="On Hold">On Hold</option>
+                    </select>
+                </div>
+                <div class="form-group" style="flex: 1;">
+                    <label>Notice Sent</label>
+                    <select id="noticeSent" required>
+                        <option value="No">No</option>
+                        <option value="Yes">Yes</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>Compensation Distributed (₹)</label>
+                <input type="number" id="moneyDistributed" value="0" required min="0">
+            </div>
+
+            <div style="display: flex; gap: 10px;">
+                <div class="form-group" style="flex: 1;">
+                    <label>Number of Trees</label>
+                    <input type="number" id="numberOfTrees" value="0" min="0" step="1">
+                </div>
+                <div class="form-group" style="flex: 1;">
+                    <label>Total Distribution (count)</label>
+                    <input type="number" id="totalDistribution" value="0" min="0" step="1">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>Document &amp; field tracking</label>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                    <div class="form-group" style="margin: 0;">
+                        <label class="checkbox-item"><input type="checkbox" id="samarpanReceipt"> Samarpan receipt</label>
+                        <input type="file" id="samarpanFile" accept="image/*,application/pdf" capture="environment" style="display: none;">
+                    </div>
+                    <div class="form-group" style="margin: 0;">
+                        <label class="checkbox-item"><input type="checkbox" id="fieldSurveyDone"> Field survey done</label>
+                        <input type="file" id="surveyFile" accept="image/*,application/pdf" capture="environment" style="display: none;">
+                    </div>
+                    <div class="form-group" style="margin: 0;">
+                        <label class="checkbox-item"><input type="checkbox" id="ownerVerification"> Owner verification</label>
+                        <input type="file" id="ownerVerifFile" accept="image/*,application/pdf" capture="environment" style="display: none;">
+                    </div>
+                    <div class="form-group" style="margin: 0;">
+                        <label class="checkbox-item"><input type="checkbox" id="aadharCollected"> Aadhar collected</label>
+                        <input type="file" id="aadharFile" accept="image/*,application/pdf" capture="environment" style="display: none;">
+                    </div>
+                    <div class="form-group" style="margin: 0;">
+                        <label class="checkbox-item"><input type="checkbox" id="panCollected"> PAN collected</label>
+                        <input type="file" id="panFile" accept="image/*,application/pdf" capture="environment" style="display: none;">
+                    </div>
+                    <div class="form-group" style="margin: 0;">
+                        <label class="checkbox-item"><input type="checkbox" id="bankDetailsCollected"> Bank details collected</label>
+                        <input type="file" id="bankFile" accept="image/*,application/pdf" capture="environment" style="display: none;">
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>Site Photograph (Auto-compressed)</label>
+                <input type="file" id="sitePhoto" accept="image/*" required>
+            </div>
+            
+            <button type="submit" class="btn-submit" id="submitBtn"><i class="fas fa-upload"></i> Save Field Data</button>
+        </form>
+    </div>
+
+    <div id="mapModal" class="map-modal">
+        <div class="map-modal-header" style="flex-wrap: wrap; gap: 10px;">
+            <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+                <h3><i class="fas fa-satellite"></i> Map</h3>
+                <select id="modalActiveStructure" style="padding: 6px; border-radius: 4px; border: none; font-family: 'Montserrat'; font-weight: 600; color: #0e3e49; outline: none;">
+                    <option value="">Select Structure...</option>
+                </select>
+                <button type="button" id="btnSpoofLoc" onclick="toggleSpoofMode()" style="background: #1a5c6b; padding: 6px 12px; font-size: 0.8em; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600;">
+                    <i class="fas fa-crosshairs"></i> Edit Location
+                </button>
+            </div>
+            <button type="button" onclick="closeMapModal()" style="background: #f4a261; color: white; border: none; padding: 8px 20px; border-radius: 4px; cursor: pointer; font-weight: 700;"><i class="fas fa-check"></i> Done</button>
+        </div>
+        <div id="mobileMap" style="flex-grow: 1; width: 100%;"></div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+
+    <script>
+        let map, drawnItems, liveMarker, liveCircle;
+        let capturedShapes = []; 
+        let isMapInitialized = false;
+        let isSpoofing = false; // Tracker for location spoof mode
+
+        const shapeColors = {
+            "RCC": "#0e3e49", 
+            "Shed Tin": "#f4a261", 
+            "Open Space": "#28a745", 
+            "Kaccha": "#e07a5f"
+        };
+
+        // --- MAP MODAL & DRAWING LOGIC ---
+        function openMapModal() {
+            const checkboxes = document.querySelectorAll('input[name="structure"]:checked');
+            if (checkboxes.length === 0) {
+                alert("Please select at least one Structure Classification in the form before drawing.");
+                return;
+            }
+
+            const activeStructSelect = document.getElementById('modalActiveStructure');
+            activeStructSelect.innerHTML = '';
+            checkboxes.forEach(cb => {
+                activeStructSelect.innerHTML += `<option value="${cb.value}">Draw: ${cb.value}</option>`;
+            });
+
+            document.getElementById('mapModal').style.display = 'flex';
+            
+            if (!isMapInitialized) {
+                L.TileLayer.BoundaryCanvas = L.TileLayer.extend({
+                    options: { boundary: null },
+                    createTile: function (coords, done) {
+                        var tile = document.createElement('canvas'), ctx = tile.getContext('2d');
+                        tile.width = tile.height = 256;
+                        var img = new Image();
+                        img.onload = function () {
+                            ctx.drawImage(img, 0, 0); this._maskTile(tile, coords); done(null, tile);
+                        }.bind(this);
+                        img.src = this.getTileUrl(coords);
+                        return tile;
+                    },
+                    _maskTile: function (tile, coords) {
+                        var ctx = tile.getContext('2d'), nw = map.project(map.unproject(coords.multiplyBy(256), coords.z), coords.z);
+                        ctx.globalCompositeOperation = 'destination-in';
+                        ctx.beginPath();
+                        var geom = this.options.boundary.features[0].geometry;
+                        var rings = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
+                        rings.forEach(function (ring) {
+                            ring[0].forEach(function (p, i) {
+                                var pt = map.project([p[1], p[0]], coords.z).subtract(nw);
+                                if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y);
+                            });
+                        });
+                        ctx.fill();
+                    }
+                });
+                L.TileLayer.boundaryCanvas = function (url, options) { return new L.TileLayer.BoundaryCanvas(url, options); };
+
+                map = L.map('mobileMap', { maxZoom: 25 }).setView([20.5937, 78.9629], 5);
+                L.tileLayer('http://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', { maxZoom: 25, maxNativeZoom: 20, subdomains: ['mt0', 'mt1', 'mt2', 'mt3'] }).addTo(map);
+
+                drawnItems = L.featureGroup().addTo(map);
+                
+                const drawControl = new L.Control.Draw({
+                    edit: { featureGroup: drawnItems },
+                    draw: { marker: false, circle: false, circlemarker: false, polyline: false }
+                });
+                map.addControl(drawControl);
+
+                fetch('/ortho_data/Boundary.json')
+                    .then(res => {
+                        if (!res.ok) throw new Error('Boundary data not found');
+                        return res.json();
+                    })
+                    .then(geojsonData => {
+                        var maskedOrtho = L.TileLayer.boundaryCanvas('/ortho_data/tiles/{z}/{x}/{y}.png', {
+                            boundary: geojsonData, maxNativeZoom: 21, maxZoom: 25
+                        }).addTo(map);
+                        
+                        var boundaryLayer = L.geoJSON(geojsonData);
+                        if(!liveMarker && !document.getElementById('spoofedLat').value) {
+                            map.fitBounds(boundaryLayer.getBounds(), { padding: [20, 20], maxZoom: 18 });
+                        }
+                    }).catch(err => {
+                        console.log("No Ortho data found.", err.message);
+                    });
+
+                // Live Tracking Logic
+                map.locate({setView: true, maxZoom: 19, watch: true, enableHighAccuracy: true});
+                
+                map.on('locationfound', function(e) {
+                    // Only update automatically if the user HAS NOT spoofed the location
+                    if (!document.getElementById('spoofedLat').value) {
+                        const radius = e.accuracy / 2;
+                        if (!liveMarker) {
+                            liveMarker = L.circleMarker(e.latlng, { radius: 6, fillColor: "#00d2ff", color: "#fff", weight: 2, fillOpacity: 1 }).addTo(map);
+                            liveCircle = L.circle(e.latlng, radius, { color: '#00d2ff', fillOpacity: 0.1, weight: 1 }).addTo(map);
+                        } else {
+                            liveMarker.setLatLng(e.latlng);
+                            liveCircle.setLatLng(e.latlng);
+                            liveCircle.setRadius(radius);
+                        }
+                    }
+                });
+
+                // --- NEW: SPOOF LOCATION MAP CLICK EVENT ---
+                map.on('click', function(e) {
+                    if (isSpoofing) {
+                        map.stopLocate(); // Stops auto-updating GPS to prevent it from jumping back
+                        
+                        if (!liveMarker) {
+                            liveMarker = L.circleMarker(e.latlng, { radius: 6, fillColor: "#e07a5f", color: "#fff", weight: 2, fillOpacity: 1 }).addTo(map);
+                            liveCircle = L.circle(e.latlng, 5, { color: '#e07a5f', fillOpacity: 0.2, weight: 1 }).addTo(map);
+                        } else {
+                            liveMarker.setLatLng(e.latlng);
+                            liveMarker.setStyle({ fillColor: "#e07a5f" }); // Change color to indicate it's spoofed
+                            liveCircle.setLatLng(e.latlng);
+                            liveCircle.setRadius(5);
+                            liveCircle.setStyle({ color: '#e07a5f' });
+                        }
+                        
+                        // Save spoofed coordinates to hidden inputs
+                        document.getElementById('spoofedLat').value = e.latlng.lat;
+                        document.getElementById('spoofedLng').value = e.latlng.lng;
+
+                        toggleSpoofMode(); // Turn off spoof mode automatically after click
+                        alert("Location successfully set to manual pinpoint.");
+                    }
+                });
+
+                map.on(L.Draw.Event.CREATED, function (e) {
+                    const layer = e.layer;
+                    const activeType = document.getElementById('modalActiveStructure').value;
+                    const activeColor = shapeColors[activeType] || "#333";
+                    
+                    layer.setStyle({ color: activeColor, weight: 3, fillOpacity: 0.4 });
+                    drawnItems.addLayer(layer);
+
+                    const areaSqm = L.GeometryUtil.geodesicArea(layer.getLatLngs()[0]);
+                    const areaSqft = parseFloat((areaSqm * 10.7639).toFixed(2));
+                    
+                    capturedShapes.push({
+                        layerId: L.stamp(layer),
+                        type: activeType,
+                        geojson: layer.toGeoJSON(),
+                        area: areaSqft
+                    });
+
+                    updateTotalArea();
+                    
+                    // NEW: Notify dashboard of new shape
+                    notifyDashboardShapeUpdate();
+                });
+
+                map.on(L.Draw.Event.EDITED, function (e) {
+                    e.layers.eachLayer(function (layer) { 
+                        const id = L.stamp(layer);
+                        const index = capturedShapes.findIndex(s => s.layerId === id);
+                        if(index > -1) {
+                            const areaSqm = L.GeometryUtil.geodesicArea(layer.getLatLngs()[0]);
+                            capturedShapes[index].area = parseFloat((areaSqm * 10.7639).toFixed(2));
+                            capturedShapes[index].geojson = layer.toGeoJSON();
+                        }
+                    });
+                    updateTotalArea();
+                    
+                    // NEW: Notify dashboard of shape edit
+                    notifyDashboardShapeUpdate();
+                });
+
+                map.on(L.Draw.Event.DELETED, function (e) {
+                    e.layers.eachLayer(function (layer) { 
+                        const id = L.stamp(layer);
+                        capturedShapes = capturedShapes.filter(s => s.layerId !== id);
+                    });
+                    updateTotalArea();
+                    
+                    // NEW: Notify dashboard of shape deletion
+                    notifyDashboardShapeUpdate();
+                });
+
+                isMapInitialized = true;
+            }
+            setTimeout(() => { map.invalidateSize(); }, 300);
+        }
+
+        // --- NEW: TOGGLE SPOOF MODE ---
+        function toggleSpoofMode() {
+            isSpoofing = !isSpoofing;
+            const btn = document.getElementById('btnSpoofLoc');
+            if (isSpoofing) {
+                btn.style.background = '#e07a5f';
+                btn.innerHTML = '<i class="fas fa-times"></i> Tap Map to Set Location';
+                document.getElementById('mobileMap').style.cursor = 'crosshair';
+            } else {
+                btn.style.background = '#1a5c6b';
+                btn.innerHTML = '<i class="fas fa-crosshairs"></i> Edit Location';
+                document.getElementById('mobileMap').style.cursor = '';
+            }
+        }
+
+        function closeMapModal() {
+            document.getElementById('mapModal').style.display = 'none';
+            // BUG FIX #5: Stop GPS watch when modal closes — was draining battery in background
+            if (map) map.stopLocate();
+        }
+
+        function updateTotalArea() {
+            let total = 0;
+            capturedShapes.forEach(s => total += s.area);
+            document.getElementById('areaSqft').value = total > 0 ? total.toFixed(2) : "";
+            
+            const statusEl = document.getElementById('drawStatus');
+            if(capturedShapes.length > 0) {
+                statusEl.style.display = 'block';
+                statusEl.innerHTML = `<i class="fas fa-check-circle"></i> ${capturedShapes.length} Boundary shape(s) captured!`;
+                
+                // NEW: Notify dashboard when area is calculated
+                notifyDashboardShapeUpdate();
+            } else {
+                statusEl.style.display = 'none';
+            }
+        }
+
+        async function compressImage(file) {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = event => {
+                    const img = new Image(); img.src = event.target.result;
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        const MAX_WIDTH = 800; const scaleSize = MAX_WIDTH / img.width;
+                        canvas.width = MAX_WIDTH; canvas.height = img.height * scaleSize;
+                        const ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        resolve(canvas.toDataURL('image/jpeg', 0.6));
+                    }
+                }
+            });
+        }
+
+        async function fileToBase64(file) {
+            if (!file) return "";
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (event) => resolve(event.target.result || "");
+                reader.onerror = () => reject(new Error("Failed to read document file"));
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function setupDocumentUploadToggles() {
+            const docPairs = [
+                { checkId: 'aadharCollected', fileId: 'aadharFile' },
+                { checkId: 'panCollected', fileId: 'panFile' },
+                { checkId: 'bankDetailsCollected', fileId: 'bankFile' },
+                { checkId: 'ownerVerification', fileId: 'ownerVerifFile' },
+                { checkId: 'samarpanReceipt', fileId: 'samarpanFile' },
+                { checkId: 'fieldSurveyDone', fileId: 'surveyFile' }
+            ];
+
+            docPairs.forEach(({ checkId, fileId }) => {
+                const checkbox = document.getElementById(checkId);
+                const fileInput = document.getElementById(fileId);
+                if (!checkbox || !fileInput) return;
+                const toggle = () => {
+                    fileInput.style.display = checkbox.checked ? 'block' : 'none';
+                    if (!checkbox.checked) fileInput.value = '';
+                };
+                checkbox.addEventListener('change', toggle);
+                toggle();
+            });
+        }
+        setupDocumentUploadToggles();
+
+        // --- FORM SUBMIT LOGIC (Handles Spoofed Location vs Live GPS) ---
+        document.getElementById('surveyForm').addEventListener('submit', async (e) => {
+            e.preventDefault(); 
+
+            const checkboxes = document.querySelectorAll('input[name="structure"]:checked');
+            let selectedStructures = [];
+            checkboxes.forEach((cb) => { selectedStructures.push(cb.value); });
+            
+            if (selectedStructures.length === 0) { alert("Please select at least one Structure Classification."); return; }
+            const structureTypeFinal = selectedStructures.join(", ");
+            const propertyIdVal = document.getElementById('propertyId').value;
+            const areaVal = parseFloat(document.getElementById('areaSqft').value);
+
+            const submitBtn = document.getElementById('submitBtn');
+            const originalText = submitBtn.innerHTML;
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading Data...';
+            submitBtn.disabled = true;
+
+            const photoFile = document.getElementById('sitePhoto').files[0];
+            if (!photoFile) {
+                alert("Please select a site photograph.");
+                resetButton(submitBtn, originalText);
+                return;
+            }
+            const compressedPhoto = await compressImage(photoFile);
+
+            // Function to handle the actual server submission
+            const pushDataToServer = async (lat, lng) => {
+                let state = "Field", district = "Field";
+                try {
+                    const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`);
+                    const addressData = await res.json();
+                    district = addressData.address.state_district || addressData.address.city || addressData.address.county || "Field";
+                } catch (err) {}
+
+                const yn01 = (id) => document.getElementById(id).checked;
+                const aadharFileB64 = await fileToBase64(document.getElementById('aadharFile').files[0]);
+                const panFileB64 = await fileToBase64(document.getElementById('panFile').files[0]);
+                const bankFileB64 = await fileToBase64(document.getElementById('bankFile').files[0]);
+                const ownerVerifFileB64 = await fileToBase64(document.getElementById('ownerVerifFile').files[0]);
+                const samarpanFileB64 = await fileToBase64(document.getElementById('samarpanFile').files[0]);
+                const surveyFileB64 = await fileToBase64(document.getElementById('surveyFile').files[0]);
+                const pointPayload = {
+                    propertyId: propertyIdVal, ownerName: document.getElementById('ownerName').value,
+                    structureType: structureTypeFinal, acquisitionStage: document.getElementById('acquisitionStage').value,
+                    noticeSent: document.getElementById('noticeSent').value, moneyDistributed: parseFloat(document.getElementById('moneyDistributed').value),
+                    areaSqft: areaVal, photoB64: compressedPhoto, state: state, district: district,
+                    coordinates: { lat: lat, lng: lng },
+                    numberOfTrees: parseInt(document.getElementById('numberOfTrees').value, 10) || 0,
+                    totalDistribution: parseInt(document.getElementById('totalDistribution').value, 10) || 0,
+                    samarpanReceipt: yn01('samarpanReceipt') ? 1 : 0,
+                    fieldSurveyDone: yn01('fieldSurveyDone'),
+                    ownerVerification: yn01('ownerVerification'),
+                    aadharCollected: yn01('aadharCollected'),
+                    panCollected: yn01('panCollected'),
+                    bankDetailsCollected: yn01('bankDetailsCollected'),
+                    aadharFileB64: aadharFileB64 || "",
+                    panFileB64: panFileB64 || "",
+                    bankFileB64: bankFileB64 || "",
+                    ownerVerifFileB64: ownerVerifFileB64 || "",
+                    samarpanFileB64: samarpanFileB64 || "",
+                    surveyFileB64: surveyFileB64 || ""
+                };
+
+                try {
+                    await fetch('/save-survey', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(pointPayload) });
+                    
+                    for(let shape of capturedShapes) {
+                        const shapePayload = {
+                            propertyId: propertyIdVal, structureType: shape.type, 
+                            geoJson: JSON.stringify(shape.geojson), calculatedArea: shape.area
+                        };
+                        await fetch('/save-shape', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(shapePayload) });
+                    }
+
+                    alert("SUCCESS: Ground Data & Boundaries saved to Command Center.");
+                    
+                    // NEW: Notify dashboard to refresh shapes after successful save
+                    notifyDashboardDataSave(propertyIdVal, capturedShapes.length);
+                    
+                    // Additional: Force immediate dashboard refresh via multiple methods
+                    forceDashboardRefresh(propertyIdVal);
+                    
+                    document.getElementById('surveyForm').reset();
+                    setupDocumentUploadToggles();
+                    drawnItems.clearLayers();
+                    capturedShapes = [];
+                    document.getElementById('drawStatus').style.display = 'none';
+                    
+                    // Clear spoofed data after successful submission
+                    document.getElementById('spoofedLat').value = "";
+                    document.getElementById('spoofedLng').value = "";
+
+                } catch (error) { 
+                    console.error("Network error:", error);
+                    alert("NETWORK ERROR: Check server connection."); 
+                } finally { 
+                    resetButton(submitBtn, originalText); 
+                }
+            };
+
+            // Check if user spoofed the location
+            const sLat = document.getElementById('spoofedLat').value;
+            const sLng = document.getElementById('spoofedLng').value;
+
+            if (sLat && sLng) {
+                // Submit using Spoofed Coordinates
+                pushDataToServer(parseFloat(sLat), parseFloat(sLng));
+            } else {
+                // Submit using Live Device GPS
+                if (!navigator.geolocation) { alert("GPS unavailable."); resetButton(submitBtn, originalText); return; }
+                navigator.geolocation.getCurrentPosition(
+                    (position) => { pushDataToServer(position.coords.latitude, position.coords.longitude); },
+                    (error) => { alert("GPS ERROR: Please enable device location."); resetButton(submitBtn, originalText); }, 
+                    { enableHighAccuracy: true }
+                );
+            }
+        });
+
+        function resetButton(btn, text) { btn.innerHTML = text; btn.disabled = false; }
+
+        // NEW: Real-time dashboard notification function
+        function notifyDashboardShapeUpdate() {
+            // Send real-time update to dashboard using localStorage
+            localStorage.setItem('shapeUpdate', JSON.stringify({
+                timestamp: Date.now(),
+                shapes: capturedShapes.length,
+                totalArea: capturedShapes.reduce((sum, shape) => sum + shape.area, 0)
+            }));
+            
+            // Trigger storage event for dashboard listeners
+            window.dispatchEvent(new StorageEvent('storage', {
+                key: 'shapeUpdate',
+                newValue: localStorage.getItem('shapeUpdate')
+            }));
+        }
+
+        // NEW: Notify dashboard when data is saved to database
+        function notifyDashboardDataSave(propertyId, shapeCount) {
+            localStorage.setItem('dataSave', JSON.stringify({
+                timestamp: Date.now(),
+                propertyId: propertyId,
+                shapeCount: shapeCount,
+                type: 'survey_save'
+            }));
+            
+            // Trigger storage event for dashboard listeners
+            window.dispatchEvent(new StorageEvent('storage', {
+                key: 'dataSave',
+                newValue: localStorage.getItem('dataSave')
+            }));
+        }
+
+        // NEW: Force dashboard refresh using multiple methods
+        function forceDashboardRefresh(propertyId) {
+            // Method 1: Storage event (already implemented above)
+            // Method 2: Custom event with timestamp
+            localStorage.setItem('forceRefresh', JSON.stringify({
+                timestamp: Date.now(),
+                propertyId: propertyId,
+                action: 'full_refresh'
+            }));
+            
+            // Method 3: Broadcast to all windows
+            window.dispatchEvent(new CustomEvent('dashboardRefresh', {
+                detail: { propertyId: propertyId, timestamp: Date.now() }
+            }));
+            
+            // Method 4: Direct API call to trigger server-side notification (if dashboard is listening)
+            fetch('/notify-dashboard', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ propertyId: propertyId, action: 'refresh' })
+            }).catch(() => {
+                // Ignore if endpoint doesn't exist
+            });
+        }
+    </script>
+</body>
+</html>

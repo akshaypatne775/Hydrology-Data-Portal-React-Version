@@ -1,0 +1,25 @@
+Terminal 1: FastAPI Backend Chalu Karne Ke Liye
+
+Apne backend wale folder mein jayen (jahan aapki main.py aur venv file hai).
+
+Pehle apna virtual environment activate karein:
+
+DOS
+venv\Scripts\activate
+Fir server start karein:
+
+DOS
+uvicorn main:app --reload
+(Jab yeh start ho jayega, toh aapko likha aayega ki Application startup complete.)
+
+Terminal 2: React Vite Frontend Chalu Karne Ke Liye
+
+Ek nayi CMD window kholen.
+
+Apne frontend wale folder mein jayen (jahan aapki package.json file hai).
+
+Yeh command type karein:
+
+DOS
+npm run dev
+(Yeh command thodi der mein aapko ek local link degi jaise http://localhost:5173/)

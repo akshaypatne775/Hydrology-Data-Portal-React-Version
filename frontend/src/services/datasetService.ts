@@ -62,6 +62,10 @@ export type ProjectFile = {
   rescale_min?: string | number
   rescale_max?: string | number
   bounds_wgs84?: string
+  source_crs?: string
+  detected_epsg?: string
+  manual_epsg?: string
+  applied_epsg?: string
   size_bytes: string
   status: string
   updated_at?: string

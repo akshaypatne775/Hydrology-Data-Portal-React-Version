@@ -260,6 +260,26 @@
   background: #dcfce7;
 }
 
+.dsp-epsg-chip {
+  width: max-content;
+  display: block;
+  margin-top: 0.28rem;
+  padding: 0.14rem 0.42rem;
+  border: 1px solid rgba(14, 62, 73, 0.22);
+  border-radius: 999px;
+  background: rgba(14, 62, 73, 0.08);
+  color: #0e3e49;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.dsp-epsg-chip--missing {
+  border-color: rgba(180, 83, 9, 0.28);
+  background: #fef3c7;
+  color: #92400e;
+}
+
 .dsp-row-progress {
   display: grid;
   gap: 0.12rem;

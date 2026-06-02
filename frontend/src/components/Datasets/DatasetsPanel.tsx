@@ -49,6 +49,10 @@ type DatasetRow = {
   rescaleMin?: number | string
   rescaleMax?: number | string
   boundsWgs84?: [number, number, number, number]
+  sourceCrs?: string
+  detectedEpsg?: string
+  manualEpsg?: string
+  appliedEpsg?: string
 }
 
 type DatasetsPanelProps = {
@@ -321,7 +325,15 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
     rescaleMin: file.rescale_min,
     rescaleMax: file.rescale_max,
     boundsWgs84: parseBounds(file.bounds_wgs84),
+    sourceCrs: file.source_crs,
+    detectedEpsg: file.detected_epsg,
+    manualEpsg: file.manual_epsg,
+    appliedEpsg: file.applied_epsg,
   }
+}
+
+function epsgLabel(row: DatasetRow): string {
+  return row.detectedEpsg || row.appliedEpsg || row.manualEpsg || row.sourceCrs || ''
 }
 
 function toBackendDatasetType(type: DatasetType): string {
@@ -967,7 +979,18 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
             {datasets.map((row) => (
               <tr key={row.id}>
                 <td>{row.fileName}</td>
-                <td>{row.type}</td>
+                <td>
+                  <span>{row.type}</span>
+                  {epsgLabel(row) ? (
+                    <span className="dsp-epsg-chip" title={`Detected coordinate system: ${epsgLabel(row)}`}>
+                      {epsgLabel(row)}
+                    </span>
+                  ) : ['Ortho', 'DTM', 'DSM'].includes(row.type) ? (
+                    <span className="dsp-epsg-chip dsp-epsg-chip--missing" title="Coordinate system not detected">
+                      EPSG missing
+                    </span>
+                  ) : null}
+                </td>
                 <td>{row.size}</td>
                 <td>
                   <span>{row.uploadDate || '--'}</span>

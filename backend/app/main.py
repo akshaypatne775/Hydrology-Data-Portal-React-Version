@@ -10,6 +10,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import tempfile
 import time
 import zipfile
 import io
@@ -49,6 +50,11 @@ from rio_tiler import colormap as rio_colormap
 from rio_tiler.io import Reader
 
 from app.core.database import configure_database, ensure_tables, get_db_connection
+from app.utils.spatial_import import (
+    normalize_structure_type,
+    parse_spatial_upload,
+    style_for_structure,
+)
 from app.utils.raster_tiler import convert_tif_to_cog, run_rasterio_tiler
 
 # Project_Data lives beside backend/ and frontend/ (repo root).
@@ -377,6 +383,23 @@ class Issue(IssuePayload):
     id: int
 
 
+class SpatialFeaturePayload(BaseModel):
+    layer_id: str = ""
+    layer_name: str = "Drawn Shapes"
+    geojson: dict[str, object]
+    plot_id: str = ""
+    owner_name: str = ""
+    structure_type: str = "Unassigned"
+    source_type: str = "drawn"
+
+
+class SpatialFeaturePatchPayload(BaseModel):
+    geojson: dict[str, object] | None = None
+    plot_id: str | None = None
+    owner_name: str | None = None
+    structure_type: str | None = None
+
+
 class PointCloudProcessPayload(BaseModel):
     filename: str
     project_id: str = "default-project"
@@ -696,7 +719,8 @@ def _titiler_tile_url_template(
     rescale_max: str = "",
 ) -> str:
     params = {"url": cog_path.replace("\\", "/")}
-    if layer_type == "Ortho":
+    normalized_layer_type = layer_type.strip().lower().replace(" ", "")
+    if normalized_layer_type in {"ortho", "orthomosaic"}:
         return (
             f"{base_url.rstrip('/')}/api/ortho-cog/tiles/WebMercatorQuad/"
             f"{{z}}/{{x}}/{{y}}@1x?{urlencode(params)}"
@@ -720,7 +744,7 @@ def _transparent_png_tile() -> bytes:
 
 
 TRANSPARENT_PNG_TILE = _transparent_png_tile()
-ORTHO_RENDERER_VERSION = "edge-padding-v4"
+ORTHO_RENDERER_VERSION = "edge-padding-v7"
 
 
 def _parse_rescale_pair(value: str | None) -> tuple[float, float] | None:
@@ -849,19 +873,21 @@ def _render_ortho_cog_png(tile_array) -> bytes:
             source_alpha *= 255.0
         alpha = np.minimum(alpha, np.clip(source_alpha, 0, 255).astype("uint8"))
 
-    has_source_mask = False
     if np.ma.isMaskedArray(tile_array):
         mask = np.any(np.ma.getmaskarray(tile_array[:3]), axis=0)
-        has_source_mask = bool(np.any(mask))
         alpha[mask] = 0
 
     black_background = np.all(rgb < 8, axis=2)
-    if has_source_mask:
-        padding_mask = _edge_connected_padding_mask(black_background)
-    else:
-        white_background = np.all(rgb >= 248, axis=2)
-        padding_mask = _edge_connected_padding_mask(black_background | white_background)
+    band_min = rgb.min(axis=2)
+    band_max = rgb.max(axis=2)
+    band_range = band_max - band_min
+    bright_background = ((band_min >= 210) & (band_range <= 55)) | ((band_min >= 190) & (band_range <= 28))
+    near_white_background = (band_min >= 225) & (band_range <= 18)
+    padding_mask = _edge_connected_padding_mask(black_background | bright_background | near_white_background)
     alpha[padding_mask] = 0
+
+    if not np.any(alpha):
+        return TRANSPARENT_PNG_TILE
 
     output = io.BytesIO()
     Image.fromarray(np.dstack([rgb, alpha]), mode="RGBA").save(output, format="PNG")
@@ -872,6 +898,33 @@ def _render_ortho_cog_tile(cog_path: Path, z: int, x: int, y: int) -> bytes:
     with Reader(str(cog_path)) as dataset:
         tile = dataset.tile(x, y, z, tilesize=256)
     return _render_ortho_cog_png(tile.array)
+
+
+def _read_cog_bounds_wgs84(cog_path: Path) -> list[float]:
+    import rasterio  # type: ignore
+    from rasterio.warp import transform_bounds
+
+    with rasterio.open(str(cog_path)) as src:
+        if not src.crs:
+            raise HTTPException(status_code=422, detail="Raster CRS is missing")
+        bounds = transform_bounds(src.crs, "EPSG:4326", *src.bounds, densify_pts=21)
+    clean_bounds = [
+        max(-180.0, float(bounds[0])),
+        max(-85.05112878, float(bounds[1])),
+        min(180.0, float(bounds[2])),
+        min(85.05112878, float(bounds[3])),
+    ]
+    if not all(math.isfinite(value) for value in clean_bounds):
+        raise HTTPException(status_code=422, detail="Raster bounds could not be transformed")
+    return clean_bounds
+
+
+@app.get("/api/ortho-cog/bounds")
+async def ortho_cog_bounds(request: Request, url: str) -> dict[str, list[float]]:
+    _require_user(request)
+    cog_path = _secure_local_cog_path(url)
+    bounds = await run_in_threadpool(_read_cog_bounds_wgs84, cog_path)
+    return {"bounds": bounds}
 
 
 @app.get("/api/dji-terra/tiles/WebMercatorQuad/{z}/{x}/{y}@{scale}x")
@@ -2589,6 +2642,161 @@ def _get_crop_mask(project_id: str, tile_folder: str) -> dict[str, str] | None:
     }
 
 
+def _safe_spatial_id(value: str, label: str = "id") -> str:
+    clean = (value or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", clean):
+        raise HTTPException(status_code=400, detail=f"Invalid {label}")
+    return clean
+
+
+def _normalize_spatial_feature_geojson(raw: dict[str, object]) -> tuple[dict[str, object], str]:
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="Invalid GeoJSON")
+    geo_type = str(raw.get("type") or "")
+    if geo_type == "Feature":
+        geometry = raw.get("geometry")
+        if not isinstance(geometry, dict):
+            raise HTTPException(status_code=400, detail="GeoJSON Feature geometry is required")
+        feature = dict(raw)
+        props = feature.get("properties")
+        feature["properties"] = props if isinstance(props, dict) else {}
+        geometry_type = str(geometry.get("type") or "")
+    else:
+        geometry = raw
+        geometry_type = geo_type
+        feature = {"type": "Feature", "properties": {}, "geometry": geometry}
+    if geometry_type not in {"Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon"}:
+        raise HTTPException(status_code=400, detail="Unsupported geometry type")
+    return feature, geometry_type
+
+
+def _spatial_row_to_dict(row: sqlite3.Row) -> dict[str, object]:
+    try:
+        geojson_data = json.loads(str(row["geojson"]))
+    except (TypeError, json.JSONDecodeError):
+        geojson_data = {"type": "Feature", "properties": {}, "geometry": None}
+    return {
+        "id": str(row["id"]),
+        "project_id": str(row["project_id"]),
+        "layer_id": str(row["layer_id"]),
+        "geometry_type": str(row["geometry_type"]),
+        "geojson": geojson_data,
+        "plot_id": str(row["plot_id"] or ""),
+        "owner_name": str(row["owner_name"] or ""),
+        "structure_type": str(row["structure_type"] or "Unassigned"),
+        "fill_color": str(row["fill_color"] or "#f59e0b"),
+        "stroke_color": str(row["stroke_color"] or "#f59e0b"),
+        "source_type": str(row["source_type"] or ""),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+
+
+def _ensure_spatial_layer(
+    connection: sqlite3.Connection,
+    project_id: str,
+    user_id: int,
+    layer_id: str,
+    layer_name: str,
+    source_type: str,
+) -> str:
+    if layer_id:
+        safe_layer_id = _safe_spatial_id(layer_id, "layer_id")
+        row = connection.execute(
+            "SELECT id FROM spatial_layers WHERE id = ? AND project_id = ?",
+            (safe_layer_id, project_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Spatial layer not found")
+        return safe_layer_id
+
+    clean_name = (layer_name or "Drawn Shapes").strip()[:180] or "Drawn Shapes"
+    existing = connection.execute(
+        """
+        SELECT id FROM spatial_layers
+        WHERE project_id = ? AND name = ? AND source_type = ?
+        ORDER BY created_at ASC
+        LIMIT 1
+        """,
+        (project_id, clean_name, source_type),
+    ).fetchone()
+    if existing:
+        return str(existing["id"])
+
+    new_layer_id = f"layer_{secrets.token_hex(8)}"
+    now = _now_iso()
+    connection.execute(
+        """
+        INSERT INTO spatial_layers (
+            id, project_id, owner_user_id, name, source_type, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (new_layer_id, project_id, user_id, clean_name, source_type, now, now),
+    )
+    return new_layer_id
+
+
+def _insert_spatial_feature(
+    connection: sqlite3.Connection,
+    project_id: str,
+    user_id: int,
+    layer_id: str,
+    geojson_data: dict[str, object],
+    plot_id: str,
+    owner_name: str,
+    structure_type: str,
+    source_type: str,
+) -> dict[str, object]:
+    feature, geometry_type = _normalize_spatial_feature_geojson(geojson_data)
+    clean_structure = normalize_structure_type(structure_type)
+    colors = style_for_structure(clean_structure)
+    now = _now_iso()
+    feature_id = f"spatial_{secrets.token_hex(8)}"
+    properties = feature.get("properties")
+    if not isinstance(properties, dict):
+        properties = {}
+    properties.update(
+        {
+            "plotId": plot_id,
+            "ownerName": owner_name,
+            "structureType": clean_structure,
+        },
+    )
+    feature["properties"] = properties
+    connection.execute(
+        """
+        INSERT INTO spatial_features (
+            id, project_id, layer_id, owner_user_id, geometry_type, geojson,
+            plot_id, owner_name, structure_type, fill_color, stroke_color,
+            source_type, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            feature_id,
+            project_id,
+            layer_id,
+            user_id,
+            geometry_type,
+            json.dumps(feature, ensure_ascii=True),
+            plot_id[:120],
+            owner_name[:180],
+            clean_structure,
+            colors["fill_color"],
+            colors["stroke_color"],
+            source_type,
+            now,
+            now,
+        ),
+    )
+    row = connection.execute(
+        "SELECT * FROM spatial_features WHERE id = ?",
+        (feature_id,),
+    ).fetchone()
+    return _spatial_row_to_dict(row)
+
+
 def _is_valid_tile_dataset(folder: Path) -> bool:
     """
     Accept either:
@@ -2632,6 +2840,42 @@ def _detect_epsg_from_file(file_path: Path) -> str | None:
     except Exception:
         return None
     return None
+
+
+def _read_raster_manual_metadata(file_path: Path, dataset_type: str = "") -> dict[str, str]:
+    suffix = file_path.suffix.lower()
+    if suffix not in (".tif", ".tiff"):
+        return {}
+    try:
+        import rasterio  # type: ignore
+        from rasterio.warp import transform_bounds
+    except Exception:
+        return {}
+    try:
+        with rasterio.open(str(file_path)) as src:
+            out: dict[str, str] = {}
+            if src.crs:
+                out["source_crs"] = str(src.crs)
+                authority = src.crs.to_authority()
+                if authority and authority[0] and authority[1]:
+                    out["detected_epsg"] = f"{authority[0]}:{authority[1]}"
+                bounds = transform_bounds(src.crs, "EPSG:4326", *src.bounds, densify_pts=21)
+                clean_bounds = [
+                    max(-180.0, float(bounds[0])),
+                    max(-85.05112878, float(bounds[1])),
+                    min(180.0, float(bounds[2])),
+                    min(85.05112878, float(bounds[3])),
+                ]
+                if all(math.isfinite(value) for value in clean_bounds):
+                    out["bounds_wgs84"] = json.dumps(clean_bounds)
+            normalized_type = _normalize_dataset_type(dataset_type, file_path.name)
+            rescale = _sample_raster_percentiles(src, normalized_type)
+            if rescale:
+                out["rescale_min"] = str(rescale[0])
+                out["rescale_max"] = str(rescale[1])
+            return out
+    except Exception:
+        return {}
 
 
 def _now_iso() -> str:
@@ -3812,6 +4056,287 @@ def create_issue(issue: IssuePayload) -> Issue:
     )
 
 
+@app.get("/api/projects/{project_id}/spatial-layers")
+def get_spatial_layers(project_id: str, request: Request) -> dict[str, list[dict[str, object]]]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    with get_db_connection() as connection:
+        layer_rows = connection.execute(
+            """
+            SELECT id, project_id, name, source_type, created_at, updated_at
+            FROM spatial_layers
+            WHERE project_id = ?
+            ORDER BY created_at ASC
+            """,
+            (safe_project_id,),
+        ).fetchall()
+        feature_rows = connection.execute(
+            """
+            SELECT *
+            FROM spatial_features
+            WHERE project_id = ?
+            ORDER BY created_at ASC
+            """,
+            (safe_project_id,),
+        ).fetchall()
+
+    features_by_layer: dict[str, list[dict[str, object]]] = {}
+    for row in feature_rows:
+        feature = _spatial_row_to_dict(row)
+        features_by_layer.setdefault(str(feature["layer_id"]), []).append(feature)
+
+    layers: list[dict[str, object]] = []
+    for row in layer_rows:
+        layer_id = str(row["id"])
+        layers.append(
+            {
+                "id": layer_id,
+                "project_id": str(row["project_id"]),
+                "name": str(row["name"]),
+                "source_type": str(row["source_type"]),
+                "created_at": str(row["created_at"]),
+                "updated_at": str(row["updated_at"]),
+                "features": features_by_layer.get(layer_id, []),
+            },
+        )
+    return {"layers": layers}
+
+
+@app.post("/api/projects/{project_id}/spatial-features")
+def create_spatial_feature(
+    project_id: str,
+    payload: SpatialFeaturePayload,
+    request: Request,
+) -> dict[str, object]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    source_type = (payload.source_type or "drawn").strip()[:40] or "drawn"
+    with get_db_connection() as connection:
+        layer_id = _ensure_spatial_layer(
+            connection,
+            safe_project_id,
+            int(user["id"]),
+            payload.layer_id,
+            payload.layer_name,
+            source_type,
+        )
+        feature = _insert_spatial_feature(
+            connection,
+            safe_project_id,
+            int(user["id"]),
+            layer_id,
+            payload.geojson,
+            (payload.plot_id or "").strip(),
+            (payload.owner_name or "").strip(),
+            payload.structure_type,
+            source_type,
+        )
+        connection.execute(
+            "UPDATE spatial_layers SET updated_at = ? WHERE id = ?",
+            (_now_iso(), layer_id),
+        )
+        connection.commit()
+    return {"feature": feature}
+
+
+@app.put("/api/projects/{project_id}/spatial-features/{feature_id}")
+def update_spatial_feature(
+    project_id: str,
+    feature_id: str,
+    payload: SpatialFeaturePatchPayload,
+    request: Request,
+) -> dict[str, object]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    safe_feature_id = _safe_spatial_id(feature_id, "feature_id")
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM spatial_features WHERE id = ? AND project_id = ?",
+            (safe_feature_id, safe_project_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Spatial feature not found")
+
+        current = _spatial_row_to_dict(row)
+        geojson_data = payload.geojson if payload.geojson is not None else current["geojson"]
+        feature, geometry_type = _normalize_spatial_feature_geojson(geojson_data)
+        plot_id = (payload.plot_id if payload.plot_id is not None else str(current["plot_id"])).strip()
+        owner_name = (payload.owner_name if payload.owner_name is not None else str(current["owner_name"])).strip()
+        structure_type = normalize_structure_type(
+            payload.structure_type if payload.structure_type is not None else str(current["structure_type"]),
+        )
+        colors = style_for_structure(structure_type)
+        properties = feature.get("properties")
+        if not isinstance(properties, dict):
+            properties = {}
+        properties.update(
+            {
+                "plotId": plot_id,
+                "ownerName": owner_name,
+                "structureType": structure_type,
+            },
+        )
+        feature["properties"] = properties
+        now = _now_iso()
+        connection.execute(
+            """
+            UPDATE spatial_features
+            SET geometry_type = ?, geojson = ?, plot_id = ?, owner_name = ?,
+                structure_type = ?, fill_color = ?, stroke_color = ?, updated_at = ?
+            WHERE id = ? AND project_id = ?
+            """,
+            (
+                geometry_type,
+                json.dumps(feature, ensure_ascii=True),
+                plot_id[:120],
+                owner_name[:180],
+                structure_type,
+                colors["fill_color"],
+                colors["stroke_color"],
+                now,
+                safe_feature_id,
+                safe_project_id,
+            ),
+        )
+        connection.execute(
+            "UPDATE spatial_layers SET updated_at = ? WHERE id = ?",
+            (now, str(row["layer_id"])),
+        )
+        connection.commit()
+        updated = connection.execute(
+            "SELECT * FROM spatial_features WHERE id = ?",
+            (safe_feature_id,),
+        ).fetchone()
+    return {"feature": _spatial_row_to_dict(updated)}
+
+
+@app.delete("/api/projects/{project_id}/spatial-features/{feature_id}")
+def delete_spatial_feature(project_id: str, feature_id: str, request: Request) -> dict[str, str]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    safe_feature_id = _safe_spatial_id(feature_id, "feature_id")
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT layer_id FROM spatial_features WHERE id = ? AND project_id = ?",
+            (safe_feature_id, safe_project_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Spatial feature not found")
+        connection.execute(
+            "DELETE FROM spatial_features WHERE id = ? AND project_id = ?",
+            (safe_feature_id, safe_project_id),
+        )
+        connection.execute(
+            "UPDATE spatial_layers SET updated_at = ? WHERE id = ?",
+            (_now_iso(), str(row["layer_id"])),
+        )
+        connection.commit()
+    return {"status": "success"}
+
+
+@app.delete("/api/projects/{project_id}/spatial-layers/{layer_id}")
+def delete_spatial_layer(project_id: str, layer_id: str, request: Request) -> dict[str, str]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    safe_layer_id = _safe_spatial_id(layer_id, "layer_id")
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT id FROM spatial_layers WHERE id = ? AND project_id = ?",
+            (safe_layer_id, safe_project_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Spatial layer not found")
+        connection.execute(
+            "DELETE FROM spatial_features WHERE layer_id = ? AND project_id = ?",
+            (safe_layer_id, safe_project_id),
+        )
+        connection.execute(
+            "DELETE FROM spatial_layers WHERE id = ? AND project_id = ?",
+            (safe_layer_id, safe_project_id),
+        )
+        connection.commit()
+    return {"status": "success"}
+
+
+@app.post("/api/projects/{project_id}/spatial-import")
+async def import_spatial_layer(
+    project_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+) -> dict[str, object]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    safe_name = os.path.basename((file.filename or "").strip())
+    if not safe_name or safe_name in {".", ".."} or "/" in safe_name or "\\" in safe_name:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    suffix = Path(safe_name).suffix.lower()
+    if suffix not in {".kml", ".xml", ".geojson", ".json", ".shp", ".zip"}:
+        raise HTTPException(status_code=400, detail="Only .kml, .geojson, .shp, or zipped shapefiles are supported")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp) / safe_name
+        try:
+            with open(tmp_path, "wb") as out_f:
+                shutil.copyfileobj(file.file, out_f, length=MERGE_COPY_BUFFER_BYTES)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to store import: {exc}") from exc
+        finally:
+            await file.close()
+
+        text = None
+        if suffix in {".kml", ".xml", ".geojson", ".json"}:
+            text = tmp_path.read_text(encoding="utf-8", errors="ignore")
+        features = parse_spatial_upload(tmp_path, suffix, text)
+
+    source_type = "imported-shp" if suffix in {".shp", ".zip"} else "imported-kml" if suffix in {".kml", ".xml"} else "imported-geojson"
+    layer_name = Path(safe_name).stem[:180] or "Imported Layer"
+    with get_db_connection() as connection:
+        layer_id = _ensure_spatial_layer(
+            connection,
+            safe_project_id,
+            int(user["id"]),
+            "",
+            layer_name,
+            source_type,
+        )
+        inserted = [
+            _insert_spatial_feature(
+                connection,
+                safe_project_id,
+                int(user["id"]),
+                layer_id,
+                feature,
+                "",
+                "",
+                "Unassigned",
+                source_type,
+            )
+            for feature in features
+        ]
+        connection.execute(
+            "UPDATE spatial_layers SET updated_at = ? WHERE id = ?",
+            (_now_iso(), layer_id),
+        )
+        connection.commit()
+
+    return {
+        "layer": {
+            "id": layer_id,
+            "project_id": safe_project_id,
+            "name": layer_name,
+            "source_type": source_type,
+            "features": inserted,
+        },
+        "imported_count": len(inserted),
+    }
+
+
 @app.post("/api/run-flood-engine")
 async def run_flood_engine() -> dict[str, str]:
     await asyncio.sleep(3)
@@ -4672,6 +5197,7 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
     jobs_root.mkdir(parents=True, exist_ok=True)
 
     tracked_folders: set[str] = set()
+    tracked_dataset_by_key: dict[str, str] = {}
     for job_dir in jobs_root.iterdir():
         if not job_dir.is_dir():
             continue
@@ -4681,12 +5207,15 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
         folder = (st.get("tile_folder") or "").strip()
         if folder:
             tracked_folders.add(folder)
+            tracked_dataset_by_key[folder] = job_dir.name
         rel = (st.get("tiles_rel_path") or "").strip()
         if rel:
             tracked_folders.add(rel)
+            tracked_dataset_by_key[rel] = job_dir.name
         cog_rel = (st.get("cog_rel_path") or "").strip()
         if cog_rel:
             tracked_folders.add(cog_rel)
+            tracked_dataset_by_key[cog_rel] = job_dir.name
 
     found_new = 0
     candidates: list[tuple[Path, str, str, str]] = [
@@ -4711,11 +5240,27 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
             dataset_type = _normalize_dataset_type(dataset_type, folder_name)
             layer_kind = _raster_layer_type(dataset_type, folder_name)
         if folder_name in tracked_folders or rel_path in tracked_folders:
+            existing_dataset_id = tracked_dataset_by_key.get(rel_path) or tracked_dataset_by_key.get(folder_name)
+            if existing_dataset_id and asset_kind == "cog":
+                existing_status = _read_dataset_status(safe_project_id, existing_dataset_id) or {}
+                if not existing_status.get("bounds_wgs84") or not existing_status.get("source_crs"):
+                    raster_metadata = _read_raster_manual_metadata(item, dataset_type)
+                    if raster_metadata:
+                        _write_dataset_status(
+                            safe_project_id,
+                            existing_dataset_id,
+                            {
+                                **existing_status,
+                                **raster_metadata,
+                                "updated_at": _now_iso(),
+                            },
+                        )
             continue
 
         dataset_id = _safe_dataset_id(
             f"manual-{re.sub(r'[^A-Za-z0-9._-]+', '-', folder_name)[:48]}-{secrets.token_hex(4)}",
         )
+        raster_metadata = _read_raster_manual_metadata(item, dataset_type) if asset_kind == "cog" else {}
         _write_dataset_status(
             safe_project_id,
             dataset_id,
@@ -4732,6 +5277,7 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
                 "tiles_rel_path": "" if asset_kind == "cog" else rel_path,
                 "cog_path": str(item.resolve()) if asset_kind == "cog" else "",
                 "cog_rel_path": rel_path if asset_kind == "cog" else "",
+                **raster_metadata,
             },
         )
         result_url = f"/data/{rel_path}/tileset.json" if layer_kind == "3DModel" else f"/data/{rel_path}"
@@ -4744,6 +5290,12 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
                 "status": "Completed",
                 "updated_at": _now_iso(),
                 "result_url": result_url,
+                "dataset_type": dataset_type,
+                "layer_type": layer_kind,
+                "tiles_rel_path": "" if asset_kind == "cog" else rel_path,
+                "cog_path": str(item.resolve()) if asset_kind == "cog" else "",
+                "cog_rel_path": rel_path if asset_kind == "cog" else "",
+                **raster_metadata,
             },
         )
         tracked_folders.add(folder_name)
@@ -6151,6 +6703,10 @@ def _dataset_extra_response_fields(st: dict[str, str]) -> dict[str, str]:
         "rescale_min": str(st.get("rescale_min") or ""),
         "rescale_max": str(st.get("rescale_max") or ""),
         "bounds_wgs84": str(st.get("bounds_wgs84") or ""),
+        "source_crs": str(st.get("source_crs") or ""),
+        "detected_epsg": str(st.get("detected_epsg") or ""),
+        "manual_epsg": str(st.get("manual_epsg") or ""),
+        "applied_epsg": str(st.get("applied_epsg") or ""),
     }
 
 
@@ -6555,6 +7111,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                 continue
             display_name = cog_file.name.replace(".cog.tif", ".tif").replace(".cog.tiff", ".tiff")
             layer_type = _raster_layer_type(_infer_dataset_type(display_name), display_name)
+            manual_metadata = _read_raster_manual_metadata(cog_file, _infer_dataset_type(display_name))
             files.append(
                 {
                     "name": display_name,
@@ -6574,6 +7131,11 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "raw_rel_path": "",
                     "cog_path": str(cog_file.resolve()),
                     "cog_rel_path": rel,
+                    "rescale_min": str(manual_metadata.get("rescale_min") or ""),
+                    "rescale_max": str(manual_metadata.get("rescale_max") or ""),
+                    "bounds_wgs84": str(manual_metadata.get("bounds_wgs84") or ""),
+                    "source_crs": str(manual_metadata.get("source_crs") or ""),
+                    "detected_epsg": str(manual_metadata.get("detected_epsg") or ""),
                 },
             )
             listed_rel_paths.add(rel)

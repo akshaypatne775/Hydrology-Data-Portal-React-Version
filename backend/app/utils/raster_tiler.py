@@ -312,6 +312,9 @@ def convert_tif_to_cog(
         )
     else:
         emit_progress("Preparing fast Ortho COG profile", 18)
+        temporary_source = out_abs.parent / f"{out_abs.stem}.masked-source.tif"
+        emit_progress("Removing ortho no-data padding", 24)
+        translate_source = _build_ortho_masked_source(in_abs, temporary_source)
         profile_name = "jpeg"
         dst_profile = dict(cog_profiles.get(profile_name))
         dst_profile.update(

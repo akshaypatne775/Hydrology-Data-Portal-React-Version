@@ -205,10 +205,14 @@ export default function AdminDashboard() {
                   <span className="admin-panel__role">{user.device_label || 'Unknown device'}</span>
                 </td>
                 <td
-                  className={user.location ? 'admin-panel__location' : 'admin-panel__location admin-panel__location--missing'}
+                  className={
+                    user.location || user.role === 'admin'
+                      ? 'admin-panel__location'
+                      : 'admin-panel__location admin-panel__location--missing'
+                  }
                   title={user.location_accuracy_m ? `Accuracy ${user.location_accuracy_m} m` : undefined}
                 >
-                  {user.location || 'Location required'}
+                  {user.location || (user.role === 'admin' ? 'Not required' : 'Location required')}
                 </td>
                 <td>{user.unique_ip_count}</td>
                 <td className="admin-panel__endpoint" title={user.last_accessed_data || undefined}>

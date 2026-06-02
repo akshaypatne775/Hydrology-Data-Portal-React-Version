@@ -1,0 +1,1659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Droid Mining Solutions - Advanced Acquisition Hub</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .leaflet-control-layers {
+            background: rgba(14, 62, 73, 0.95) !important; color: white !important;
+            border: 1px solid #00d2ff !important; border-radius: 8px !important;
+            padding: 8px 12px !important; font-family: 'Montserrat', sans-serif !important;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4) !important;
+        }
+        .leaflet-control-layers-list { margin: 0; }
+        .leaflet-control-layers-overlays label { color: white; display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer;}
+        .dash-modal-card {
+            box-shadow: 0 18px 44px rgba(0,0,0,0.35);
+            border: 1px solid #d9e2e8;
+            background: linear-gradient(180deg, #ffffff 0%, #f8fbfd 100%);
+        }
+        .dash-modal-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 14px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #e6edf2;
+        }
+        .dash-modal-title { font-size: 1.18rem; font-weight: 700; letter-spacing: 0.1px; }
+        .dash-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .dash-grid-2x { display: grid; grid-template-columns: 1fr 1.4fr; gap: 10px; }
+        .dash-form-group { margin-bottom: 10px; }
+        .dash-form-group label {
+            display: block;
+            font-size: 0.86em;
+            font-weight: 700;
+            color: #20404a;
+            margin-bottom: 6px;
+            letter-spacing: 0.15px;
+        }
+        .dash-form-group input, .dash-form-group select {
+            width: 100%;
+            border: 1px solid #c9d6df;
+            border-radius: 8px;
+            padding: 10px 11px;
+            font-family: 'Montserrat', sans-serif;
+            font-size: 0.92em;
+            outline: none;
+            background: #fff;
+            transition: border-color .2s ease, box-shadow .2s ease;
+        }
+        .dash-form-group input:focus, .dash-form-group select:focus {
+            border-color: #1a5c6b;
+            box-shadow: 0 0 0 3px rgba(26,92,107,0.12);
+        }
+        .dash-section {
+            background:#f8fafc;
+            border:1px solid #d6e1e8;
+            border-radius:10px;
+            padding:12px;
+            margin-bottom: 12px;
+        }
+        .dash-file-block {
+            margin-bottom: 10px;
+            padding: 10px;
+            border:1px dashed #c7d4dc;
+            border-radius:8px;
+            background:#fff;
+        }
+        .dash-doc-toggle-row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+        .dash-doc-toggle-row label {
+            font-weight:600;
+            font-size:0.9em;
+            color:#20404a;
+            padding: 6px 8px;
+            border-radius: 6px;
+            background: #fff;
+            border: 1px solid #e2eaef;
+        }
+        .dash-modal-actions { display:flex; gap:8px; margin-top:12px; }
+        .dash-soft-note { font-size: 0.84em; color: #60717a; }
+        #surveyFormModal .checkbox-group .checkbox-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border: 1px solid #d3dde5;
+            border-radius: 10px;
+            padding: 10px 12px;
+            background: #fff;
+            cursor: pointer;
+            transition: all .2s ease;
+            font-weight: 600;
+            justify-content: space-between;
+        }
+        #surveyFormModal .checkbox-group .checkbox-item .shape-left { display:flex; align-items:center; gap:8px; }
+        #surveyFormModal .shape-ico { width:28px; height:28px; display:flex; align-items:center; justify-content:center; background:#f0f3f6; border-radius:6px; font-size:1rem; }
+        #surveyFormModal .shape-pill {
+            width:18px; height:18px; border-radius:50%;
+            border:1px solid #b9c8d2; background:#fff; display:flex; align-items:center; justify-content:center;
+            color:#fff; font-size:0.68rem;
+        }
+        #surveyFormModal .checkbox-group .checkbox-item:has(input:checked) {
+            border-color: #1a5c6b;
+            box-shadow: 0 3px 12px rgba(26,92,107,0.18);
+            background: #f2f8fa;
+        }
+        #surveyFormModal .checkbox-group .checkbox-item:has(input:checked) .shape-pill {
+            background:#1a5c6b; border-color:#1a5c6b;
+        }
+        #surveyFormModal .checkbox-group .checkbox-item input { display:none; }
+        .dash-doc-toggle-row label:has(input:checked) {
+            border-color:#1a5c6b;
+            background:#eef6f8;
+            box-shadow: 0 2px 8px rgba(26,92,107,0.12);
+        }
+        .dash-doc-toggle-row label{
+            display:flex; align-items:center; justify-content:space-between; gap:8px;
+        }
+        .dash-doc-toggle-row .doc-left{ display:flex; align-items:center; gap:8px; }
+        .dash-doc-toggle-row .doc-left i{ color:#5d6f7b; width:16px; }
+        .dash-doc-toggle-row input[type="checkbox"]{
+            -webkit-appearance:none; appearance:none;
+            width:42px; height:24px; border-radius:999px;
+            background:#c7d1d9; position:relative; cursor:pointer; transition:.2s;
+            border:1px solid #b8c6d1;
+        }
+        .dash-doc-toggle-row input[type="checkbox"]::after{
+            content:""; position:absolute; width:18px; height:18px; border-radius:50%;
+            background:#fff; top:2px; left:2px; transition:.2s; box-shadow:0 1px 3px rgba(0,0,0,.25);
+        }
+        .dash-doc-toggle-row input[type="checkbox"]:checked{ background:#1a5c6b; border-color:#155160; }
+        .dash-doc-toggle-row input[type="checkbox"]:checked::after{ left:21px; }
+        .dash-upload-box{
+            border:1px dashed #c8d3dc; border-radius:10px; background:#fbfdff;
+            padding:10px; margin-top:6px;
+        }
+        .dash-upload-head{ font-weight:700; margin-bottom:6px; }
+        .dash-upload-meta{ color:#7c8d98; font-size:0.82rem; margin-top:6px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h2><i class="fas fa-satellite"></i> Droid Mining Solutions - Acquisition Hub</h2>
+        <span id="syncStatus" class="sync-status"><i class="fas fa-circle" style="color:#28a745;"></i> System Online</span>
+    </div>
+
+    <div class="toolbar">
+        <div class="tool-group">
+            <button class="btn-tool" onclick="document.getElementById('importFile').click()"><i class="fas fa-file-import"></i> Import GeoJSON</button>
+            <input type="file" id="importFile" accept=".geojson,.json" style="display: none;" onchange="importShape(event)">
+            
+            <button class="btn-tool" id="addSurveyBtn" onclick="toggleAddMode()" style="background: #28a745; margin-left: 10px;">
+                <i class="fas fa-map-marker-alt"></i> Add Survey (Map)
+            </button>
+            
+        </div>
+        <div class="tool-group">
+            <button class="btn-tool" onclick="exportToExcel()" style="background: #1a5c6b; margin-right: 10px;">
+                <i class="fas fa-file-csv"></i> Export CSV
+            </button>
+            <select id="districtFilter"><option value="All">District Filter (All)</option></select>
+        </div>
+    </div>
+
+    <div class="main-container">
+        <div id="map"></div>
+        
+        <div class="analytics-panel">
+            <div class="kpi-grid">
+                <div class="summary-card"><p>Structures Acquired</p><h3 id="stat-count">0</h3></div>
+                <div class="summary-card"><p>Total Area</p><h3 id="stat-area">0 Sqft</h3></div>
+                <div class="summary-card"><p>Total Compensation</p><h3 id="stat-money">₹ 0</h3></div>
+                <div class="summary-card"><p>Disputes</p><h3 id="stat-illegal">0</h3></div>
+            </div>
+            <div class="panel-title">Field &amp; document KPIs</div>
+            <div class="kpi-grid">
+                <div class="summary-card"><p>Total Trees</p><h3 id="stat-trees">0</h3></div>
+                <div class="summary-card"><p>Total distribution (sum)</p><h3 id="stat-total-distribution">0</h3></div>
+                <div class="summary-card"><p>Samarpan receipts (sum)</p><h3 id="stat-samarpan-sum">0</h3></div>
+                <div class="summary-card"><p>Owners verified</p><h3 id="stat-owner-verified">0</h3></div>
+                <div class="summary-card"><p>Field survey done</p><h3 id="stat-field-survey-done">0</h3></div>
+                <div class="summary-card"><p>Aadhar collected</p><h3 id="stat-aadhar-done">0</h3></div>
+                <div class="summary-card"><p>PAN collected</p><h3 id="stat-pan-done">0</h3></div>
+                <div class="summary-card"><p>Bank details collected</p><h3 id="stat-bank-done">0</h3></div>
+            </div>
+            <div class="panel-title">Acquisition pipeline</div>
+            <div class="chart-container"><canvas id="legalChart"></canvas></div>
+            <div class="panel-title">Structure Classification</div>
+            <div class="chart-container"><canvas id="structureChart"></canvas></div>
+        </div>
+    </div>
+
+    <div id="surveyFormModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.65); z-index:2100; align-items:center; justify-content:center; padding:16px;">
+        <div class="dash-modal-card" style="background:#fff; width:min(860px, 97vw); max-height:92vh; overflow-y:auto; border-radius:12px; padding:16px;">
+            <div class="dash-modal-head">
+                <h3 class="dash-modal-title" style="margin:0; color:#0e3e49;"><i class="fas fa-clipboard-list"></i> Add Survey Data</h3>
+                <span class="dash-soft-note">Fill details, draw boundaries, then save</span>
+            </div>
+            <input type="hidden" id="dash_dbId">
+            <input type="hidden" id="dash_lat">
+            <input type="hidden" id="dash_lng">
+            <div class="dash-grid-2x" style="margin-bottom: 6px;">
+                <div class="dash-form-group"><label>Plot / Property ID</label><input type="text" id="dash_propId" required></div>
+                <div class="dash-form-group"><label>Owner Name</label><input type="text" id="dash_owner" required></div>
+            </div>
+            <div class="form-group dash-section">
+                <label>Structure Classification (Select all that apply)</label>
+                <div class="checkbox-group" style="display:grid; grid-template-columns:1fr 1fr; gap:8px; background:#f8fafc; padding:10px; border:1px solid #ccc; border-radius:4px;">
+                    <label class="checkbox-item"><span class="shape-left"><input type="checkbox" class="dash_struct" value="RCC"><span class="shape-ico">🏢</span> RCC (Permanent)</span><span class="shape-pill"><i class="fas fa-check"></i></span></label>
+                    <label class="checkbox-item"><span class="shape-left"><input type="checkbox" class="dash_struct" value="Open Space"><span class="shape-ico">🌿</span> Open Space / Plot</span><span class="shape-pill"><i class="fas fa-check"></i></span></label>
+                    <label class="checkbox-item"><span class="shape-left"><input type="checkbox" class="dash_struct" value="Shed Tin"><span class="shape-ico">🏚️</span> Shed Tin</span><span class="shape-pill"><i class="fas fa-check"></i></span></label>
+                    <label class="checkbox-item"><span class="shape-left"><input type="checkbox" class="dash_struct" value="Kaccha"><span class="shape-ico">🏠</span> Kaccha</span><span class="shape-pill"><i class="fas fa-check"></i></span></label>
+                </div>
+            </div>
+            <div class="form-group dash-section">
+                <label>Total Plot Area (Sqft)</label>
+                <div style="display:flex; gap:8px;">
+                    <input type="number" id="dash_area" required min="0" step="0.01" style="flex:1;">
+                    <button type="button" class="btn-tool" style="background:#1a5c6b; white-space:nowrap;" onclick="startDrawingMode()"><i class="fas fa-draw-polygon"></i> Add Area Boundary</button>
+                </div>
+                <div id="dashShapesStatus" class="popup-row sub" style="margin-top:8px; color:#6c757d;">No shapes captured yet.</div>
+            </div>
+            <div class="dash-grid-2">
+                <div class="dash-form-group"><label>Acquisition Stage</label><select id="dash_acquisitionStage"></select></div>
+                <div class="dash-form-group"><label>Notice Sent</label><select id="dash_notice"><option value="No">No</option><option value="Yes">Yes</option></select></div>
+            </div>
+            <div class="dash-form-group"><label>Compensation Distributed (₹)</label><input type="number" id="dash_money" min="0"></div>
+            <div class="dash-grid-2">
+                <div class="dash-form-group"><label>Number of Trees</label><input type="number" id="dash_trees" min="0" step="1"></div>
+                <div class="dash-form-group"><label>Total Distribution</label><input type="number" id="dash_totalDistribution" min="0" step="1"></div>
+            </div>
+            <div class="form-group dash-section">
+                <label>Document tracking</label>
+                <div class="dash-doc-toggle-row">
+                    <label><span class="doc-left"><i class="far fa-file-alt"></i> Samarpan receipt</span><input type="checkbox" id="dash_samarpanReceipt" class="dash-doc-toggle" data-target="dash_samarpan_file_block"></label>
+                    <label><span class="doc-left"><i class="fas fa-people-arrows"></i> Field survey done</span><input type="checkbox" id="dash_fieldSurveyDone" class="dash-doc-toggle" data-target="dash_survey_file_block"></label>
+                    <label><span class="doc-left"><i class="far fa-check-circle"></i> Owner verification</span><input type="checkbox" id="dash_ownerVerification" class="dash-doc-toggle" data-target="dash_owner_verif_file_block"></label>
+                    <label><span class="doc-left"><i class="far fa-id-card"></i> Aadhar collected</span><input type="checkbox" id="dash_aadharCollected" class="dash-doc-toggle" data-target="dash_aadhar_file_block"></label>
+                    <label><span class="doc-left"><i class="far fa-credit-card"></i> PAN collected</span><input type="checkbox" id="dash_panCollected" class="dash-doc-toggle" data-target="dash_pan_file_block"></label>
+                    <label><span class="doc-left"><i class="fas fa-university"></i> Bank details collected</span><input type="checkbox" id="dash_bankDetailsCollected" class="dash-doc-toggle" data-target="dash_bank_file_block"></label>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>Document files</label>
+                <div id="dashDocWrap"></div>
+            </div>
+            <div class="form-group">
+                <label>Site Photo (Optional)</label>
+                <div id="dashPhotoWrap"></div>
+            </div>
+            <div class="dash-modal-actions">
+                <button type="button" onclick="submitDashboardSurvey(!!document.getElementById('dash_dbId').value)" class="btn-tool" style="flex:1;"><i class="fas fa-save"></i> Save Data</button>
+                <button type="button" id="dashEditShapesBtn" onclick="triggerShapeBoundaryEdit()" class="btn-tool" style="flex:1; background:#e07a5f; display:none;"><i class="fas fa-edit"></i> Edit Shape Boundaries</button>
+                <button type="button" onclick="closeFormModal()" class="btn-tool" style="background:#6c757d;">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="drawingModeBar" style="display:none; position:fixed; top:0; left:0; right:0; z-index:2200; background:#0e3e49; color:#fff; padding:10px 14px; box-shadow:0 3px 12px rgba(0,0,0,0.35);">
+        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+            <h4 style="margin:0; color:#fff;"><i class="fas fa-draw-polygon"></i> Map Drawing Mode</h4>
+            <select id="dashDrawSelect" onchange="onDashDrawTypeChange()" style="padding:6px; border-radius:4px; border:none; min-width:220px;"></select>
+            <button type="button" class="btn-tool" onclick="zoomInForPrecision()" style="background:#1a5c6b;"><i class="fas fa-search-plus"></i> Precision Zoom</button>
+            <button type="button" class="btn-tool" onclick="finishDrawingMode()" style="background:#f4a261;"><i class="fas fa-check"></i> Done</button>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+    
+    <script>
+        L.TileLayer.BoundaryCanvas = L.TileLayer.extend({
+            options: { boundary: null },
+            createTile: function (coords, done) {
+                var tile = document.createElement('canvas'), ctx = tile.getContext('2d');
+                tile.width = tile.height = 256;
+                var img = new Image();
+                img.onload = function () {
+                    ctx.drawImage(img, 0, 0);
+                    this._maskTile(tile, coords);
+                    done(null, tile);
+                }.bind(this);
+                img.src = this.getTileUrl(coords);
+                return tile;
+            },
+            _maskTile: function (tile, coords) {
+                var ctx = tile.getContext('2d'), nw = map.project(map.unproject(coords.multiplyBy(256), coords.z), coords.z);
+                ctx.globalCompositeOperation = 'destination-in';
+                ctx.beginPath();
+                var geom = this.options.boundary.features[0].geometry;
+                var rings = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
+                rings.forEach(function (ring) {
+                    ring[0].forEach(function (p, i) {
+                        var pt = map.project([p[1], p[0]], coords.z).subtract(nw);
+                        if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y);
+                    });
+                });
+                ctx.fill();
+            }
+        });
+        L.TileLayer.boundaryCanvas = function (url, options) { return new L.TileLayer.BoundaryCanvas(url, options); };
+
+        const map = L.map('map', { 
+            zoomControl: true, maxZoom: 25, zoomSnap: 0.1, zoomDelta: 0.5, wheelPxPerZoomLevel: 120 
+        }).setView([20.5937, 78.9629], 5);
+
+        var googleSat = L.tileLayer('http://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', { 
+            maxZoom: 25, maxNativeZoom: 20, subdomains: ['mt0', 'mt1', 'mt2', 'mt3'] 
+        }).addTo(map);
+
+        map.createPane('shapesPane'); map.getPane('shapesPane').style.zIndex = 400;
+        map.createPane('pointsPane'); map.getPane('pointsPane').style.zIndex = 410;
+
+        let surveyLayer = L.featureGroup().addTo(map);
+        let drawnItems = L.featureGroup().addTo(map);
+        
+        let legalChart = null; let structureChart = null;
+        let allGeoJsonData = { features: [] };
+        let allShapesData = []; 
+        let previousDataCount = 0;
+        let isAddMode = false; 
+        let isInlineDrawing = false;
+        let tempFormData = null;
+        let activeDrawType = "";
+        let inlineCapturedShapes = [];
+
+        const shapeColors = { "RCC": "#0e3e49", "Shed Tin": "#f4a261", "Open Space": "#28a745", "Kaccha": "#e07a5f" };
+
+        function propBool(v) { return v === true || v === 1 || v === '1'; }
+        function propInt(v, fallback) {
+            if (v == null || v === '') return fallback;
+            const n = Number(v);
+            return Number.isFinite(n) ? n : fallback;
+        }
+
+        const ACQUISITION_PIPELINE_STAGES = [
+            "Notice 37(2) Distribution",
+            "Samarpan Received",
+            "Field Survey",
+            "Owner Verification",
+            "Structure Assessment",
+            "Compensation Calculation",
+            "Payment Processing",
+            "Land Possession",
+            "Complete (Land Bank)",
+            "Dispute",
+            "On Hold"
+        ];
+        const DEFAULT_ACQUISITION_STAGE = ACQUISITION_PIPELINE_STAGES[0];
+
+        function normalizeAcquisitionStage(props) {
+            const s = (props && (props.acquisitionStage || props.legalStatus)) || '';
+            if (ACQUISITION_PIPELINE_STAGES.includes(s)) return s;
+            if (s === 'Legal') return 'Notice 37(2) Distribution';
+            if (s === 'Illegal / Encroached') return 'Dispute';
+            return DEFAULT_ACQUISITION_STAGE;
+        }
+
+        function acquisitionStageFillColor(stage) {
+            const map = {
+                "Samarpan Received": "#8e44ad",
+                "Field Survey": "#2980b9",
+                "Owner Verification": "#f39c12",
+                "Payment Processing": "#e67e22",
+                "Land Possession": "#16a085",
+                "Complete (Land Bank)": "#2ecc71",
+                "Dispute": "#e74c3c",
+                "On Hold": "#7f8c8d"
+            };
+            if (stage && map[stage]) return map[stage];
+            return "#0e3e49";
+        }
+
+        function acquisitionStageOptionsHtml(selected) {
+            return ACQUISITION_PIPELINE_STAGES.map((s) =>
+                `<option value="${s}" ${selected === s ? 'selected' : ''}>${s}</option>`
+            ).join('');
+        }
+
+        const drawControl = new L.Control.Draw({
+            edit: { featureGroup: drawnItems, remove: false },
+            draw: { marker: false, circle: false, circlemarker: false, polyline: false }
+        });
+        map.addControl(drawControl);
+
+        fetch('/ortho_data/Boundary.json')
+            .then(res => {
+                if (!res.ok) throw new Error('Boundary data not found');
+                return res.json();
+            })
+            .then(geojsonData => {
+                var boundaryLayer = L.geoJSON(geojsonData, { style: { color: '#00d2ff', weight: 2, fillOpacity: 0, dashArray: '5, 10' }});
+                var maskedOrtho = L.TileLayer.boundaryCanvas('/ortho_data/tiles/{z}/{x}/{y}.png', {
+                    boundary: geojsonData, maxNativeZoom: 21, maxZoom: 25
+                });
+                var overlays = { "<span style='color: #00d2ff; font-weight: bold;'><i class='fas fa-layer-group'></i> Ortho Overlay</span>": maskedOrtho };
+                L.control.layers(null, overlays, { collapsed: false, position: 'topright' }).addTo(map);
+                maskedOrtho.addTo(map);
+                map.fitBounds(boundaryLayer.getBounds(), { padding: [50, 50], maxZoom: 18 });
+            })
+            .catch(err => {
+                console.log("Ortho data not found. Upload tiles in /ortho_data/ folder.", err.message);
+            });
+
+        // --- ADVANCED SHAPE IMPORT LOGIC (Splits FeatureCollections) ---
+        // Image compression function (same as index.html)
+        async function compressImage(file) {
+            if(!file) return "";
+            return new Promise((resolve) => {
+                const reader = new FileReader(); reader.readAsDataURL(file);
+                reader.onload = event => {
+                    const img = new Image(); img.src = event.target.result;
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        const MAX_WIDTH = 800; const scaleSize = MAX_WIDTH / img.width;
+                        canvas.width = MAX_WIDTH; canvas.height = img.height * scaleSize;
+                        const ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        resolve(canvas.toDataURL('image/jpeg', 0.6));
+                    }
+                }
+            });
+        }
+
+        async function importShape(event) {
+            const file = event.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = async function(e) {
+                    try {
+                        const geoJsonStr = e.target.result;
+                        const parsed = JSON.parse(geoJsonStr);
+                        
+                        let features = [];
+                        if (parsed.type === "FeatureCollection") {
+                            features = parsed.features;
+                        } else if (parsed.type === "Feature") {
+                            features = [parsed];
+                        } else {
+                            features = [{ type: "Feature", geometry: parsed, properties: {} }];
+                        }
+
+                        let sync = document.getElementById('syncStatus');
+                        sync.innerHTML = `<i class="fas fa-spinner fa-spin" style="color:#f4a261;"></i> Importing ${features.length} Shapes...`;
+
+                        // Loop aur save har ek individual shape ko
+                        for(let i=0; i < features.length; i++) {
+                            let feat = features[i];
+                            let pId = feat.properties?.PlotID || feat.properties?.name || `${file.name.replace('.geojson','')}_${i+1}`;
+                            let sType = feat.properties?.Structure || "Open Space";
+                            let area = feat.properties?.AreaSqFt || 0;
+
+                            await fetch('/save-shape', {
+                                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ propertyId: pId, structureType: sType, geoJson: JSON.stringify(feat), calculatedArea: parseFloat(area) })
+                            });
+                        }
+                        
+                        sync.innerHTML = `<i class="fas fa-circle" style="color:#28a745;"></i> System Online`;
+                        alert(`Success: ${features.length} distinct shapes imported!`); 
+                        loadShapes();
+                    } catch(err) { alert("Error importing shape file. Please ensure it's a valid GeoJSON."); }
+                };
+                reader.readAsText(file);
+            }
+        }
+
+        window.exportToExcel = function() {
+            const selectedDistrict = document.getElementById('districtFilter').value;
+            const dataToExport = allGeoJsonData.features.filter(f => selectedDistrict === "All" || f.properties.district === selectedDistrict);
+            if (dataToExport.length === 0) { alert("No data available to export for the selected district."); return; }
+            let csvContent = "Plot ID,Owner Name,Structure Types,Acquisition Stage,Notice Sent,Amount Paid (INR),Manual Area (SqFt),Total Mapped Area (SqFt),District,Latitude,Longitude,";
+            csvContent += "Number of Trees,Total Distribution,Samarpan Receipt,Field Survey Done,Owner Verification,Aadhar Collected,PAN Collected,Bank Details Collected\n";
+            dataToExport.forEach(f => {
+                const p = f.properties;
+                let mappedArea = 0;
+                const plotShapes = allShapesData.filter(s => s.propertyId === p.propertyId);
+                plotShapes.forEach(s => mappedArea += s.area);
+                const yn = (k) => (propBool(p[k]) ? 'Yes' : 'No');
+                const row = [
+                    `"${p.propertyId || ''}"`, `"${p.ownerName || ''}"`, `"${p.structureType || ''}"`,
+                    `"${p.acquisitionStage || p.legalStatus || ''}"`, `"${p.noticeSent || ''}"`, `"${p.moneyDistributed || 0}"`,
+                    `"${p.areaSqft || 0}"`, `"${mappedArea.toFixed(2)}"`, `"${p.district || ''}"`,
+                    `"${f.geometry.coordinates[1]}"`, `"${f.geometry.coordinates[0]}"`,
+                    `"${propInt(p.numberOfTrees, 0)}"`, `"${propInt(p.totalDistribution, 0)}"`, `"${propInt(p.samarpanReceipt, 0)}"`,
+                    `"${yn('fieldSurveyDone')}"`, `"${yn('ownerVerification')}"`, `"${yn('aadharCollected')}"`,
+                    `"${yn('panCollected')}"`, `"${yn('bankDetailsCollected')}"`
+                ].join(",");
+                csvContent += row + "\n";
+            });
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement("a"); const url = URL.createObjectURL(blob);
+            link.setAttribute("href", url); link.setAttribute("download", `Droid_Mining_Data_${selectedDistrict.replace(/\s+/g, '_')}.csv`);
+            link.style.visibility = 'hidden'; document.body.appendChild(link); link.click(); document.body.removeChild(link);
+        };
+
+        function toggleAddMode() {
+            isAddMode = !isAddMode;
+            const btn = document.getElementById('addSurveyBtn');
+            if(isAddMode) {
+                btn.style.background = '#e07a5f'; btn.innerHTML = '<i class="fas fa-times"></i> Cancel Map Click';
+                document.getElementById('map').style.cursor = 'crosshair';
+            } else {
+                btn.style.background = '#28a745'; btn.innerHTML = '<i class="fas fa-map-marker-alt"></i> Add Survey (Map)';
+                document.getElementById('map').style.cursor = '';
+            }
+        }
+
+        map.on('click', function(e) { if(isAddMode) { toggleAddMode(); showSurveyForm(e.latlng, null); } });
+
+        async function compressImage(file) {
+            if(!file) return "";
+            return new Promise((resolve) => {
+                const reader = new FileReader(); reader.readAsDataURL(file);
+                reader.onload = event => {
+                    const img = new Image(); img.src = event.target.result;
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        const MAX_WIDTH = 800; const scaleSize = MAX_WIDTH / img.width;
+                        canvas.width = MAX_WIDTH; canvas.height = img.height * scaleSize;
+                        const ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        resolve(canvas.toDataURL('image/jpeg', 0.6));
+                    }
+                }
+            });
+        }
+
+        window.triggerEditForm = function(lat, lng, pStr) {
+            const p = JSON.parse(decodeURIComponent(pStr));
+            showSurveyForm({lat: lat, lng: lng}, p);
+        }
+
+        function renderExistingDoc(label, hiddenId, existingB64, fileInputId) {
+            const blockId = `${fileInputId}_block`;
+            if (existingB64) {
+                return `
+                    <div id="${blockId}" class="dash-file-block">
+                    <input type="hidden" id="${hiddenId}" value="${encodeURIComponent(existingB64)}">
+                    <div class="popup-row sub" style="margin-bottom:6px;">
+                        <b>${label}:</b>
+                        <span style="color:#28a745;"><i class="fas fa-check-circle" style="color: #28a745;"></i> Document uploaded already</span>
+                    </div>
+                    <button type="button" class="btn-tool" style="width:100%; margin-bottom:6px; background:#1a5c6b;" onclick="document.getElementById('${fileInputId}_wrap').style.display='block'">Change File</button>
+                    <div class="dash-upload-box" style="display:none;" id="${fileInputId}_wrap">
+                        <div class="dash-upload-head">${label}</div>
+                        <input type="file" id="${fileInputId}" accept="image/*,application/pdf" capture="environment" style="width:100%;">
+                        <div class="dash-upload-meta">Drag & drop or click to upload</div>
+                    </div>
+                    </div>
+                `;
+            }
+            return `
+                <div id="${blockId}" class="dash-file-block">
+                <input type="hidden" id="${hiddenId}" value="">
+                <div class="dash-upload-box">
+                    <div class="dash-upload-head">${label}</div>
+                    <input type="file" id="${fileInputId}" accept="image/*,application/pdf" capture="environment" style="width:100%;">
+                    <div class="dash-upload-meta">Drag & drop or click to upload</div>
+                </div>
+                </div>
+            `;
+        }
+
+        function updateDocumentFileVisibility() {
+            document.querySelectorAll('.dash-doc-toggle').forEach((cb) => {
+                const targetId = cb.getAttribute('data-target');
+                const el = document.getElementById(targetId);
+                if (el) el.style.display = cb.checked ? 'block' : 'none';
+            });
+        }
+
+        function updateDashDrawOptions() {
+            const drawSelect = document.getElementById('dashDrawSelect');
+            if (!drawSelect) return;
+            const selectedStructs = Array.from(document.querySelectorAll('.dash_struct:checked')).map(el => el.value);
+            drawSelect.innerHTML = '<option value="">Select type & Draw...</option>';
+            selectedStructs.forEach((s) => { drawSelect.innerHTML += `<option value="${s}">${s}</option>`; });
+            drawSelect.value = "";
+        }
+
+        function updateCapturedShapesStatus() {
+            const statusEl = document.getElementById('dashShapesStatus');
+            const areaEl = document.getElementById('dash_area');
+            if (!statusEl || !areaEl) return;
+            if (!inlineCapturedShapes.length) {
+                statusEl.style.color = '#6c757d';
+                statusEl.innerHTML = 'No shapes captured yet.';
+                return;
+            }
+            const rows = inlineCapturedShapes.map((s) => `<div><i class="fas fa-check-circle" style="color:#28a745;"></i> ${s.type}: ${Number(s.area || 0).toFixed(2)} SqFt</div>`).join('');
+            const total = inlineCapturedShapes.reduce((sum, s) => sum + (parseFloat(s.area) || 0), 0);
+            areaEl.value = total.toFixed(2);
+            statusEl.style.color = '#28a745';
+            statusEl.innerHTML = `✅ ${inlineCapturedShapes.length} Shapes Captured${rows ? '<div style="margin-top:4px;">' + rows + '</div>' : ''}`;
+        }
+
+        function syncInlineCapturedShapesFromMap() {
+            if (!inlineCapturedShapes.length) return;
+            const activeLayers = {};
+            drawnItems.eachLayer((layer) => {
+                const lid = L.stamp(layer);
+                activeLayers[lid] = layer;
+            });
+
+            inlineCapturedShapes = inlineCapturedShapes
+                .filter((s) => !!activeLayers[s.layerId])
+                .map((s) => {
+                    const layer = activeLayers[s.layerId];
+                    let areaSqft = s.area;
+                    try {
+                        if (layer.getLatLngs) {
+                            const areaSqm = L.GeometryUtil.geodesicArea(layer.getLatLngs()[0]);
+                            areaSqft = parseFloat((areaSqm * 10.7639).toFixed(2));
+                        }
+                    } catch (_) {}
+                    return { ...s, geojson: layer.toGeoJSON(), area: areaSqft };
+                });
+            updateCapturedShapesStatus();
+        }
+
+        function applyFormDataToModal(latlng, p) {
+            const isEdit = !!p;
+            const pObj = p || {};
+            if (!tempFormData && !pObj.dbId) inlineCapturedShapes = [];
+
+            document.getElementById('dash_dbId').value = isEdit ? (p.dbId || '') : '';
+            document.getElementById('dash_lat').value = latlng.lat;
+            document.getElementById('dash_lng').value = latlng.lng;
+            document.getElementById('dash_propId').value = isEdit ? (p.propertyId || '') : '';
+            document.getElementById('dash_owner').value = isEdit ? (p.ownerName || '') : '';
+            document.getElementById('dash_notice').value = isEdit ? (p.noticeSent || 'No') : 'No';
+            document.getElementById('dash_money').value = isEdit ? (p.moneyDistributed || 0) : 0;
+            document.getElementById('dash_trees').value = isEdit ? propInt(p.numberOfTrees, 0) : 0;
+            document.getElementById('dash_totalDistribution').value = isEdit ? propInt(p.totalDistribution, 0) : 0;
+            const rawStage = isEdit ? (p.acquisitionStage || p.legalStatus || '') : '';
+            const stageSelect = ACQUISITION_PIPELINE_STAGES.includes(rawStage) ? rawStage : DEFAULT_ACQUISITION_STAGE;
+            document.getElementById('dash_acquisitionStage').innerHTML = acquisitionStageOptionsHtml(stageSelect);
+
+            const types = (isEdit && p.structureType) ? p.structureType.split(', ') : [];
+            document.querySelectorAll('.dash_struct').forEach((cb) => { cb.checked = types.includes(cb.value); });
+
+            document.getElementById('dash_samarpanReceipt').checked = (isEdit && (propInt(p.samarpanReceipt, 0) > 0 || propBool(p.samarpanReceipt)));
+            document.getElementById('dash_fieldSurveyDone').checked = (isEdit && propBool(p.fieldSurveyDone));
+            document.getElementById('dash_ownerVerification').checked = (isEdit && propBool(p.ownerVerification));
+            document.getElementById('dash_aadharCollected').checked = (isEdit && propBool(p.aadharCollected));
+            document.getElementById('dash_panCollected').checked = (isEdit && propBool(p.panCollected));
+            document.getElementById('dash_bankDetailsCollected').checked = (isEdit && propBool(p.bankDetailsCollected));
+
+            const docWrap = document.getElementById('dashDocWrap');
+            const photoWrap = document.getElementById('dashPhotoWrap');
+            docWrap.innerHTML =
+                renderExistingDoc('Aadhar File', 'dash_existing_aadhar', isEdit ? (p.aadharFileB64 || '') : '', 'dash_aadhar_file') +
+                renderExistingDoc('PAN File', 'dash_existing_pan', isEdit ? (p.panFileB64 || '') : '', 'dash_pan_file') +
+                renderExistingDoc('Bank Details File', 'dash_existing_bank', isEdit ? (p.bankFileB64 || '') : '', 'dash_bank_file') +
+                renderExistingDoc('Owner Verification File', 'dash_existing_owner_verif', isEdit ? (p.ownerVerifFileB64 || '') : '', 'dash_owner_verif_file') +
+                renderExistingDoc('Samarpan File', 'dash_existing_samarpan', isEdit ? (p.samarpanFileB64 || '') : '', 'dash_samarpan_file') +
+                renderExistingDoc('Field Survey File', 'dash_existing_survey', isEdit ? (p.surveyFileB64 || '') : '', 'dash_survey_file');
+            photoWrap.innerHTML = renderExistingDoc('Site Photo', 'dash_existing_photo', isEdit ? (p.photoB64 || '') : '', 'dash_photo');
+
+            document.getElementById('dashEditShapesBtn').style.display = (isEdit || inlineCapturedShapes.length > 0) ? 'block' : 'none';
+            const baseArea = isEdit ? (parseFloat(p.areaSqft) || 0) : 0;
+            const inlineTotal = inlineCapturedShapes.reduce((sum, s) => sum + (parseFloat(s.area) || 0), 0);
+            document.getElementById('dash_area').value = (inlineTotal > 0 ? inlineTotal : baseArea).toFixed(2);
+            updateDashDrawOptions();
+            document.querySelectorAll('.dash_struct').forEach((cb) => cb.onchange = updateDashDrawOptions);
+            document.querySelectorAll('.dash-doc-toggle').forEach((cb) => cb.onchange = updateDocumentFileVisibility);
+            updateDocumentFileVisibility();
+            updateCapturedShapesStatus();
+        }
+
+        function openFormModal() {
+            document.getElementById('surveyFormModal').style.display = 'flex';
+        }
+
+        function closeFormModal() {
+            document.getElementById('surveyFormModal').style.display = 'none';
+        }
+
+        function showSurveyForm(latlng, p) {
+            tempFormData = p ? { ...p, lat: latlng.lat, lng: latlng.lng } : null;
+            applyFormDataToModal(latlng, p || {});
+            openFormModal();
+        }
+
+        window.startDrawingMode = function() {
+            const selectedStructs = Array.from(document.querySelectorAll('.dash_struct:checked')).map(el => el.value);
+            if (!selectedStructs.length) { alert("Please select at least one structure type before drawing."); return; }
+
+            tempFormData = {
+                dbId: document.getElementById('dash_dbId').value || '',
+                propertyId: document.getElementById('dash_propId').value || '',
+                ownerName: document.getElementById('dash_owner').value || '',
+                structureType: selectedStructs.join(', '),
+                areaSqft: parseFloat(document.getElementById('dash_area').value) || 0,
+                acquisitionStage: document.getElementById('dash_acquisitionStage').value || DEFAULT_ACQUISITION_STAGE,
+                noticeSent: document.getElementById('dash_notice').value || 'No',
+                moneyDistributed: parseFloat(document.getElementById('dash_money').value) || 0,
+                numberOfTrees: parseInt(document.getElementById('dash_trees').value, 10) || 0,
+                totalDistribution: parseInt(document.getElementById('dash_totalDistribution').value, 10) || 0,
+                fieldSurveyDone: document.getElementById('dash_fieldSurveyDone').checked,
+                ownerVerification: document.getElementById('dash_ownerVerification').checked,
+                aadharCollected: document.getElementById('dash_aadharCollected').checked,
+                panCollected: document.getElementById('dash_panCollected').checked,
+                bankDetailsCollected: document.getElementById('dash_bankDetailsCollected').checked,
+                samarpanReceipt: document.getElementById('dash_samarpanReceipt').checked ? 1 : 0,
+                aadharFileB64: decodeURIComponent((document.getElementById('dash_existing_aadhar') || {}).value || ''),
+                panFileB64: decodeURIComponent((document.getElementById('dash_existing_pan') || {}).value || ''),
+                bankFileB64: decodeURIComponent((document.getElementById('dash_existing_bank') || {}).value || ''),
+                ownerVerifFileB64: decodeURIComponent((document.getElementById('dash_existing_owner_verif') || {}).value || ''),
+                samarpanFileB64: decodeURIComponent((document.getElementById('dash_existing_samarpan') || {}).value || ''),
+                surveyFileB64: decodeURIComponent((document.getElementById('dash_existing_survey') || {}).value || ''),
+                photoB64: decodeURIComponent((document.getElementById('dash_existing_photo') || {}).value || ''),
+                lat: parseFloat(document.getElementById('dash_lat').value),
+                lng: parseFloat(document.getElementById('dash_lng').value)
+            };
+
+            const drawSelect = document.getElementById('dashDrawSelect');
+            drawSelect.innerHTML = '<option value="">Select type & Draw...</option>';
+            selectedStructs.forEach((s) => { drawSelect.innerHTML += `<option value="${s}">${s}</option>`; });
+            drawSelect.value = "";
+
+            closeFormModal();
+            document.getElementById('drawingModeBar').style.display = 'block';
+            isInlineDrawing = true;
+            const statusEl = document.getElementById('dashShapesStatus');
+            if (statusEl) {
+                statusEl.style.color = '#b26a00';
+                statusEl.innerHTML = 'Top dropdown se structure select karo, fir shape draw karo.';
+            }
+        };
+
+        window.onDashDrawTypeChange = function() {
+            const drawSelect = document.getElementById('dashDrawSelect');
+            if (!drawSelect || !drawSelect.value || !isInlineDrawing) return;
+            activeDrawType = drawSelect.value;
+            const polygonOpts = (drawControl && drawControl.options && drawControl.options.draw && drawControl.options.draw.polygon) ? drawControl.options.draw.polygon : {};
+            setTimeout(() => { new L.Draw.Polygon(map, polygonOpts).enable(); }, 80);
+        };
+
+        window.zoomInForPrecision = function() {
+            const nextZoom = Math.min((map.getZoom() || 18) + 1, 23);
+            map.setZoom(nextZoom, { animate: true });
+        };
+
+        async function autoSaveInlineShape(propertyId, structureType, geojsonObj, areaSqft) {
+            if (!propertyId) return;
+            try {
+                await fetch('/save-shape', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        propertyId: propertyId,
+                        structureType: structureType || "Open Space",
+                        geoJson: JSON.stringify(geojsonObj),
+                        calculatedArea: parseFloat(areaSqft) || 0
+                    })
+                });
+                // backend auto-syncs area_sqft by property_id on shape save;
+                // refresh map + dashboard data immediately without page reload
+                await Promise.all([loadShapes(), loadSurveys()]);
+            } catch (_) {}
+        }
+
+        window.finishDrawingMode = function() {
+            document.getElementById('drawingModeBar').style.display = 'none';
+            isInlineDrawing = false;
+            if (!tempFormData) return;
+            const total = inlineCapturedShapes.reduce((sum, s) => sum + (parseFloat(s.area) || 0), 0);
+            tempFormData.areaSqft = total > 0 ? total : (parseFloat(tempFormData.areaSqft) || 0);
+            showSurveyForm({ lat: tempFormData.lat, lng: tempFormData.lng }, tempFormData);
+        };
+
+        window.triggerShapeBoundaryEdit = function(dbId) {
+            closeFormModal();
+            if (dbId) {
+                let target = null;
+                drawnItems.eachLayer((layer) => {
+                    const pick = (l) => { if (l && l._shapeDbId === dbId) target = l; };
+                    if (layer.eachLayer) layer.eachLayer(pick);
+                    else pick(layer);
+                });
+                if (target && target.editing && target.editing.enable) {
+                    drawnItems.eachLayer((layer) => {
+                        const disable = (l) => { if (l && l.editing && l.editing.disable) l.editing.disable(); };
+                        if (layer.eachLayer) layer.eachLayer(disable);
+                        else disable(layer);
+                    });
+                    target.editing.enable();
+                    const shapeMeta = allShapesData.find((s) => s.id === dbId);
+                    const persistNow = async () => {
+                        try {
+                            const areaSqm = L.GeometryUtil.geodesicArea(target.getLatLngs()[0]);
+                            const newArea = parseFloat((areaSqm * 10.7639).toFixed(2));
+                            const payload = {
+                                id: dbId,
+                                propertyId: shapeMeta ? shapeMeta.propertyId : "",
+                                structureType: shapeMeta ? shapeMeta.structureType : "Open Space",
+                                geoJson: JSON.stringify(target.toGeoJSON()),
+                                calculatedArea: newArea
+                            };
+                            await fetch('/update-shape', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(payload)
+                            });
+                            if (shapeMeta) {
+                                shapeMeta.area = newArea;
+                                shapeMeta.geoJson = target.toGeoJSON();
+                            }
+                            loadSurveys();
+                        } catch (_) {}
+                    };
+                    if (target._persistEditHandler) {
+                        target.off('edit', target._persistEditHandler);
+                    }
+                    target._persistEditHandler = persistNow;
+                    target.on('edit', target._persistEditHandler);
+                    if (target.getBounds) {
+                        map.fitBounds(target.getBounds(), { padding: [30, 30], maxZoom: 21 });
+                    }
+                    return;
+                }
+            }
+            const editBtn = document.querySelector('.leaflet-draw-edit-edit');
+            if (editBtn) editBtn.click();
+        };
+
+        window.submitDashboardSurvey = async function(isEdit) {
+            const dbId = document.getElementById('dash_dbId').value; const propId = document.getElementById('dash_propId').value;
+            const owner = document.getElementById('dash_owner').value; const area = document.getElementById('dash_area').value;
+            const acquisitionStage = document.getElementById('dash_acquisitionStage').value; const notice = document.getElementById('dash_notice').value;
+            const money = document.getElementById('dash_money').value; const lat = document.getElementById('dash_lat').value; const lng = document.getElementById('dash_lng').value;
+
+            const cbs = document.querySelectorAll('.dash_struct:checked'); let types = []; cbs.forEach(c => types.push(c.value));
+            if(!propId || !owner || !area) { alert("Plot ID, Owner Name, and Area are required."); return; }
+            if(types.length === 0) { alert("Please select at least one structure type."); return; }
+
+            const fileToBase64 = async (file) => {
+                if(!file) return "";
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (ev) => resolve(ev.target.result || "");
+                    reader.onerror = () => reject(new Error("File read failed"));
+                    reader.readAsDataURL(file);
+                });
+            };
+            const decodeExisting = (id) => {
+                const el = document.getElementById(id);
+                if (!el || !el.value) return "";
+                try { return decodeURIComponent(el.value); } catch (_) { return el.value; }
+            };
+            const pickB64 = async (fileInputId, existingId) => {
+                const el = document.getElementById(fileInputId);
+                if (el && el.files && el.files[0]) return await fileToBase64(el.files[0]);
+                return decodeExisting(existingId);
+            };
+
+            const dashSel01 = (id) => { const el = document.getElementById(id); return !!(el && el.checked); };
+            const [aadharFileB64, panFileB64, bankFileB64, ownerVerifFileB64, samarpanFileB64, surveyFileB64, photoB64] = await Promise.all([
+                pickB64('dash_aadhar_file', 'dash_existing_aadhar'),
+                pickB64('dash_pan_file', 'dash_existing_pan'),
+                pickB64('dash_bank_file', 'dash_existing_bank'),
+                pickB64('dash_owner_verif_file', 'dash_existing_owner_verif'),
+                pickB64('dash_samarpan_file', 'dash_existing_samarpan'),
+                pickB64('dash_survey_file', 'dash_existing_survey'),
+                pickB64('dash_photo', 'dash_existing_photo')
+            ]);
+
+            let state = "Dashboard", district = "Dashboard";
+            try {
+                const rev = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`);
+                const addrData = await rev.json();
+                state = addrData.address?.state || state;
+                district = addrData.address?.state_district || addrData.address?.city || addrData.address?.county || district;
+            } catch (_) {}
+
+            const payload = {
+                propertyId: propId, ownerName: owner, structureType: types.join(', '),
+                acquisitionStage: acquisitionStage, noticeSent: notice, moneyDistributed: parseFloat(money),
+                areaSqft: parseFloat(area), photoB64: photoB64,
+                // BUG FIX #2 (frontend): Pass lat/lng/district so backend can update coordinates
+                coordinates: {lat: parseFloat(lat), lng: parseFloat(lng)},
+                lat: parseFloat(lat), lng: parseFloat(lng),
+                state: state, district: district,
+                numberOfTrees: parseInt(document.getElementById('dash_trees').value, 10) || 0,
+                totalDistribution: parseInt(document.getElementById('dash_totalDistribution').value, 10) || 0,
+                samarpanReceipt: dashSel01('dash_samarpanReceipt') ? 1 : 0,
+                fieldSurveyDone: dashSel01('dash_fieldSurveyDone'),
+                ownerVerification: dashSel01('dash_ownerVerification'),
+                aadharCollected: dashSel01('dash_aadharCollected'),
+                panCollected: dashSel01('dash_panCollected'),
+                bankDetailsCollected: dashSel01('dash_bankDetailsCollected'),
+                aadharFileB64: aadharFileB64 || "",
+                panFileB64: panFileB64 || "",
+                bankFileB64: bankFileB64 || "",
+                ownerVerifFileB64: ownerVerifFileB64 || "",
+                samarpanFileB64: samarpanFileB64 || "",
+                surveyFileB64: surveyFileB64 || ""
+            };
+
+            const endpoint = isEdit ? '/update-survey' : '/save-survey';
+            if (isEdit) { payload.id = parseInt(dbId); }
+
+            try {
+                await fetch(endpoint, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+                if (inlineCapturedShapes.length > 0) {
+                    for (const shp of inlineCapturedShapes) {
+                        await fetch('/save-shape', {
+                            method: 'POST',
+                            headers: {'Content-Type':'application/json'},
+                            body: JSON.stringify({
+                                propertyId: propId,
+                                structureType: shp.type || "Open Space",
+                                geoJson: JSON.stringify(shp.geojson),
+                                calculatedArea: parseFloat(shp.area) || 0
+                            })
+                        });
+                    }
+                }
+                closeFormModal();
+                document.getElementById('drawingModeBar').style.display = 'none';
+                inlineCapturedShapes = [];
+                tempFormData = null;
+                let sync = document.getElementById('syncStatus'); sync.innerHTML = `<i class="fas fa-sync fa-spin" style="color:#f4a261;"></i> Data Saved!`;
+                const res = await fetch('/get-surveys'); allGeoJsonData = await res.json(); previousDataCount = allGeoJsonData.features.length; filterAndRenderData(); loadShapes();
+                setTimeout(() => sync.innerHTML = `<i class="fas fa-circle" style="color:#28a745;"></i> System Online`, 2000);
+            } catch(e) { 
+                console.error("Failed to save data:", e);
+                alert("Failed to save data."); 
+            }
+        }
+
+        map.on(L.Draw.Event.CREATED, function (e) {
+            const layer = e.layer;
+            const areaSqm = L.GeometryUtil.geodesicArea(layer.getLatLngs()[0]);
+            const areaSqft = (areaSqm * 10.7639).toFixed(2);
+            drawnItems.addLayer(layer);
+
+            if (isInlineDrawing && tempFormData) {
+                const drawSelect = document.getElementById('dashDrawSelect');
+                if (!drawSelect || !drawSelect.value) {
+                    drawnItems.removeLayer(layer);
+                    alert("Please select a structure from dropdown before drawing.");
+                    return;
+                }
+                const chosenType = (drawSelect && drawSelect.value) ? drawSelect.value : (activeDrawType || "Open Space");
+                inlineCapturedShapes.push({
+                    layerId: L.stamp(layer),
+                    type: chosenType,
+                    geojson: layer.toGeoJSON(),
+                    area: parseFloat(areaSqft)
+                });
+                autoSaveInlineShape(tempFormData.propertyId, chosenType, layer.toGeoJSON(), areaSqft);
+                activeDrawType = chosenType;
+                drawSelect.value = "";
+                return;
+            }
+
+            const formHtml = `
+                <div class="shape-form">
+                    <h4>Save Plot Boundary</h4><p>Area: ${areaSqft} SqFt</p>
+                    <input type="text" id="tempPlotId" placeholder="Enter Plot ID (e.g. 140)" required>
+                    <select id="tempStructType">
+                        <option value="RCC">RCC (Permanent)</option><option value="Shed Tin">Shed Tin</option>
+                        <option value="Open Space">Open Space</option><option value="Kaccha">Kaccha</option>
+                    </select>
+                    <button onclick="submitShape(${L.stamp(layer)}, ${areaSqft})">Save to Database</button>
+                </div>
+            `;
+            layer.bindPopup(formHtml, { closeOnClick: false, autoClose: false }).openPopup();
+        });
+
+        // BUG FIX #4: EDITED handler was completely missing — shape geometry changes were never saved to DB
+        map.on(L.Draw.Event.EDITED, function (e) {
+            if (inlineCapturedShapes.length) {
+                syncInlineCapturedShapesFromMap();
+            }
+            e.layers.eachLayer(async function (layer) {
+                const layerId = L.stamp(layer);
+                // Find matching shape by layerId stored in allShapesData
+                const matchedShape = allShapesData.find(s => s._leafletId === layerId);
+                if (matchedShape) {
+                    const areaSqm = L.GeometryUtil.geodesicArea(layer.getLatLngs()[0]);
+                    const newArea = parseFloat((areaSqm * 10.7639).toFixed(2));
+                    await fetch('/update-shape', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            id: matchedShape.id,
+                            propertyId: matchedShape.propertyId,
+                            structureType: matchedShape.structureType,
+                            geoJson: JSON.stringify(layer.toGeoJSON()),
+                            calculatedArea: newArea
+                        })
+                    });
+                    matchedShape.area = newArea;
+                }
+            });
+        });
+
+        map.on(L.Draw.Event.DELETED, function () {
+            if (inlineCapturedShapes.length) {
+                syncInlineCapturedShapesFromMap();
+            }
+        });
+
+        window.submitShape = async function(layerId, areaSqft) {
+            const layer = drawnItems.getLayer(layerId);
+            const plotId = document.getElementById('tempPlotId').value;
+            const type = document.getElementById('tempStructType').value;
+            if(!plotId) { alert("Please enter Plot ID"); return; }
+            await fetch('/save-shape', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ propertyId: plotId, structureType: type, geoJson: JSON.stringify(layer.toGeoJSON()), calculatedArea: areaSqft })
+            });
+            layer.closePopup(); layer.unbindPopup(); loadShapes(); 
+        }
+
+        window.exportFullPlot = function(propertyId) {
+            const plotShapes = allShapesData.filter(s => s.propertyId === propertyId);
+            const features = plotShapes.map(s => {
+                let feat = s.geoJson;
+                if (feat.type !== "Feature") { feat = { type: "Feature", geometry: feat, properties: {} }; }
+                feat.properties = { PlotID: s.propertyId, Structure: s.structureType, AreaSqFt: s.area };
+                return feat;
+            });
+            exportGeoJSON({ type: "FeatureCollection", features: features }, `Plot_${propertyId}_Full_Export`);
+        }
+
+        // --- NEW: EDIT SHAPE LOGIC ---
+        window.showShapeEditForm = function(dbId, currentPropId, currentType) {
+            const isRCC = currentType === "RCC" ? "selected" : "";
+            const isShed = currentType === "Shed Tin" ? "selected" : "";
+            const isOpen = currentType === "Open Space" ? "selected" : "";
+            const isKaccha = currentType === "Kaccha" ? "selected" : "";
+
+            const formHtml = `
+                <div class="shape-form" style="width: 200px; text-align: left;">
+                    <h4 style="margin: 0 0 10px; color:#0e3e49;"><i class="fas fa-edit"></i> Edit Shape</h4>
+                    <label style="font-size:0.8em; font-weight:700;">Plot ID</label>
+                    <input type="text" id="editShapePropId_${dbId}" value="${currentPropId}" style="width:100%; padding:5px; margin-bottom:10px;">
+                    <label style="font-size:0.8em; font-weight:700;">Structure Type</label>
+                    <select id="editShapeType_${dbId}" style="width:100%; padding:5px; margin-bottom:10px;">
+                        <option value="RCC" ${isRCC}>RCC (Permanent)</option>
+                        <option value="Shed Tin" ${isShed}>Shed Tin</option>
+                        <option value="Open Space" ${isOpen}>Open Space</option>
+                        <option value="Kaccha" ${isKaccha}>Kaccha</option>
+                    </select>
+                    <button onclick="event.stopPropagation(); submitShapeEdit(${dbId}); return false;" class="btn-tool" style="width:100%; background: #28a745;">
+                        Save Changes
+                    </button>
+                    <button onclick="event.stopPropagation(); triggerShapeBoundaryEdit(${dbId}); return false;" class="btn-tool" style="width:100%; margin-top:6px; background:#1a5c6b;">
+                        Edit Boundary Points
+                    </button>
+                    <button onclick="event.stopPropagation(); deleteShapeEntry(${dbId}); return false;" class="btn-tool" style="width:100%; margin-top:6px; background:#dc3545;">
+                        Delete Shape
+                    </button>
+                </div>
+            `;
+            
+            const popupContainer = document.getElementById(`popup-shape-${dbId}`);
+            if (popupContainer) { popupContainer.innerHTML = formHtml; }
+        }
+
+        window.submitShapeEdit = async function(dbId) {
+            const newPropId = document.getElementById(`editShapePropId_${dbId}`).value;
+            const newType = document.getElementById(`editShapeType_${dbId}`).value;
+            if(!newPropId) { alert("Plot ID cannot be empty"); return; }
+
+            await fetch('/update-shape', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: dbId, propertyId: newPropId, structureType: newType })
+            });
+            loadShapes();
+        }
+
+        window.deleteShapeEntry = async function(dbId) {
+            if (!confirm("Delete this shape permanently?")) return;
+            await fetch('/delete-shape', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: dbId })
+            });
+            loadShapes();
+        }
+
+        async function loadShapes() {
+            drawnItems.clearLayers();
+            const res = await fetch('/get-shapes');
+            allShapesData = await res.json(); 
+            
+            allShapesData.forEach(shape => {
+                const color = shapeColors[shape.structureType] || "#333";
+                const layer = L.geoJSON(shape.geoJson, { style: { color: color, weight: 3, fillOpacity: 0.4 }, pane: 'shapesPane' });
+                // BUG FIX #4 (part 2): Store leafletId on shape object so EDITED handler can find it
+                layer.eachLayer(l => {
+                    shape._leafletId = L.stamp(l);
+                    l._shapeDbId = shape.id;
+                });
+                layer.bindTooltip(`<b>${shape.propertyId}</b>`, { permanent: true, direction: 'center', className: 'plot-label' }).openTooltip();
+                
+                // POPUP with EDIT BUTTON
+                const popupContent = `
+                    <div class="shape-popup" id="popup-shape-${shape.id}">
+                        <h4 style="color:${color};">Plot ID: ${shape.propertyId}</h4>
+                        <p>Type: <b>${shape.structureType}</b></p>
+                        <button onclick='event.stopPropagation(); exportFullPlot("${shape.propertyId}"); return false;' class="btn-tool" style="width:100%;">
+                            <i class="fas fa-download"></i> Export Plot (CAD)
+                        </button>
+                        <button onclick='event.stopPropagation(); showShapeEditForm(${shape.id}, "${shape.propertyId}", "${shape.structureType}"); return false;' class="btn-tool" style="width:100%; margin-top:5px; background: #e07a5f;">
+                            <i class="fas fa-edit"></i> Edit Shape Info
+                        </button>
+                    </div>
+                `;
+                layer.bindPopup(popupContent, { closeOnClick: false, autoClose: false });
+                drawnItems.addLayer(layer);
+            });
+            if(allGeoJsonData.features.length > 0) renderPoints(allGeoJsonData.features);
+        }
+
+        async function loadSurveys() {
+            const res = await fetch('/get-surveys');
+            allGeoJsonData = await res.json(); previousDataCount = allGeoJsonData.features.length;
+            populateDropdowns(); filterAndRenderData();
+        }
+
+        function populateDropdowns() {
+            const districts = new Set(); allGeoJsonData.features.forEach(f => districts.add(f.properties.district));
+            const dSelect = document.getElementById('districtFilter'); const currentVal = dSelect.value;
+            dSelect.innerHTML = '<option value="All">District Filter (All)</option>';
+            districts.forEach(d => { dSelect.innerHTML += `<option value="${d}">${d}</option>`; });
+            if (districts.has(currentVal) || currentVal === "All") dSelect.value = currentVal;
+            dSelect.removeEventListener('change', filterAndRenderData); dSelect.addEventListener('change', filterAndRenderData);
+        }
+
+        function filterAndRenderData() {
+            const selectedDistrict = document.getElementById('districtFilter').value;
+            const filteredFeatures = allGeoJsonData.features.filter(f => selectedDistrict === "All" || f.properties.district === selectedDistrict);
+            renderPoints(filteredFeatures); updateAnalytics(filteredFeatures);
+        }
+
+        function renderPoints(features) {
+            surveyLayer.clearLayers();
+            L.geoJSON(features, {
+                pointToLayer: (feature, latlng) => {
+                    const stage = normalizeAcquisitionStage(feature.properties);
+                    const color = acquisitionStageFillColor(stage);
+                    return L.circleMarker(latlng, { radius: 8, fillColor: color, color: "#fff", weight: 2, fillOpacity: 0.9, pane: 'pointsPane' });
+                },
+                onEachFeature: (feature, layer) => {
+                    const p = feature.properties;
+                    let plotShapes = allShapesData.filter(s => s.propertyId === p.propertyId);
+                    let areaBreakdownHtml = "";
+                    
+                    if (plotShapes.length > 0) {
+                        let totalArea = 0; let areas = {"RCC": 0, "Shed Tin": 0, "Open Space": 0, "Kaccha": 0};
+                        plotShapes.forEach(s => { totalArea += s.area; if(areas[s.structureType] !== undefined) areas[s.structureType] += s.area; });
+                        areaBreakdownHtml = `
+                            <div class="area-breakdown">
+                                <div class="popup-row title"><b>Total Map Area:</b> <span>${totalArea.toFixed(2)} SqFt</span></div>
+                                ${areas["RCC"] > 0 ? `<div class="popup-row sub"><b>↳ RCC:</b> <span>${areas["RCC"].toFixed(2)} SqFt</span></div>` : ""}
+                                ${areas["Open Space"] > 0 ? `<div class="popup-row sub"><b>↳ Open Space:</b> <span>${areas["Open Space"].toFixed(2)} SqFt</span></div>` : ""}
+                                ${areas["Shed Tin"] > 0 ? `<div class="popup-row sub"><b>↳ Shed Tin:</b> <span>${areas["Shed Tin"].toFixed(2)} SqFt</span></div>` : ""}
+                                ${areas["Kaccha"] > 0 ? `<div class="popup-row sub"><b>↳ Kaccha:</b> <span>${areas["Kaccha"].toFixed(2)} SqFt</span></div>` : ""}
+                            </div>
+                        `;
+                    }
+
+                    const pString = encodeURIComponent(JSON.stringify(p));
+                    const docIcon = (ok) => ok ? '<i class="fas fa-check" style="color:#28a745;"></i>' : '<i class="fas fa-times" style="color:#cfd8dc;"></i>';
+                    const treesCt = propInt(p.numberOfTrees, 0);
+                    const distCt = propInt(p.totalDistribution, 0);
+                    const samOk = propInt(p.samarpanReceipt, 0) > 0 || propBool(p.samarpanReceipt);
+                    const hoverContent = `
+                        <div class="popup-card">
+                            <div class="popup-header"><span>Plot ID: ${p.propertyId}</span><span>${p.acquisitionStage || p.legalStatus || ''}</span></div>
+                            <div class="popup-body">
+                                <img src="${p.photoB64}" class="popup-img" onerror="this.style.display='none'">
+                                <div class="popup-row"><b>Owner:</b> <span>${p.ownerName}</span></div>
+                                <div class="popup-row"><b>Amt Paid:</b> <span>₹ ${p.moneyDistributed.toLocaleString('en-IN')}</span></div>
+                                <div class="popup-row"><b>Notice:</b> <span>${p.noticeSent}</span></div>
+                                <div class="popup-row"><b>Field Type:</b> <span>${p.structureType}</span></div>
+                                <div class="popup-row"><b>Field Area:</b> <span>${p.areaSqft} SqFt</span></div>
+                                <div class="popup-row"><b>Trees:</b> <span>${treesCt}</span></div>
+                                <div class="popup-row"><b>Total distribution:</b> <span>${distCt}</span></div>
+                                <div class="popup-row title" style="margin-top:8px;"><b>Documents &amp; survey</b></div>
+                                <div class="popup-row sub"><b>Samarpan:</b> <span>${docIcon(samOk)}</span></div>
+                                <div class="popup-row sub"><b>Field survey:</b> <span>${docIcon(propBool(p.fieldSurveyDone))}</span></div>
+                                <div class="popup-row sub"><b>Owner verified:</b> <span>${docIcon(propBool(p.ownerVerification))}</span></div>
+                                <div class="popup-row sub"><b>Aadhar:</b> <span>${docIcon(propBool(p.aadharCollected))}</span></div>
+                                <div class="popup-row sub"><b>PAN:</b> <span>${docIcon(propBool(p.panCollected))}</span></div>
+                                <div class="popup-row sub"><b>Bank:</b> <span>${docIcon(propBool(p.bankDetailsCollected))}</span></div>
+                                ${areaBreakdownHtml}
+                                <button onclick="triggerEditForm(${feature.geometry.coordinates[1]}, ${feature.geometry.coordinates[0]}, '${pString}')" class="btn-tool" style="width:100%; margin-top: 10px; background: #e07a5f;">
+                                    <i class="fas fa-edit"></i> Edit Survey
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                    layer.bindPopup(hoverContent, { offset: [0, -5], closeButton: true });
+                    layer.on('mouseover', function(e) { this.setStyle({ radius: 11, weight: 3 }); });
+                    layer.on('mouseout', function(e) { this.setStyle({ radius: 8, weight: 2 }); });
+                    layer.on('click', function() { map.flyTo(this.getLatLng(), 20, { animate: true, duration: 1.5 }); this.openPopup(); });
+                }
+            }).addTo(surveyLayer);
+        }
+
+        function updateAnalytics(features) {
+            let totalArea = 0; let totalMoney = 0; let illegalCount = 0;
+            let acquisitionStats = {};
+            ACQUISITION_PIPELINE_STAGES.forEach((s) => { acquisitionStats[s] = 0; });
+            let structStats = {};
+            let totalTrees = 0, totalDistSum = 0, samarpanSum = 0, ownerVer = 0, fieldDone = 0, aadharN = 0, panN = 0, bankN = 0;
+            features.forEach(f => {
+                const p = f.properties; totalArea += p.areaSqft || 0; totalMoney += p.moneyDistributed || 0;
+                const stageKey = normalizeAcquisitionStage(p);
+                acquisitionStats[stageKey]++;
+                if (stageKey === 'Dispute') illegalCount++;
+                const types = (p.structureType || '').split(', '); types.forEach(t => { if(t) structStats[t] = (structStats[t] || 0) + 1; });
+                totalTrees += propInt(p.numberOfTrees, 0);
+                totalDistSum += propInt(p.totalDistribution, 0);
+                samarpanSum += propInt(p.samarpanReceipt, 0);
+                if (propBool(p.ownerVerification)) ownerVer++;
+                if (propBool(p.fieldSurveyDone)) fieldDone++;
+                if (propBool(p.aadharCollected)) aadharN++;
+                if (propBool(p.panCollected)) panN++;
+                if (propBool(p.bankDetailsCollected)) bankN++;
+            });
+            document.getElementById('stat-count').innerText = features.length; document.getElementById('stat-area').innerText = totalArea.toLocaleString('en-IN') + " Sqft";
+            document.getElementById('stat-money').innerText = "₹ " + totalMoney.toLocaleString('en-IN'); document.getElementById('stat-illegal').innerText = illegalCount;
+            document.getElementById('stat-trees').innerText = totalTrees.toLocaleString('en-IN');
+            document.getElementById('stat-total-distribution').innerText = totalDistSum.toLocaleString('en-IN');
+            document.getElementById('stat-samarpan-sum').innerText = samarpanSum.toLocaleString('en-IN');
+            document.getElementById('stat-owner-verified').innerText = ownerVer.toLocaleString('en-IN');
+            document.getElementById('stat-field-survey-done').innerText = fieldDone.toLocaleString('en-IN');
+            document.getElementById('stat-aadhar-done').innerText = aadharN.toLocaleString('en-IN');
+            document.getElementById('stat-pan-done').innerText = panN.toLocaleString('en-IN');
+            document.getElementById('stat-bank-done').innerText = bankN.toLocaleString('en-IN');
+
+            let chartLabels = ACQUISITION_PIPELINE_STAGES.filter((s) => acquisitionStats[s] > 0);
+            if (chartLabels.length === 0 && features.length > 0) {
+                chartLabels = ACQUISITION_PIPELINE_STAGES.slice();
+            }
+            let chartData = chartLabels.map((s) => acquisitionStats[s] || 0);
+            let chartColors = chartLabels.map((s) => acquisitionStageFillColor(s));
+            if (chartLabels.length === 0) {
+                chartLabels = ['No surveys'];
+                chartData = [1];
+                chartColors = ['#7f8c8d'];
+            }
+
+            if (legalChart) legalChart.destroy();
+            legalChart = new Chart(document.getElementById('legalChart').getContext('2d'), {
+                type: 'doughnut', data: { labels: chartLabels, datasets: [{ data: chartData, backgroundColor: chartColors, borderWidth: 0 }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: {font: {size: 11, family: 'Montserrat'}} } } }
+            });
+
+            if (structureChart) structureChart.destroy();
+            structureChart = new Chart(document.getElementById('structureChart').getContext('2d'), {
+                type: 'bar', data: { labels: Object.keys(structStats), datasets: [{ label: 'Count', data: Object.values(structStats), backgroundColor: '#1a5c6b', borderRadius: 4 }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+            });
+        }
+
+        window.exportGeoJSON = function(geoJsonData, filename) {
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(geoJsonData));
+            const node = document.createElement('a'); node.setAttribute("href", dataStr); node.setAttribute("download", filename + ".geojson");
+            document.body.appendChild(node); node.click(); node.remove();
+        }
+
+        setInterval(async () => {
+            try {
+                const res = await fetch('/get-surveys'); 
+                if (!res.ok) throw new Error('Failed to fetch surveys');
+                const newData = await res.json();
+                if (newData.features.length > previousDataCount) { 
+                    previousDataCount = newData.features.length; 
+                    allGeoJsonData = newData; 
+                    populateDropdowns(); 
+                    filterAndRenderData(); 
+                }
+                
+                // Also check for new shapes more frequently
+                const shapesRes = await fetch('/get-shapes');
+                if (shapesRes.ok) {
+                    const newShapes = await shapesRes.json();
+                    if (newShapes.length !== allShapesData.length) {
+                        loadShapes(); // Reload shapes if count changed
+                    }
+                }
+            } catch (error) {
+                console.error("Auto-refresh error:", error);
+            }
+        }, 2000); // Reduced from 5000ms to 2000ms for faster updates
+
+        // NEW: Real-time shape update listener from index.html
+        window.addEventListener('storage', function(e) {
+            if (e.key === 'shapeUpdate') {
+                const updateData = JSON.parse(e.newValue);
+                console.log('Real-time shape update received:', updateData);
+                
+                // Refresh shapes immediately without full page reload
+                loadShapes().then(() => {
+                    // Show visual notification
+                    let sync = document.getElementById('syncStatus');
+                    sync.innerHTML = `<i class="fas fa-sync fa-spin" style="color:#f4a261;"></i> Live Update: ${updateData.shapes} Shape(s)`;
+                    setTimeout(() => {
+                        sync.innerHTML = `<i class="fas fa-circle" style="color:#28a745;"></i> System Online`;
+                    }, 2000);
+                });
+            }
+            
+            // NEW: Listen for data save events
+            if (e.key === 'dataSave') {
+                const saveData = JSON.parse(e.newValue);
+                console.log('Data save notification received:', saveData);
+                
+                // Force refresh both shapes and surveys when data is saved
+                Promise.all([
+                    loadShapes(),
+                    fetch('/get-surveys').then(res => res.json()).then(data => {
+                        allGeoJsonData = data;
+                        previousDataCount = data.features.length;
+                    })
+                ]).then(() => {
+                    populateDropdowns();
+                    filterAndRenderData();
+                    
+                    // Show success notification
+                    let sync = document.getElementById('syncStatus');
+                    sync.innerHTML = `<i class="fas fa-check-circle" style="color:#28a745;"></i> New Data: Plot ${saveData.propertyId} (${saveData.shapeCount} shapes)`;
+                    setTimeout(() => {
+                        sync.innerHTML = `<i class="fas fa-circle" style="color:#28a745;"></i> System Online`;
+                    }, 3000);
+                });
+            }
+            
+            // NEW: Listen for force refresh events
+            if (e.key === 'forceRefresh') {
+                const refreshData = JSON.parse(e.newValue);
+                console.log('Force refresh received:', refreshData);
+                
+                // Aggressive refresh - reload everything
+                Promise.all([
+                    loadShapes(),
+                    fetch('/get-surveys').then(res => res.json()).then(data => {
+                        allGeoJsonData = data;
+                        previousDataCount = data.features.length;
+                    })
+                ]).then(() => {
+                    populateDropdowns();
+                    filterAndRenderData();
+                    
+                    let sync = document.getElementById('syncStatus');
+                    sync.innerHTML = `<i class="fas fa-sync fa-spin" style="color:#f4a261;"></i> Force Refresh: Plot ${refreshData.propertyId}`;
+                    setTimeout(() => {
+                        sync.innerHTML = `<i class="fas fa-circle" style="color:#28a745;"></i> System Online`;
+                    }, 2000);
+                });
+            }
+        });
+
+        // NEW: Listen for custom dashboard refresh events
+        window.addEventListener('dashboardRefresh', function(e) {
+            console.log('Custom refresh event received:', e.detail);
+            
+            Promise.all([
+                loadShapes(),
+                fetch('/get-surveys').then(res => res.json()).then(data => {
+                    allGeoJsonData = data;
+                    previousDataCount = data.features.length;
+                })
+            ]).then(() => {
+                populateDropdowns();
+                filterAndRenderData();
+            });
+        });
+
+        // Also check for updates on page focus
+        window.addEventListener('focus', function() {
+            const shapeUpdate = localStorage.getItem('shapeUpdate');
+            const dataSave = localStorage.getItem('dataSave');
+            
+            if (shapeUpdate) {
+                const updateData = JSON.parse(shapeUpdate);
+                const timeDiff = Date.now() - updateData.timestamp;
+                if (timeDiff < 10000) { // Only if update was within last 10 seconds
+                    loadShapes();
+                }
+            }
+            
+            if (dataSave) {
+                const saveData = JSON.parse(dataSave);
+                const timeDiff = Date.now() - saveData.timestamp;
+                if (timeDiff < 15000) { // Only if save was within last 15 seconds
+                    // Full refresh on data save
+                    Promise.all([
+                        loadShapes(),
+                        fetch('/get-surveys').then(res => res.json()).then(data => {
+                            allGeoJsonData = data;
+                            previousDataCount = data.features.length;
+                        })
+                    ]).then(() => {
+                        populateDropdowns();
+                        filterAndRenderData();
+                    });
+                }
+            }
+        });
+
+        loadShapes().then(() => loadSurveys());
+
+        // NEW: Dashboard Survey Form Functions
+        let dashboardMap, dashboardDrawnItems, dashboardCapturedShapes = [];
+        let isDashboardMapInitialized = false;
+        let isDashboardSpoofing = false;
+
+        // Dashboard Map Modal Functions
+        function openDashboardMapModal() {
+            const checkboxes = document.querySelectorAll('input[name="dash_structure"]:checked');
+            if (checkboxes.length === 0) {
+                alert("Please select at least one Structure Classification in the form before drawing.");
+                return;
+            }
+
+            const activeStructSelect = document.getElementById('dash_modalActiveStructure');
+            activeStructSelect.innerHTML = '';
+            checkboxes.forEach(cb => {
+                activeStructSelect.innerHTML += `<option value="${cb.value}">Draw: ${cb.value}</option>`;
+            });
+
+            document.getElementById('dashboardMapModal').style.display = 'flex';
+            
+            if (!isDashboardMapInitialized) {
+                initializeDashboardMap();
+            }
+            setTimeout(() => { dashboardMap.invalidateSize(); }, 300);
+        }
+
+        function closeDashboardMapModal() {
+            document.getElementById('dashboardMapModal').style.display = 'none';
+            if (dashboardMap) dashboardMap.stopLocate();
+        }
+
+        function initializeDashboardMap() {
+            dashboardMap = L.map('dashboardMobileMap', { maxZoom: 25 }).setView([20.5937, 78.9629], 5);
+            L.tileLayer('http://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', { maxZoom: 25, maxNativeZoom: 20, subdomains: ['mt0', 'mt1', 'mt2', 'mt3'] }).addTo(dashboardMap);
+
+            dashboardDrawnItems = L.featureGroup().addTo(dashboardMap);
+            
+            const drawControl = new L.Control.Draw({
+                edit: { featureGroup: dashboardDrawnItems, remove: false },
+                draw: { marker: false, circle: false, circlemarker: false, polyline: false }
+            });
+            dashboardMap.addControl(drawControl);
+
+            // Load boundary data if available
+            fetch('/ortho_data/Boundary.json')
+                .then(res => {
+                    if (!res.ok) throw new Error('Boundary data not found');
+                    return res.json();
+                })
+                .then(geojsonData => {
+                    var maskedOrtho = L.TileLayer.boundaryCanvas('/ortho_data/tiles/{z}/{x}/{y}.png', {
+                        boundary: geojsonData, maxNativeZoom: 21, maxZoom: 25
+                    }).addTo(dashboardMap);
+                    
+                    var boundaryLayer = L.geoJSON(geojsonData);
+                    if(!document.getElementById('dash_spoofedLat').value) {
+                        dashboardMap.fitBounds(boundaryLayer.getBounds(), { padding: [20, 20], maxZoom: 18 });
+                    }
+                }).catch(err => {
+                    console.log("No Ortho data found.", err.message);
+                });
+
+            // Drawing events
+            dashboardMap.on(L.Draw.Event.CREATED, function (e) {
+                const layer = e.layer;
+                const activeType = document.getElementById('dash_modalActiveStructure').value;
+                const activeColor = shapeColors[activeType] || "#333";
+                
+                layer.setStyle({ color: activeColor, weight: 3, fillOpacity: 0.4 });
+                dashboardDrawnItems.addLayer(layer);
+
+                const areaSqm = L.GeometryUtil.geodesicArea(layer.getLatLngs()[0]);
+                const areaSqft = parseFloat((areaSqm * 10.7639).toFixed(2));
+                
+                dashboardCapturedShapes.push({
+                    layerId: L.stamp(layer),
+                    type: activeType,
+                    geojson: layer.toGeoJSON(),
+                    area: areaSqft
+                });
+
+                updateDashboardTotalArea();
+            });
+
+            dashboardMap.on(L.Draw.Event.EDITED, function (e) {
+                e.layers.eachLayer(function (layer) { 
+                    const id = L.stamp(layer);
+                    const index = dashboardCapturedShapes.findIndex(s => s.layerId === id);
+                    if(index > -1) {
+                        const areaSqm = L.GeometryUtil.geodesicArea(layer.getLatLngs()[0]);
+                        dashboardCapturedShapes[index].area = parseFloat((areaSqm * 10.7639).toFixed(2));
+                        dashboardCapturedShapes[index].geojson = layer.toGeoJSON();
+                    }
+                });
+                updateDashboardTotalArea();
+            });
+
+            dashboardMap.on(L.Draw.Event.DELETED, function (e) {
+                e.layers.eachLayer(function (layer) { 
+                    const id = L.stamp(layer);
+                    dashboardCapturedShapes = dashboardCapturedShapes.filter(s => s.layerId !== id);
+                });
+                updateDashboardTotalArea();
+            });
+
+            isDashboardMapInitialized = true;
+        }
+
+        function updateDashboardTotalArea() {
+            let total = 0;
+            dashboardCapturedShapes.forEach(s => total += s.area);
+            document.getElementById('dash_areaSqft').value = total > 0 ? total.toFixed(2) : "";
+            
+            const statusEl = document.getElementById('dash_drawStatus');
+            if(dashboardCapturedShapes.length > 0) {
+                statusEl.style.display = 'block';
+                statusEl.innerHTML = `<i class="fas fa-check-circle"></i> ${dashboardCapturedShapes.length} Boundary shape(s) captured!`;
+            } else {
+                statusEl.style.display = 'none';
+            }
+        }
+
+        function readDashFormInt(id, def) {
+            const el = document.getElementById(id);
+            if (!el) return def;
+            const n = parseInt(el.value, 10);
+            return Number.isFinite(n) ? n : def;
+        }
+        function readDashFormBool01(id) {
+            const el = document.getElementById(id);
+            if (!el) return false;
+            return el.value === '1';
+        }
+
+        // Dashboard Form Submit (optional modal in DOM)
+        const _dashboardSurveyFormEl = document.getElementById('dashboardSurveyForm');
+        if (_dashboardSurveyFormEl) _dashboardSurveyFormEl.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const checkboxes = document.querySelectorAll('input[name="dash_structure"]:checked');
+            let selectedStructures = [];
+            checkboxes.forEach((cb) => { selectedStructures.push(cb.value); });
+            
+            if (selectedStructures.length === 0) { alert("Please select at least one Structure Classification."); return; }
+            
+            const structureTypeFinal = selectedStructures.join(", ");
+            const propertyIdVal = document.getElementById('dash_propertyId').value;
+            const areaVal = parseFloat(document.getElementById('dash_areaSqft').value);
+
+            const submitBtn = document.getElementById('dash_submitBtn');
+            const originalText = submitBtn.innerHTML;
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading Data...';
+            submitBtn.disabled = true;
+
+            const photoFile = document.getElementById('dash_sitePhoto').files[0];
+            if (!photoFile) {
+                alert("Please select a site photograph.");
+                submitBtn.innerHTML = originalText;
+                submitBtn.disabled = false;
+                return;
+            }
+            const compressedPhoto = await compressImage(photoFile);
+
+            // Get location (use center of drawn shapes or default)
+            let lat = 20.5937, lng = 78.9629;
+            if (dashboardCapturedShapes.length > 0) {
+                // Calculate center of all shapes
+                let allLatlngs = [];
+                dashboardCapturedShapes.forEach(shape => {
+                    if (shape.geojson.geometry.type === 'Polygon') {
+                        shape.geojson.geometry.coordinates[0].forEach(coord => {
+                            allLatlngs.push([coord[1], coord[0]]);
+                        });
+                    }
+                });
+                if (allLatlngs.length > 0) {
+                    const center = L.latLngBounds(allLatlngs).getCenter();
+                    lat = center.lat;
+                    lng = center.lng;
+                }
+            }
+
+            const payload = {
+                propertyId: propertyIdVal, 
+                ownerName: document.getElementById('dash_ownerName').value,
+                structureType: structureTypeFinal, 
+                acquisitionStage: (() => { const el = document.getElementById('dash_acquisitionStage'); return el ? el.value : DEFAULT_ACQUISITION_STAGE; })(),
+                noticeSent: document.getElementById('dash_noticeSent').value, 
+                moneyDistributed: parseFloat(document.getElementById('dash_moneyDistributed').value),
+                areaSqft: areaVal, 
+                photoB64: compressedPhoto, 
+                state: "Dashboard", 
+                district: "Dashboard",
+                coordinates: { lat: lat, lng: lng },
+                numberOfTrees: readDashFormInt('dash_numberOfTrees', 0),
+                totalDistribution: readDashFormInt('dash_totalDistribution', 0),
+                samarpanReceipt: readDashFormBool01('dash_samarpanReceipt') ? 1 : 0,
+                fieldSurveyDone: readDashFormBool01('dash_fieldSurveyDone'),
+                ownerVerification: readDashFormBool01('dash_ownerVerification'),
+                aadharCollected: readDashFormBool01('dash_aadharCollected'),
+                panCollected: readDashFormBool01('dash_panCollected'),
+                bankDetailsCollected: readDashFormBool01('dash_bankDetailsCollected')
+            };
+
+            try {
+                await fetch('/save-survey', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                
+                for(let shape of dashboardCapturedShapes) {
+                    const shapePayload = {
+                        propertyId: propertyIdVal, structureType: shape.type, 
+                        geoJson: JSON.stringify(shape.geojson), calculatedArea: shape.area
+                    };
+                    await fetch('/save-shape', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(shapePayload) });
+                }
+
+                alert("SUCCESS: Survey Data & Boundaries saved to Command Center.");
+                const surveyModalEl = document.getElementById('surveyFormModal');
+                if (surveyModalEl) surveyModalEl.style.display = 'none';
+                closeDashboardMapModal();
+                
+                // Reset form
+                document.getElementById('dashboardSurveyForm').reset();
+                dashboardDrawnItems.clearLayers();
+                dashboardCapturedShapes = [];
+                document.getElementById('dash_drawStatus').style.display = 'none';
+                
+                // Refresh dashboard data
+                loadSurveys();
+                loadShapes();
+
+            } catch (error) { 
+                console.error("Network error:", error);
+                alert("NETWORK ERROR: Check server connection."); 
+            } finally { 
+                submitBtn.innerHTML = originalText; 
+                submitBtn.disabled = false; 
+            }
+        });
+
+    </script>
+</body>
+</html>

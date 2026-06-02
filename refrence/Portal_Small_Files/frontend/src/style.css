@@ -1,0 +1,678 @@
+/* Droid Survair — brand tokens, global typography, Font Awesome protection */
+:root {
+    --brand-teal: #0e3e49;
+    --brand-teal-hover: #125a68;
+    --brand-teal-active: #092a32;
+}
+
+*, *::before, *::after {
+    box-sizing: border-box;
+}
+
+html {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    font-family: 'Montserrat', sans-serif;
+}
+
+html, body, #root {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    max-height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+body {
+    margin: 0;
+    font-family: inherit;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    max-width: 100%;
+    justify-content: flex-start;
+    align-items: stretch;
+    background-color: #ffffff;
+}
+
+/* All UI text inherits Montserrat from html */
+button,
+input,
+textarea,
+select,
+optgroup,
+option {
+    font-family: inherit;
+}
+
+/* Font Awesome 6 Free (solid) — do not use global *::before/*::after (breaks Leaflet etc.) */
+i,
+i::before,
+i::after,
+.fa,
+.fa::before,
+.fa::after,
+.fas,
+.fas::before,
+.fas::after {
+    font-family: "Font Awesome 6 Free" !important;
+    font-weight: 900 !important;
+    font-style: normal !important;
+    font-variant: normal !important;
+    text-rendering: auto;
+    -webkit-font-smoothing: antialiased;
+}
+
+#root,
+.app-container {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    max-width: 100%;
+}
+
+/* Dashboard: fill viewport under header/toolbar; map edge-to-edge in flex column */
+.app-shell {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.dashboard-layout-root {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.header {
+    background-color: var(--brand-teal);
+    padding: 15px 30px; 
+    display: flex; 
+    justify-content: space-between; 
+    align-items: center; 
+    color: white; 
+    z-index: 1000; 
+}
+
+.header h2 { 
+    margin: 0; 
+    font-weight: 700; 
+    display: flex; 
+    align-items: center; 
+    gap: 10px; 
+}
+
+.sync-status {
+    font-size: 0.9em;
+}
+
+.toolbar { 
+    padding: 10px 30px; 
+    background: white; 
+    border-bottom: 1px solid #ddd; 
+    display: flex; 
+    justify-content: space-between; 
+    align-items: center; 
+    z-index: 999; 
+}
+
+.tool-group { 
+    display: flex; 
+    gap: 10px; 
+    align-items: center; 
+}
+
+.btn-tool {
+    background: var(--brand-teal);
+    color: white;
+    border: none;
+    padding: 8px 15px;
+    border-radius: 4px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.2s, filter 0.15s;
+}
+
+.btn-tool:hover:not(:disabled) {
+    background: var(--brand-teal-hover);
+}
+
+.btn-tool:active:not(:disabled) {
+    background: var(--brand-teal-active);
+}
+
+.btn-tool:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
+}
+
+select {
+    padding: 8px 12px;
+    border-radius: 5px;
+    border: 1px solid var(--brand-teal);
+    font-weight: 600;
+    outline: none;
+    cursor: pointer;
+    color: var(--brand-teal);
+}
+
+select:focus-visible {
+    outline: 2px solid var(--brand-teal);
+    outline-offset: 2px;
+}
+
+.main-container { 
+    display: flex; 
+    flex: 1;
+    flex-grow: 1;
+    min-height: 0;
+    overflow: hidden; 
+    position: relative;
+    margin: 0;
+    padding: 0;
+    gap: 0;
+}
+
+.map-view-root {
+    margin: 0;
+    padding: 0;
+}
+
+.map-view-root .leaflet-container {
+    margin: 0;
+    outline: none;
+    background: #1e2528;
+    width: 100% !important;
+    height: 100% !important;
+}
+
+#map { 
+    flex: 1;
+    flex-grow: 1; 
+    height: 100%; 
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    border: none;
+    box-sizing: border-box;
+}
+
+#map-placeholder {
+    flex-grow: 1;
+    height: 100%;
+    min-height: 320px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--brand-teal);
+    background: #eef3f2;
+    border-right: 1px solid #dce3e1;
+    font-weight: 600;
+}
+
+/* Floating Hover Cards */
+.leaflet-popup-content-wrapper { 
+    border-radius: 8px; 
+    padding: 0; 
+    overflow: hidden; 
+    border: 2px solid var(--brand-teal); 
+}
+
+.popup-card { 
+    width: 280px; 
+}
+
+.popup-header { 
+    background: var(--brand-teal); 
+    color: white; 
+    padding: 10px; 
+    font-weight: 700; 
+    font-size: 0.9em; 
+    display: flex; 
+    justify-content: space-between; 
+}
+
+.popup-body { 
+    padding: 12px; 
+    background: white; 
+}
+
+.popup-img { 
+    width: 100%; 
+    height: 140px; 
+    object-fit: cover; 
+    border-radius: 6px; 
+    margin-bottom: 8px; 
+    background: #eee;
+}
+
+.popup-row { 
+    display: flex; 
+    justify-content: space-between; 
+    margin-bottom: 5px; 
+    font-size: 0.8em; 
+    color: #333; 
+}
+
+.popup-row b { 
+    color: #666; 
+}
+
+.plot-label { 
+    background: rgba(255, 255, 255, 0.9); 
+    border: 1px solid #333; 
+    color: #333; 
+    padding: 4px 8px; 
+    border-radius: 4px; 
+    font-size: 11px; 
+    font-weight: 700; 
+    text-align: center; 
+    box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+}
+
+/* Forms and Breakdowns */
+.shape-form { 
+    padding: 15px; 
+    text-align: center; 
+    background: white; 
+    width: 220px; 
+}
+
+.shape-form h4 { 
+    margin: 0 0 10px; 
+    color: var(--brand-teal); 
+}
+
+.shape-form p { 
+    margin: 0 0 10px; 
+    font-size: 0.8em; 
+    color: #666; 
+}
+
+.shape-form input, .shape-form select { 
+    width: 100%; 
+    padding: 8px; 
+    margin-bottom: 10px; 
+    box-sizing: border-box; 
+    border: 1px solid #ccc; 
+    border-radius: 4px; 
+    font-family: inherit;
+}
+
+.shape-form button {
+    background: var(--brand-teal);
+    color: white;
+    border: none;
+    padding: 8px;
+    width: 100%;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: background-color 0.2s;
+}
+
+.shape-form button:hover:not(:disabled) {
+    background: var(--brand-teal-hover);
+}
+
+.shape-form button:active:not(:disabled) {
+    background: var(--brand-teal-active);
+}
+
+.shape-popup {
+    width: 200px; 
+    text-align: center;
+}
+
+.shape-popup h4 {
+    margin: 0 0 5px;
+}
+
+.shape-popup p {
+    margin: 0 0 10px; 
+    font-size: 0.8em; 
+    color: #666;
+}
+
+.area-breakdown {
+    border-top: 1px solid #ddd; 
+    padding-top: 8px; 
+    margin-top: 8px;
+}
+
+.area-breakdown .title {
+    font-size: 0.9em; 
+    font-weight: 700; 
+    color: var(--brand-teal);
+}
+
+.area-breakdown .sub {
+    font-size: 0.75em;
+}
+
+/* Side Analytics Panel */
+.analytics-panel { 
+    width: 380px; 
+    background: white; 
+    box-shadow: -2px 0 15px rgba(0,0,0,0.05); 
+    padding: 20px; 
+    overflow-y: auto; 
+    border-left: 2px solid var(--brand-teal); 
+}
+
+.kpi-grid { 
+    display: grid; 
+    grid-template-columns: 1fr 1fr; 
+    gap: 10px; 
+    margin-bottom: 20px; 
+}
+
+.summary-card { 
+    background: #f8fafc; 
+    border: 1px solid #e2e8f0; 
+    padding: 12px; 
+    border-radius: 6px; 
+    text-align: center; 
+}
+
+.summary-card p { 
+    margin: 0; 
+    font-size: 0.7em; 
+    color: #64748b; 
+    font-weight: 700; 
+    text-transform: uppercase; 
+}
+
+.summary-card h3 { 
+    margin: 5px 0 0 0; 
+    font-size: 1.3em; 
+    color: var(--brand-teal); 
+}
+
+.chart-container { 
+    position: relative; 
+    height: 200px; 
+    width: 100%; 
+    margin-bottom: 20px; 
+}
+
+.panel-title { 
+    font-weight: 700; 
+    color: var(--brand-teal); 
+    border-bottom: 2px solid #eee; 
+    padding-bottom: 5px; 
+    margin-bottom: 10px;
+}
+
+.analytics-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 10px;
+}
+
+.analytics-owner-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    text-decoration: none;
+    background: var(--brand-teal);
+    color: #fff;
+    font-size: 0.82rem;
+    padding: 7px 10px;
+    border-radius: 4px;
+    transition: background-color 0.2s;
+}
+
+.analytics-owner-btn:hover {
+    background: var(--brand-teal-hover);
+    color: #fff;
+}
+
+.analytics-owner-btn:active {
+    background: var(--brand-teal-active);
+}
+
+/* Owners Management page */
+.owners-page {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: #f4f7f8;
+}
+
+.owners-toolbar {
+    padding: 10px 20px;
+    border-bottom: 1px solid #d8e0e3;
+    background: #fff;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.owners-search {
+    min-width: 260px;
+    max-width: 420px;
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid #c5d1d6;
+    border-radius: 6px;
+    font-family: inherit;
+}
+
+.owners-table-wrap {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 12px 20px 18px;
+}
+
+.owners-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    border: 1px solid #dbe4e8;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.owners-table th,
+.owners-table td {
+    border-bottom: 1px solid #ecf1f4;
+    padding: 10px 12px;
+    text-align: left;
+    font-size: 0.88rem;
+}
+
+.owners-table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--brand-teal);
+    color: #fff;
+    font-weight: 700;
+}
+
+.owners-table tbody tr:nth-child(even) {
+    background: #f9fcfe;
+}
+
+.owners-edit-btn {
+    padding: 6px 10px;
+    font-size: 0.8rem;
+}
+
+.owners-placeholder {
+    background: #fff;
+    border: 1px dashed #cfdde2;
+    border-radius: 8px;
+    padding: 18px;
+    color: #4c5e67;
+    font-weight: 600;
+}
+
+.owners-error {
+    color: #b91c1c;
+}
+
+.owners-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 2300;
+    background: rgba(0,0,0,0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 14px;
+}
+
+.owners-modal-card {
+    width: min(920px, 96vw);
+    max-height: 92vh;
+    overflow: auto;
+    background: #fff;
+    border-radius: 10px;
+    padding: 16px;
+    box-shadow: 0 12px 30px rgba(0,0,0,0.3);
+}
+
+.owners-form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 12px;
+}
+
+.owners-form-grid label {
+    display: grid;
+    gap: 6px;
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: #334155;
+}
+
+.owners-form-grid input {
+    width: 100%;
+    padding: 9px 10px;
+    border: 1px solid #c9d4da;
+    border-radius: 6px;
+    font-family: inherit;
+}
+
+.owners-form-grid select {
+    width: 100%;
+    padding: 9px 10px;
+    border: 1px solid #c9d4da;
+    border-radius: 6px;
+    font-family: inherit;
+    color: #0f172a;
+    background: #fff;
+}
+
+.owners-modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.owners-mini-btn {
+    padding: 5px 8px;
+    font-size: 0.75rem;
+    line-height: 1.2;
+}
+
+.owners-remove-btn {
+    background: #dc2626 !important;
+}
+
+/* Responsive Design Improvements */
+@media (max-width: 1024px) {
+    .main-container {
+        flex-direction: column;
+    }
+    
+    .analytics-panel {
+        width: 100%;
+        height: 300px;
+        border-left: none;
+        border-top: 2px solid var(--brand-teal);
+    }
+    
+    .kpi-grid {
+        grid-template-columns: repeat(4, 1fr);
+        gap: 8px;
+    }
+}
+
+@media (max-width: 768px) {
+    .header {
+        padding: 10px 15px;
+        flex-direction: column;
+        gap: 10px;
+    }
+    
+    .header h2 {
+        font-size: 1.2em;
+    }
+    
+    .toolbar {
+        padding: 8px 15px;
+        flex-direction: column;
+        gap: 10px;
+    }
+    
+    .tool-group {
+        flex-wrap: wrap;
+        justify-content: center;
+    }
+    
+    .kpi-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    
+    .chart-container {
+        height: 150px;
+    }
+}
+
+@media (max-width: 480px) {
+    .header h2 {
+        font-size: 1em;
+    }
+    
+    .btn-tool {
+        padding: 6px 10px;
+        font-size: 0.8em;
+    }
+    
+    .select {
+        padding: 6px 8px;
+        font-size: 0.8em;
+    }
+    
+    .popup-card {
+        width: 250px;
+    }
+    
+    .analytics-panel {
+        height: 250px;
+        padding: 15px;
+    }
+    
+    .summary-card h3 {
+        font-size: 1.1em;
+    }
+}

@@ -1,5 +1,6 @@
 import 'leaflet/dist/leaflet.css'
 import './MapViewer.css'
+import './Digitization.css'
 
 import area from '@turf/area'
 import { polygon as turfPolygon } from '@turf/helpers'
@@ -13,6 +14,7 @@ import {
   useState,
   type FormEvent,
   type MutableRefObject,
+  type PointerEvent as ReactPointerEvent,
   type RefObject,
 } from 'react'
 import {
@@ -29,6 +31,13 @@ import {
   useMapEvents,
 } from 'react-leaflet'
 import { createIssue, listIssues, type SavedIssue } from '../../services/issuesService'
+import {
+  createSpatialFeature,
+  deleteSpatialFeature,
+  importSpatialLayer,
+  listSpatialLayers,
+  updateSpatialFeature,
+} from '../../services/spatialDataService'
 import { useWorkspaceContext } from '../../context/WorkspaceContext'
 import { useModal } from '../../context/ModalContext'
 import { API_BASE, toSameOriginBackendUrl } from '../../lib/apiBase'
@@ -53,6 +62,17 @@ import {
   getDefaultZoom,
   SATELLITE_FALLBACK_URL,
 } from './tileSources'
+import { DigitizationToolbar } from './DigitizationToolbar'
+import { SpatialAssignmentModal } from './SpatialAssignmentModal'
+import { SpatialFeatureLayer } from './SpatialFeatureLayer'
+import { useDigitizationDrawing } from './useDigitizationDrawing'
+import {
+  type DigitizationMode,
+  type GeoJsonFeature,
+  type SpatialFeature,
+  type SpatialLayer,
+  type StructureType,
+} from './spatialTypes'
 
 type MeasureMode = 'none' | 'distance' | 'area' | 'profile' | 'volume-area' | 'volume-circle'
 type ViewerLayer = {
@@ -119,7 +139,7 @@ const BASE_MAPS: BaseMapConfig[] = [
   },
 ]
 
-const ORTHO_RENDERER_VERSION = 'edge-padding-v4'
+const ORTHO_RENDERER_VERSION = 'edge-padding-v7'
 
 function getBaseMap(key: BaseMapKey): BaseMapConfig {
   return BASE_MAPS.find((map) => map.key === key) ?? BASE_MAPS[0]!
@@ -189,6 +209,42 @@ function applyTileClip(
     container.style.clipPath = clipValue
     ;(container.style as CSSStyleDeclaration & { webkitClipPath?: string }).webkitClipPath = clipValue
   }
+  repaint()
+  map.on('move zoom zoomend viewreset resize', repaint)
+  return () => {
+    map.off('move zoom zoomend viewreset resize', repaint)
+    container.style.clipPath = ''
+    ;(container.style as CSSStyleDeclaration & { webkitClipPath?: string }).webkitClipPath = ''
+  }
+}
+
+function applySwipeClip(
+  map: L.Map,
+  container: HTMLElement | null,
+  percent: number,
+  side: 'left' | 'right',
+): () => void {
+  if (!container) return () => {}
+
+  const clampedPercent = Math.max(5, Math.min(95, percent))
+  const repaint = () => {
+    const size = map.getSize()
+    const splitX = (size.x * clampedPercent) / 100
+    const topLeft = map.containerPointToLayerPoint([0, 0])
+    const topSplit = map.containerPointToLayerPoint([splitX, 0])
+    const bottomSplit = map.containerPointToLayerPoint([splitX, size.y])
+    const bottomLeft = map.containerPointToLayerPoint([0, size.y])
+    const topRight = map.containerPointToLayerPoint([size.x, 0])
+    const bottomRight = map.containerPointToLayerPoint([size.x, size.y])
+    const points =
+      side === 'left'
+        ? [topLeft, topSplit, bottomSplit, bottomLeft]
+        : [topSplit, topRight, bottomRight, bottomSplit]
+    const clipValue = `polygon(${points.map((p) => `${p.x}px ${p.y}px`).join(', ')})`
+    container.style.clipPath = clipValue
+    ;(container.style as CSSStyleDeclaration & { webkitClipPath?: string }).webkitClipPath = clipValue
+  }
+
   repaint()
   map.on('move zoom zoomend viewreset resize', repaint)
   return () => {
@@ -284,6 +340,41 @@ function IssueInteraction({
   return null
 }
 
+function DigitizationInteraction({
+  mode,
+  active,
+  onAddPoint,
+  onFinishDraft,
+}: {
+  mode: DigitizationMode
+  active: boolean
+  onAddPoint: (ll: LatLng) => void
+  onFinishDraft: () => void
+}) {
+  const map = useMap()
+
+  useEffect(() => {
+    if (active) map.doubleClickZoom.disable()
+    else map.doubleClickZoom.enable()
+    return () => {
+      map.doubleClickZoom.enable()
+    }
+  }, [active, map])
+
+  useMapEvents({
+    click(e) {
+      if (!active || mode === 'idle' || mode === 'edit') return
+      onAddPoint(e.latlng)
+    },
+    dblclick(e) {
+      if (!active || (mode !== 'polygon' && mode !== 'polyline')) return
+      e.originalEvent.preventDefault()
+      onFinishDraft()
+    },
+  })
+  return null
+}
+
 function isStaticXyzTileTemplate(url: string): boolean {
   return (
     (url.includes('/tiles/') || url.includes('/data/')) &&
@@ -309,6 +400,90 @@ function rasterSourceKeyFromTileUrl(url: string | null | undefined): string {
   } catch {
     return url.split('?')[0]?.replace(/\\/g, '/') || ''
   }
+}
+
+function normalizeRasterSourceKey(value: string | null | undefined): string {
+  return (value || '').replace(/\\/g, '/').trim().toLowerCase()
+}
+
+function parseWgs84Bounds(value: string | undefined): [number, number, number, number] | undefined {
+  if (!value) return undefined
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!Array.isArray(parsed) || parsed.length !== 4) return undefined
+    const bounds = parsed.map((item) => Number(item)) as [number, number, number, number]
+    if (!isLikelyWgs84Bounds(bounds)) return undefined
+    return bounds
+  } catch {
+    return undefined
+  }
+}
+
+function isLikelyWgs84Bounds(bounds: [number, number, number, number] | null | undefined): bounds is [number, number, number, number] {
+  if (!bounds) return false
+  const [west, south, east, north] = bounds
+  return (
+    [west, south, east, north].every(Number.isFinite) &&
+    west >= -180 &&
+    east <= 180 &&
+    south >= -90 &&
+    north <= 90 &&
+    east > west &&
+    north > south
+  )
+}
+
+function wgs84ToLeafletBounds(bounds: [number, number, number, number] | null | undefined): [[number, number], [number, number]] | null {
+  if (!isLikelyWgs84Bounds(bounds)) return null
+  const [west, south, east, north] = bounds
+  return [[south, west], [north, east]]
+}
+
+function leafletToWgs84Bounds(bounds: [[number, number], [number, number]] | null | undefined): [number, number, number, number] | null {
+  if (!bounds) return null
+  const [[south, west], [north, east]] = bounds
+  const wgsBounds: [number, number, number, number] = [west, south, east, north]
+  return isLikelyWgs84Bounds(wgsBounds) ? wgsBounds : null
+}
+
+function wgs84BoundsArea(bounds: [number, number, number, number]): number {
+  const [west, south, east, north] = bounds
+  return Math.max(0, east - west) * Math.max(0, north - south)
+}
+
+function intersectWgs84Bounds(
+  first: [number, number, number, number],
+  second: [number, number, number, number],
+): [number, number, number, number] | null {
+  const intersection: [number, number, number, number] = [
+    Math.max(first[0], second[0]),
+    Math.max(first[1], second[1]),
+    Math.min(first[2], second[2]),
+    Math.min(first[3], second[3]),
+  ]
+  return isLikelyWgs84Bounds(intersection) ? intersection : null
+}
+
+function getComparisonFocusBounds(
+  primaryBounds: [number, number, number, number] | null | undefined,
+  compareBounds: [number, number, number, number] | null | undefined,
+): [[number, number], [number, number]] | null {
+  const primary = isLikelyWgs84Bounds(primaryBounds) ? primaryBounds : null
+  const compare = isLikelyWgs84Bounds(compareBounds) ? compareBounds : null
+  if (primary && compare) {
+    const intersection = intersectWgs84Bounds(primary, compare)
+    const focus = intersection ?? (wgs84BoundsArea(primary) <= wgs84BoundsArea(compare) ? primary : compare)
+    return wgs84ToLeafletBounds(focus)
+  }
+  return wgs84ToLeafletBounds(compare ?? primary)
+}
+
+function stableHash(value: string): string {
+  let hash = 0
+  for (let index = 0; index < value.length; index += 1) {
+    hash = Math.imul(31, hash) + value.charCodeAt(index)
+  }
+  return Math.abs(hash).toString(36)
 }
 
 type StaticTileMeta = {
@@ -350,7 +525,7 @@ function buildTitilerTileUrl(layer: {
 }
 
 function dynamicCogNativeZoom(tileUrl: string): number {
-  if (tileUrl.includes('/api/ortho-cog/')) return 22
+  if (tileUrl.includes('/api/ortho-cog/')) return 30
   if (tileUrl.includes('/api/dji-terra/')) return 22
   if (tileUrl.includes('/api/titiler/')) return 22
   return 22
@@ -468,15 +643,18 @@ function MapController({
   projectId,
   selectedUrl,
   zoomTrigger,
+  disabled = false,
 }: {
   layers: ViewerLayer[]
   projectId?: string
   selectedUrl?: string | null
   zoomTrigger: number
+  disabled?: boolean
 }) {
   const map = useMap()
 
   useEffect(() => {
+    if (disabled) return
     if (!projectId) return
     const activeCog = layers.find((layer) => layer.projectId === projectId && layer.url === selectedUrl) ?? layers[0]
     if (!activeCog) return
@@ -492,7 +670,11 @@ function MapController({
     const fitNow = (bounds: FitBounds | null) => {
       if (!bounds || cancelled || didFit) return
       didFit = true
-      map.fitBounds(bounds, { padding: [24, 24] })
+      map.invalidateSize(false)
+      map.fitBounds(bounds, { padding: [24, 24], animate: false })
+      window.setTimeout(() => {
+        if (!cancelled) map.fitBounds(bounds, { padding: [24, 24], animate: false })
+      }, 80)
     }
     const wgs84Bounds = (bounds?: [number, number, number, number] | null): FitBounds | null => {
       if (!bounds) return null
@@ -516,7 +698,10 @@ function MapController({
         credentials: 'include',
       })
         .then((res) => res.json() as Promise<{ bounds?: [number, number, number, number] }>)
-        .then((data) => fitNow(wgs84Bounds(data?.bounds)))
+        .then((data) => {
+          const infoBounds = isLikelyWgs84Bounds(data?.bounds) ? data.bounds : null
+          fitNow(wgs84Bounds(infoBounds))
+        })
         .catch(() => {
           // Ignore auto-zoom failure and keep the map usable.
         })
@@ -582,7 +767,35 @@ function MapController({
     return () => {
       cancelled = true
     }
-  }, [layers, map, projectId, selectedUrl, zoomTrigger])
+  }, [disabled, layers, map, projectId, selectedUrl, zoomTrigger])
+
+  return null
+}
+
+function ActiveLayerBoundsController({
+  bounds,
+  triggerKey,
+}: {
+  bounds: [[number, number], [number, number]] | null
+  triggerKey: string
+}) {
+  const map = useMap()
+
+  useEffect(() => {
+    if (!bounds) return
+    let cancelled = false
+    const fit = () => {
+      if (cancelled) return
+      map.invalidateSize(false)
+      map.fitBounds(bounds, { padding: [24, 24], animate: false })
+    }
+    fit()
+    const timers = [100, 350, 900].map((delay) => window.setTimeout(fit, delay))
+    return () => {
+      cancelled = true
+      timers.forEach((timer) => window.clearTimeout(timer))
+    }
+  }, [bounds, map, triggerKey])
 
   return null
 }
@@ -604,9 +817,19 @@ interface MapPaneProps {
   cropFootprint?: LatLng[] | null
   cogBounds?: [[number, number], [number, number]] | null
   cogTileUrl: string | null
+  comparisonPrimaryClipPercent?: number | null
   baseMap: BaseMapConfig
   userLocation: LatLng | null
   sync?: SyncRefs & { isA: boolean }
+  spatialLayers: SpatialLayer[]
+  selectedSpatialFeatureId: string | null
+  digitizationMode: DigitizationMode
+  digitizationActive: boolean
+  draftPoints: LatLng[]
+  onDigitizationAddPoint: (ll: LatLng) => void
+  onDigitizationFinishDraft: () => void
+  onSpatialFeatureClick: (feature: SpatialFeature) => void
+  onSpatialGeometryChange: (feature: SpatialFeature, geojson: GeoJsonFeature) => void
 }
 
 function MapPane({
@@ -626,9 +849,19 @@ function MapPane({
   cropFootprint,
   cogBounds,
   cogTileUrl,
+  comparisonPrimaryClipPercent,
   baseMap,
   userLocation,
   sync,
+  spatialLayers,
+  selectedSpatialFeatureId,
+  digitizationMode,
+  digitizationActive,
+  draftPoints,
+  onDigitizationAddPoint,
+  onDigitizationFinishDraft,
+  onSpatialFeatureClick,
+  onSpatialGeometryChange,
 }: MapPaneProps) {
   return (
     <>
@@ -654,6 +887,7 @@ function MapPane({
           cropEnabled={cropEnabled}
           cropFootprint={cropFootprint}
           bounds={cogBounds ?? undefined}
+          comparisonPrimaryClipPercent={comparisonPrimaryClipPercent}
         />
       ) : null}
       {cropFootprint && cropFootprint.length >= 3 ? (
@@ -668,6 +902,50 @@ function MapPane({
           }}
         />
       ) : null}
+      <DigitizationInteraction
+        mode={digitizationMode}
+        active={digitizationActive}
+        onAddPoint={onDigitizationAddPoint}
+        onFinishDraft={onDigitizationFinishDraft}
+      />
+      <SpatialFeatureLayer
+        layers={spatialLayers}
+        selectedFeatureId={selectedSpatialFeatureId}
+        editMode={digitizationMode === 'edit'}
+        onFeatureClick={onSpatialFeatureClick}
+        onGeometryChange={onSpatialGeometryChange}
+      />
+      {draftPoints.length > 0 && digitizationMode === 'polyline' ? (
+        <Polyline
+          positions={draftPoints}
+          pathOptions={{ color: '#2dd4bf', weight: 3, dashArray: '6 4' }}
+        />
+      ) : null}
+      {draftPoints.length > 0 && digitizationMode === 'polygon' ? (
+        <Polygon
+          positions={draftPoints}
+          pathOptions={{
+            color: '#2dd4bf',
+            weight: 3,
+            fillColor: '#0e3e49',
+            fillOpacity: 0.22,
+            dashArray: '6 4',
+          }}
+        />
+      ) : null}
+      {draftPoints.map((point, index) => (
+        <CircleMarker
+          key={`digitization-draft-${index}-${point.lat.toFixed(6)}-${point.lng.toFixed(6)}`}
+          center={point}
+          radius={5}
+          pathOptions={{
+            color: '#ffffff',
+            weight: 2,
+            fillColor: '#2dd4bf',
+            fillOpacity: 1,
+          }}
+        />
+      ))}
       {measureActive ? (
         <>
           <MeasureInteraction
@@ -753,23 +1031,27 @@ function OrthomosaicTileLayerWithOptions({
   cropEnabled,
   cropFootprint,
   bounds,
+  comparisonPrimaryClipPercent,
 }: {
   tileUrl: string
   cropEnabled: boolean
   cropFootprint?: LatLng[] | null
   bounds?: [[number, number], [number, number]]
+  comparisonPrimaryClipPercent?: number | null
 }) {
   const map = useMap()
-  const paneName = 'orthomosaic-crop-pane'
+  const paneName = useMemo(() => `orthomosaic-crop-pane-${stableHash(tileUrl)}`, [tileUrl])
   const [nativeZoom, setNativeZoom] = useState(22)
   const [nativeMinZoom, setNativeMinZoom] = useState(0)
   const isDynamicCogLayer =
     tileUrl.includes('/api/titiler/') || tileUrl.includes('/api/dji-terra/') || tileUrl.includes('/api/ortho-cog/')
   const effectiveNativeZoom = isDynamicCogLayer ? dynamicCogNativeZoom(tileUrl) : nativeZoom
   const effectiveNativeMinZoom = isDynamicCogLayer ? 0 : nativeMinZoom
-  const effectiveMaxZoom = isDynamicCogLayer ? 22 : 30
-  const effectiveKeepBuffer = isDynamicCogLayer ? 1 : 6
-  const effectiveOpacity = isDynamicCogLayer ? 0.88 : 0.9
+  const effectiveMaxZoom = isDynamicCogLayer ? 30 : 30
+  const effectiveKeepBuffer = isDynamicCogLayer ? 4 : 6
+  const effectiveOpacity = isDynamicCogLayer ? 1 : 0.9
+  const boundsKey = bounds ? bounds.flat().map((value) => value.toFixed(7)).join(',') : 'unbounded'
+  const tileBounds = isDynamicCogLayer ? undefined : bounds
 
   useEffect(() => {
     let cancelled = false
@@ -798,25 +1080,69 @@ function OrthomosaicTileLayerWithOptions({
     }
   }, [isDynamicCogLayer, tileUrl])
 
-  useEffect(
-    () => applyTileClip(map, map.getPane(paneName) ?? null, cropEnabled ? cropFootprint ?? null : null),
-    [cropEnabled, cropFootprint, map],
-  )
+  useEffect(() => {
+    const pane = map.getPane(paneName) ?? null
+    if (comparisonPrimaryClipPercent != null) {
+      return applySwipeClip(map, pane, comparisonPrimaryClipPercent, 'left')
+    }
+    return applyTileClip(map, pane, cropEnabled ? cropFootprint ?? null : null)
+  }, [comparisonPrimaryClipPercent, cropEnabled, cropFootprint, map, paneName])
 
   return (
     <Pane name={paneName} style={{ zIndex: 220 }}>
       <TileLayer
-        key={`cog-${ORTHO_RENDERER_VERSION}-${tileUrl}-${cropEnabled ? 'crop' : 'full'}`}
+        key={`cog-${ORTHO_RENDERER_VERSION}-${tileUrl}-${boundsKey}-${cropEnabled ? 'crop' : 'full'}`}
         url={tileUrl}
         opacity={effectiveOpacity}
         maxZoom={effectiveMaxZoom}
         maxNativeZoom={effectiveNativeZoom}
         minNativeZoom={effectiveNativeMinZoom}
-        bounds={bounds}
+        bounds={tileBounds}
         noWrap
-        updateWhenIdle={isDynamicCogLayer}
-        updateWhenZooming={!isDynamicCogLayer}
+        updateWhenIdle={false}
+        updateWhenZooming
         keepBuffer={effectiveKeepBuffer}
+        detectRetina={false}
+        crossOrigin
+      />
+    </Pane>
+  )
+}
+
+function ComparisonSwipeLayer({
+  tileUrl,
+  percent,
+}: {
+  tileUrl: string
+  percent: number
+}) {
+  const map = useMap()
+  const paneName = useMemo(() => `comparison-swipe-pane-${stableHash(tileUrl)}`, [tileUrl])
+  const clampedPercent = Math.max(5, Math.min(95, percent))
+
+  useEffect(() => {
+    const pane = map.getPane(paneName)
+    if (pane) pane.style.pointerEvents = 'none'
+    const cleanup = applySwipeClip(map, pane ?? null, clampedPercent, 'right')
+    return () => {
+      cleanup()
+      if (pane) pane.style.pointerEvents = ''
+    }
+  }, [clampedPercent, map, paneName])
+
+  return (
+    <Pane name={paneName} style={{ zIndex: 260, pointerEvents: 'none' }}>
+      <TileLayer
+        key={`comparison-${ORTHO_RENDERER_VERSION}-${tileUrl}`}
+        url={tileUrl}
+        opacity={1}
+        maxZoom={30}
+        maxNativeZoom={dynamicCogNativeZoom(tileUrl)}
+        minNativeZoom={0}
+        noWrap
+        updateWhenIdle={false}
+        updateWhenZooming
+        keepBuffer={4}
         detectRetina={false}
         crossOrigin
       />
@@ -887,12 +1213,14 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const [cogTileUrl, setCogTileUrl] = useState<string | null>(null)
   const [zoomTrigger, setZoomTrigger] = useState(0)
   const [compareCogTileUrl, setCompareCogTileUrl] = useState<string | null>(null)
+  const [compareSliderPercent, setCompareSliderPercent] = useState(50)
   const [projectFiles, setProjectFiles] = useState<ProjectFile[]>([])
   const [projectLayersLoading, setProjectLayersLoading] = useState(false)
   const [cropMaskPoints, setCropMaskPoints] = useState<LatLng[] | null>(null)
   const [cropBusy, setCropBusy] = useState(false)
   const kmlInputRef = useRef<HTMLInputElement | null>(null)
   const [cogBounds, setCogBounds] = useState<[[number, number], [number, number]] | null>(null)
+  const [compareCogBounds, setCompareCogBounds] = useState<[[number, number], [number, number]] | null>(null)
   const [issueDraft, setIssueDraft] = useState<IssueDraft | null>(null)
   const [issueSubmitting, setIssueSubmitting] = useState(false)
   const [issueError, setIssueError] = useState<string | null>(null)
@@ -905,19 +1233,13 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const [volumeResult, setVolumeResult] = useState<DtmVolumeResponse | null>(null)
   const [analysisBusy, setAnalysisBusy] = useState(false)
   const [userLocation, setUserLocation] = useState<LatLng | null>(null)
+  const [spatialLayers, setSpatialLayers] = useState<SpatialLayer[]>([])
+  const [spatialBusy, setSpatialBusy] = useState(false)
+  const [selectedSpatialFeature, setSelectedSpatialFeature] = useState<SpatialFeature | null>(null)
   const profileChartRef = useRef<SVGSVGElement | null>(null)
+  const spatialImportInputRef = useRef<HTMLInputElement | null>(null)
+  const mapCanvasRef = useRef<HTMLDivElement | null>(null)
 
-  const syncLockRef = useRef(false)
-  const mapARef = useRef<L.Map | null>(null)
-  const mapBRef = useRef<L.Map | null>(null)
-  const syncRefs = useMemo(
-    () => ({
-      lockRef: syncLockRef,
-      mapARef,
-      mapBRef,
-    }),
-    [],
-  )
   const selectedBaseMap = useMemo(() => getBaseMap(baseMapKey), [baseMapKey])
 
   const distanceM = useMemo(
@@ -1043,12 +1365,203 @@ export function MapViewer({ projectId }: MapViewerProps) {
     )
   }, [modal])
 
+  const replaceSpatialFeatureInState = useCallback((feature: SpatialFeature) => {
+    setSpatialLayers((prev) =>
+      prev.map((layer) =>
+        layer.id === feature.layer_id
+          ? {
+              ...layer,
+              features: layer.features.map((item) => (item.id === feature.id ? feature : item)),
+              updated_at: feature.updated_at,
+            }
+          : layer,
+      ),
+    )
+    setSelectedSpatialFeature((prev) => (prev?.id === feature.id ? feature : prev))
+  }, [])
+
+  const appendSpatialFeatureToState = useCallback((feature: SpatialFeature) => {
+    setSpatialLayers((prev) => {
+      const hasLayer = prev.some((layer) => layer.id === feature.layer_id)
+      if (!hasLayer) {
+        return [
+          ...prev,
+          {
+            id: feature.layer_id,
+            project_id: feature.project_id,
+            name: 'Drawn Shapes',
+            source_type: feature.source_type,
+            created_at: feature.created_at,
+            updated_at: feature.updated_at,
+            features: [feature],
+          },
+        ]
+      }
+      return prev.map((layer) =>
+        layer.id === feature.layer_id
+          ? {
+              ...layer,
+              features: [...layer.features, feature],
+              updated_at: feature.updated_at,
+            }
+          : layer,
+      )
+    })
+  }, [])
+
+  const removeSpatialFeatureFromState = useCallback((featureId: string) => {
+    setSpatialLayers((prev) =>
+      prev.map((layer) => ({
+        ...layer,
+        features: layer.features.filter((feature) => feature.id !== featureId),
+      })),
+    )
+  }, [])
+
+  const handleDigitizationDraftComplete = useCallback(
+    async (geojson: GeoJsonFeature) => {
+      if (!projectId) {
+        await modal.alert('No project selected', 'Open a project before saving spatial data.')
+        return
+      }
+      setSpatialBusy(true)
+      try {
+        const feature = await createSpatialFeature(projectId, {
+          layer_name: 'Drawn Shapes',
+          geojson,
+          structure_type: 'Unassigned',
+          source_type: 'drawn',
+        })
+        appendSpatialFeatureToState(feature)
+        setSelectedSpatialFeature(feature)
+      } catch (error) {
+        await modal.alert('Spatial save failed', error instanceof Error ? error.message : 'Could not save shape.')
+      } finally {
+        setSpatialBusy(false)
+      }
+    },
+    [appendSpatialFeatureToState, modal, projectId],
+  )
+
+  const digitization = useDigitizationDrawing({
+    disabled: splitView,
+    onDraftComplete: handleDigitizationDraftComplete,
+  })
+
+  const handleDigitizationModeChange = useCallback(
+    (nextMode: DigitizationMode) => {
+      setMeasureMode('none')
+      setPoints([])
+      setAreaFrozen(false)
+      setIssueMode(false)
+      setIssueDraft(null)
+      setIssueError(null)
+      setElevationMode(false)
+      setSelectedSpatialFeature(null)
+      digitization.setMode(nextMode)
+    },
+    [digitization.setMode],
+  )
+
+  const handleSpatialImport = useCallback(
+    async (file: File) => {
+      if (!projectId) {
+        await modal.alert('No project selected', 'Open a project before importing spatial files.')
+        return
+      }
+      setSpatialBusy(true)
+      try {
+        const layer = await importSpatialLayer(projectId, file)
+        setSpatialLayers((prev) => [...prev.filter((item) => item.id !== layer.id), layer])
+        setSelectedSpatialFeature(layer.features[0] ?? null)
+        await modal.alert('Spatial import complete', `${layer.features.length} shape(s) imported from ${file.name}.`)
+      } catch (error) {
+        await modal.alert('Spatial import failed', error instanceof Error ? error.message : 'Could not import file.')
+      } finally {
+        setSpatialBusy(false)
+      }
+    },
+    [modal, projectId],
+  )
+
+  const handleSpatialAssignmentSave = useCallback(
+    async (payload: { plot_id: string; owner_name: string; structure_type: StructureType }) => {
+      if (!projectId || !selectedSpatialFeature) return
+      setSpatialBusy(true)
+      try {
+        const feature = await updateSpatialFeature(projectId, selectedSpatialFeature.id, payload)
+        replaceSpatialFeatureInState(feature)
+        setSelectedSpatialFeature(feature)
+      } catch (error) {
+        await modal.alert('Assignment save failed', error instanceof Error ? error.message : 'Could not save assignment.')
+      } finally {
+        setSpatialBusy(false)
+      }
+    },
+    [modal, projectId, replaceSpatialFeatureInState, selectedSpatialFeature],
+  )
+
+  const handleSpatialFeatureDelete = useCallback(
+    async (feature: SpatialFeature) => {
+      if (!projectId) return
+      const confirmed = await modal.confirm('Delete shape', 'This will permanently remove the selected spatial shape.')
+      if (!confirmed) return
+      setSpatialBusy(true)
+      try {
+        await deleteSpatialFeature(projectId, feature.id)
+        removeSpatialFeatureFromState(feature.id)
+        setSelectedSpatialFeature(null)
+      } catch (error) {
+        await modal.alert('Delete failed', error instanceof Error ? error.message : 'Could not delete shape.')
+      } finally {
+        setSpatialBusy(false)
+      }
+    },
+    [modal, projectId, removeSpatialFeatureFromState],
+  )
+
+  const handleSpatialGeometryChange = useCallback(
+    async (feature: SpatialFeature, geojson: GeoJsonFeature) => {
+      if (!projectId) return
+      setSpatialBusy(true)
+      try {
+        const updated = await updateSpatialFeature(projectId, feature.id, { geojson })
+        replaceSpatialFeatureInState(updated)
+      } catch (error) {
+        await modal.alert('Geometry save failed', error instanceof Error ? error.message : 'Could not save edited geometry.')
+      } finally {
+        setSpatialBusy(false)
+      }
+    },
+    [modal, projectId, replaceSpatialFeatureInState],
+  )
+
+  const handleSpatialFeatureClick = useCallback(
+    (feature: SpatialFeature) => {
+      setSelectedSpatialFeature(feature)
+    },
+    [],
+  )
+
   useEffect(() => {
     if (measureMode === 'none') {
       setPoints([])
       setAreaFrozen(false)
     }
   }, [measureMode])
+
+  useEffect(() => {
+    if (!splitView) return
+    digitization.cancelDigitization()
+    setMeasureMode('none')
+    setIssueMode(false)
+    setElevationMode(false)
+    setCropEnabled(false)
+    setCropMode('off')
+    clearAnalysisResults()
+    setPoints([])
+    setAreaFrozen(false)
+  }, [clearAnalysisResults, digitization.cancelDigitization, splitView])
 
   useEffect(() => {
     if (!projectId) {
@@ -1067,6 +1580,25 @@ export function MapViewer({ projectId }: MapViewerProps) {
       })
       .finally(() => {
         if (!cancelled) setProjectLayersLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [projectId])
+
+  useEffect(() => {
+    if (!projectId) {
+      setSpatialLayers([])
+      setSelectedSpatialFeature(null)
+      return
+    }
+    let cancelled = false
+    void listSpatialLayers(projectId)
+      .then((layers) => {
+        if (!cancelled) setSpatialLayers(layers)
+      })
+      .catch(() => {
+        if (!cancelled) setSpatialLayers([])
       })
     return () => {
       cancelled = true
@@ -1119,18 +1651,8 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const projectCogLayers = useMemo<ViewerLayer[]>(() => {
     const fromFiles = projectFiles
       .filter((file) => file.layer_url && file.status === 'Web-Ready' && file.type === 'cog')
-      .map((file) => {
-        const bounds = (() => {
-          if (!file.bounds_wgs84) return undefined
-          try {
-            const parsed = JSON.parse(file.bounds_wgs84) as unknown
-            if (!Array.isArray(parsed) || parsed.length !== 4) return undefined
-            const values = parsed.map((item) => Number(item))
-            return values.every(Number.isFinite) ? values as [number, number, number, number] : undefined
-          } catch {
-            return undefined
-          }
-        })()
+      .map<ViewerLayer>((file) => {
+        const bounds = parseWgs84Bounds(file.bounds_wgs84)
         const layerType = file.layer_type || (['dtm', 'dsm', 'ortho'].includes(String(file.dataset_type).toLowerCase())
           ? String(file.dataset_type).toUpperCase().replace('ORTHO', 'Ortho')
           : 'cog')
@@ -1156,6 +1678,17 @@ export function MapViewer({ projectId }: MapViewerProps) {
           url: buildTitilerTileUrl(baseLayer),
         }
       })
+    const fileLayerByDatasetId = new Map<string, ViewerLayer>()
+    fromFiles.forEach((layer) => {
+      if (layer.datasetId) fileLayerByDatasetId.set(layer.datasetId, layer)
+    })
+    const fileLayerBySource = new Map<string, ViewerLayer>()
+    fromFiles.forEach((layer) => {
+      ;[layer.cogPath, layer.cogRelPath, rasterSourceKeyFromTileUrl(layer.url)].forEach((key) => {
+        const normalized = normalizeRasterSourceKey(key)
+        if (normalized) fileLayerBySource.set(normalized, layer)
+      })
+    })
     const fromContext = activeLayers
       .filter((item) => (
         item.projectId === projectId &&
@@ -1180,9 +1713,25 @@ export function MapViewer({ projectId }: MapViewerProps) {
           month: item.month,
           cacheKey: item.datasetId || item.cogRelPath,
         }
-        return {
+        const sourceMatch =
+          fileLayerByDatasetId.get(String(item.datasetId || '')) ??
+          fileLayerBySource.get(normalizeRasterSourceKey(item.cogPath || item.rawPath)) ??
+          fileLayerBySource.get(normalizeRasterSourceKey(item.cogRelPath)) ??
+          fileLayerBySource.get(normalizeRasterSourceKey(rasterSourceKeyFromTileUrl(item.url)))
+        const enrichedLayer = {
           ...baseLayer,
-          url: buildTitilerTileUrl(baseLayer),
+          boundsWgs84: baseLayer.boundsWgs84 ?? sourceMatch?.boundsWgs84,
+          cogPath: baseLayer.cogPath || sourceMatch?.cogPath,
+          cogRelPath: baseLayer.cogRelPath || sourceMatch?.cogRelPath,
+          rescaleMin: baseLayer.rescaleMin ?? sourceMatch?.rescaleMin,
+          rescaleMax: baseLayer.rescaleMax ?? sourceMatch?.rescaleMax,
+          datasetId: baseLayer.datasetId || sourceMatch?.datasetId,
+          datasetType: baseLayer.datasetType || sourceMatch?.datasetType,
+          cacheKey: baseLayer.cacheKey || sourceMatch?.cacheKey,
+        }
+        return {
+          ...enrichedLayer,
+          url: buildTitilerTileUrl(enrichedLayer),
         }
       })
     const seen = new Set<string>()
@@ -1212,6 +1761,40 @@ export function MapViewer({ projectId }: MapViewerProps) {
           item.datasetId,
       ),
     [projectCogLayers],
+  )
+
+  const selectedPrimaryCogLayer = useMemo(
+    () =>
+      projectCogLayers.find((layer) => layer.url === cogTileUrl) ??
+      projectCogLayers.find((layer) => rasterSourceKeyFromTileUrl(layer.url) === rasterSourceKeyFromTileUrl(cogTileUrl)) ??
+      null,
+    [cogTileUrl, projectCogLayers],
+  )
+
+  const selectedCompareCogLayer = useMemo(
+    () =>
+      projectCogLayers.find((layer) => layer.url === compareCogTileUrl) ??
+      projectCogLayers.find((layer) => rasterSourceKeyFromTileUrl(layer.url) === rasterSourceKeyFromTileUrl(compareCogTileUrl)) ??
+      null,
+    [compareCogTileUrl, projectCogLayers],
+  )
+
+  const comparisonFitBounds = useMemo(() => {
+    if (!splitView) return null
+    return getComparisonFocusBounds(
+      selectedPrimaryCogLayer?.boundsWgs84 ?? leafletToWgs84Bounds(cogBounds),
+      selectedCompareCogLayer?.boundsWgs84 ?? leafletToWgs84Bounds(compareCogBounds),
+    )
+  }, [cogBounds, compareCogBounds, selectedCompareCogLayer, selectedPrimaryCogLayer, splitView])
+
+  const comparisonFitKey = useMemo(
+    () => [
+      'compare',
+      cogTileUrl ?? 'none',
+      compareCogTileUrl ?? 'none',
+      comparisonFitBounds?.flat().map((value) => value.toFixed(7)).join(',') ?? 'no-bounds',
+    ].join('|'),
+    [cogTileUrl, compareCogTileUrl, comparisonFitBounds],
   )
 
   useEffect(() => {
@@ -1406,9 +1989,37 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const selectPrimaryLayer = useCallback(
     (url: string | null) => {
       setCogTileUrl(url)
+      setCogBounds(null)
+      setCropMaskPoints(null)
+      setCropEnabled(false)
+      setZoomTrigger((prev) => prev + 1)
       clearAnalysisResults()
     },
     [clearAnalysisResults],
+  )
+
+  const updateCompareSliderFromClientX = useCallback((clientX: number) => {
+    const rect = mapCanvasRef.current?.getBoundingClientRect()
+    if (!rect || rect.width <= 0) return
+    const next = ((clientX - rect.left) / rect.width) * 100
+    setCompareSliderPercent(Math.max(5, Math.min(95, next)))
+  }, [])
+
+  const onCompareSliderPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>) => {
+      event.preventDefault()
+      updateCompareSliderFromClientX(event.clientX)
+      const onMove = (moveEvent: PointerEvent) => {
+        updateCompareSliderFromClientX(moveEvent.clientX)
+      }
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+      }
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+    },
+    [updateCompareSliderFromClientX],
   )
 
   useEffect(() => {
@@ -1416,6 +2027,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
       setCogTileUrl(null)
       setCompareCogTileUrl(null)
       setCogBounds(null)
+      setCompareCogBounds(null)
       return
     }
     if (cogTileUrl && !projectCogLayers.some((layer) => layer.url === cogTileUrl)) {
@@ -1443,6 +2055,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
       setCogTileUrl(null)
       setCompareCogTileUrl(null)
       setCogBounds(null)
+      setCompareCogBounds(null)
     }
   }, [cogTileUrl, compareCogTileUrl, projectCogLayers, projectId])
 
@@ -1451,15 +2064,21 @@ export function MapViewer({ projectId }: MapViewerProps) {
       setCogBounds(null)
       return
     }
-    const layer = projectCogLayers.find((item) => item.url === cogTileUrl)
+    setCogBounds(null)
+    const currentSource = rasterSourceKeyFromTileUrl(cogTileUrl)
+    const layer =
+      projectCogLayers.find((item) => item.url === cogTileUrl) ??
+      projectCogLayers.find((item) => currentSource && rasterSourceKeyFromTileUrl(item.url) === currentSource) ??
+      null
     if (layer?.boundsWgs84) {
       const [minX, minY, maxX, maxY] = layer.boundsWgs84
       setCogBounds([[minY, minX], [maxY, maxX]])
       return
     }
-    if (layer?.cogPath) {
+    const sourcePath = layer?.cogPath || currentSource
+    if (sourcePath) {
       let cancelled = false
-      void fetch(`${API_BASE}/api/titiler/info?url=${encodeURIComponent(layer.cogPath)}`, { credentials: 'include' })
+      void fetch(`${API_BASE}/api/ortho-cog/bounds?url=${encodeURIComponent(sourcePath)}`, { credentials: 'include' })
         .then((res) => res.ok ? res.json() as Promise<{ bounds?: [number, number, number, number] | null }> : null)
         .then((data) => {
           if (cancelled || !data?.bounds) return
@@ -1498,10 +2117,68 @@ export function MapViewer({ projectId }: MapViewerProps) {
   }, [cogTileUrl, projectCogLayers, projectId])
 
   useEffect(() => {
+    if (!projectId || !compareCogTileUrl) {
+      setCompareCogBounds(null)
+      return
+    }
+    setCompareCogBounds(null)
+    const currentSource = rasterSourceKeyFromTileUrl(compareCogTileUrl)
+    const layer =
+      projectCogLayers.find((item) => item.url === compareCogTileUrl) ??
+      projectCogLayers.find((item) => currentSource && rasterSourceKeyFromTileUrl(item.url) === currentSource) ??
+      null
+    if (layer?.boundsWgs84) {
+      const [minX, minY, maxX, maxY] = layer.boundsWgs84
+      setCompareCogBounds([[minY, minX], [maxY, maxX]])
+      return
+    }
+    const sourcePath = layer?.cogPath || currentSource
+    if (sourcePath) {
+      let cancelled = false
+      void fetch(`${API_BASE}/api/ortho-cog/bounds?url=${encodeURIComponent(sourcePath)}`, { credentials: 'include' })
+        .then((res) => res.ok ? res.json() as Promise<{ bounds?: [number, number, number, number] | null }> : null)
+        .then((data) => {
+          if (cancelled || !data?.bounds) return
+          const [minX, minY, maxX, maxY] = data.bounds
+          setCompareCogBounds([[minY, minX], [maxY, maxX]])
+        })
+        .catch(() => {
+          if (!cancelled) setCompareCogBounds(null)
+        })
+      return () => {
+        cancelled = true
+      }
+    }
+    const datasetName = layer?.name?.replace(/\.tiff?$/i, '')
+    if (!datasetName) {
+      setCompareCogBounds(null)
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      try {
+        const boundsUrl = `${API_BASE}/api/datasets/${encodeURIComponent(projectId)}/${encodeURIComponent(datasetName)}/bounds`
+        const res = await fetch(boundsUrl, { credentials: 'include' })
+        if (!res.ok) return
+        const data = (await res.json()) as { bounds?: [number, number, number, number] | null }
+        if (cancelled || !data?.bounds) return
+        const [minX, minY, maxX, maxY] = data.bounds
+        setCompareCogBounds([[minY, minX], [maxY, maxX]])
+      } catch {
+        if (!cancelled) setCompareCogBounds(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [compareCogTileUrl, projectCogLayers, projectId])
+
+  useEffect(() => {
     if (!projectId || !cogTileUrl) {
       setCropMaskPoints(null)
       return
     }
+    setCropMaskPoints(null)
     const tileFolder = tileFolderFromTemplate(cogTileUrl)
     if (!tileFolder) {
       setCropMaskPoints(null)
@@ -1529,6 +2206,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
   }, [cogTileUrl, projectId])
 
   const activeCogLayers = projectCogLayers
+  const digitizationToolActive = digitization.mode !== 'idle'
 
   return (
     <div className="mv-root">
@@ -1558,10 +2236,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
                   key={layer.id}
                   type="button"
                   className={layer.url === cogTileUrl ? 'mv-tool mv-tool--active' : 'mv-tool'}
-                  onClick={() => {
-                    selectPrimaryLayer(layer.url)
-                    setZoomTrigger((prev) => prev + 1)
-                  }}
+                  onClick={() => selectPrimaryLayer(layer.url)}
                   title={`${layer.datasetType?.toUpperCase() || 'LAYER'}${layer.month ? ` · ${layer.month}` : ''}`}
                 >
                   <span className="mv-layer-type">{layer.datasetType || 'layer'}</span>
@@ -1584,7 +2259,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
                 ? 'mv-tool mv-tool--active'
                 : 'mv-tool'
             }
-            disabled={splitView}
+            disabled={splitView || digitizationToolActive}
             onClick={() => setTool('distance')}
             title="Click the map to add vertices; total length updates live."
           >
@@ -1598,7 +2273,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
                 ? 'mv-tool mv-tool--active'
                 : 'mv-tool'
             }
-            disabled={splitView}
+            disabled={splitView || digitizationToolActive}
             onClick={() => setTool('area')}
             title="Click vertices; double-click to finish polygon."
           >
@@ -1608,7 +2283,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
           <button
             type="button"
             className={elevationMode && !splitView ? 'mv-tool mv-tool--active' : 'mv-tool'}
-            disabled={splitView || !activeAnalysisLayer}
+            disabled={splitView || digitizationToolActive || !activeAnalysisLayer}
             onClick={toggleElevationMode}
             title="Click DTM/DSM to read elevation."
           >
@@ -1618,7 +2293,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
           <button
             type="button"
             className={measureMode === 'profile' && !splitView ? 'mv-tool mv-tool--active' : 'mv-tool'}
-            disabled={splitView || !activeAnalysisLayer}
+            disabled={splitView || digitizationToolActive || !activeAnalysisLayer}
             onClick={() => setTool('profile')}
             title="Draw a line on DTM/DSM to generate elevation profile."
           >
@@ -1628,7 +2303,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
           <button
             type="button"
             className="mv-tool"
-            disabled={splitView || !activeAnalysisLayer || analysisBusy}
+            disabled={splitView || digitizationToolActive || !activeAnalysisLayer || analysisBusy}
             onClick={() => void runVolume('overall')}
             title="Calculate total loaded DTM/DSM volume above minimum elevation."
           >
@@ -1638,7 +2313,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
           <button
             type="button"
             className={measureMode === 'volume-area' && !splitView ? 'mv-tool mv-tool--active' : 'mv-tool'}
-            disabled={splitView || !activeAnalysisLayer}
+            disabled={splitView || digitizationToolActive || !activeAnalysisLayer}
             onClick={() => setTool('volume-area')}
             title="Draw polygon area for DTM/DSM volume."
           >
@@ -1648,7 +2323,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
           <button
             type="button"
             className={measureMode === 'volume-circle' && !splitView ? 'mv-tool mv-tool--active' : 'mv-tool'}
-            disabled={splitView || !activeAnalysisLayer}
+            disabled={splitView || digitizationToolActive || !activeAnalysisLayer}
             onClick={() => setTool('volume-circle')}
             title="Click center and edge to calculate circular DTM/DSM volume."
           >
@@ -1672,13 +2347,24 @@ export function MapViewer({ projectId }: MapViewerProps) {
           <button
             type="button"
             className={issueMode && !splitView ? 'mv-tool mv-tool--active' : 'mv-tool'}
-            disabled={splitView}
+            disabled={splitView || digitizationToolActive}
             onClick={toggleIssueMode}
             title="Click map to place an issue marker and submit details."
           >
             <i className="fa-solid fa-location-dot" aria-hidden />
             Report Issue
           </button>
+          <DigitizationToolbar
+            mode={digitization.mode}
+            disabled={splitView}
+            busy={spatialBusy}
+            canFinishDraft={digitization.canFinishDraft}
+            importInputRef={spatialImportInputRef}
+            onModeChange={handleDigitizationModeChange}
+            onFinishDraft={digitization.finishDraft}
+            onClearDraft={digitization.clearDraft}
+            onImportFile={(file) => void handleSpatialImport(file)}
+          />
           <button
             type="button"
             className="mv-tool"
@@ -1700,10 +2386,10 @@ export function MapViewer({ projectId }: MapViewerProps) {
               setIssueDraft(null)
               setIssueError(null)
             }}
-            title="Side-by-side comparison (views stay in sync)."
+            title="Swipe comparison between selected project layers."
           >
-            <i className="fa-solid fa-columns" aria-hidden />
-            Split view
+            <i className="fa-solid fa-code-compare" aria-hidden />
+            Compare Slider
           </button>
           <button
             type="button"
@@ -1935,37 +2621,60 @@ export function MapViewer({ projectId }: MapViewerProps) {
         </div>
       ) : null}
 
-      <div className={splitView ? 'mv-maps mv-maps--split' : 'mv-maps'}>
+      <div className={splitView ? 'mv-maps mv-maps--compare' : 'mv-maps'}>
         <div className="mv-map-wrap">
           {splitView ? (
-            <div className="mv-compare-head">
-              <span className="mv-map-label">Primary Layer</span>
-              <select
-                className="mv-select"
-                value={cogTileUrl ?? ''}
-                onChange={(e) => selectPrimaryLayer(e.target.value || null)}
-                aria-label="Primary layer"
-              >
-                <option value="">No overlay selected</option>
-                {activeCogLayers.map((layer) => (
-                  <option key={layer.id} value={layer.url}>
-                    {layer.datasetType ? `${layer.datasetType.toUpperCase()} - ` : ''}{layer.name}
-                  </option>
-                ))}
-              </select>
+            <div className="mv-compare-head mv-compare-head--swipe">
+              <label className="mv-compare-control">
+                <span>Primary</span>
+                <select
+                  className="mv-select"
+                  value={cogTileUrl ?? ''}
+                  onChange={(e) => selectPrimaryLayer(e.target.value || null)}
+                  aria-label="Primary layer"
+                >
+                  <option value="">No overlay selected</option>
+                  {activeCogLayers.map((layer) => (
+                    <option key={layer.id} value={layer.url}>
+                      {layer.datasetType ? `${layer.datasetType.toUpperCase()} - ` : ''}{layer.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="mv-compare-control">
+                <span>Compare</span>
+                <select
+                  className="mv-select"
+                  value={compareCogTileUrl ?? ''}
+                  onChange={(e) => setCompareCogTileUrl(e.target.value || null)}
+                  aria-label="Comparison layer"
+                >
+                  <option value="">No overlay selected</option>
+                  {activeCogLayers.map((layer) => (
+                    <option key={layer.id} value={layer.url}>
+                      {layer.datasetType ? `${layer.datasetType.toUpperCase()} - ` : ''}{layer.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
           ) : null}
-          <div className="mv-map-canvas">
+          <div className="mv-map-canvas" ref={mapCanvasRef}>
             <MapContainer {...mapProps} style={{ height: '100%', width: '100%' }}>
               <MapController
                 layers={activeCogLayers}
                 projectId={projectId}
                 selectedUrl={cogTileUrl}
                 zoomTrigger={zoomTrigger}
+                disabled={splitView}
+              />
+              <ActiveLayerBoundsController
+                bounds={splitView ? comparisonFitBounds : cogBounds}
+                triggerKey={splitView ? comparisonFitKey : `${cogTileUrl || 'none'}-${zoomTrigger}`}
               />
               <MapPane
                 measureMode={measureMode}
-                measureActive={measureActive}
+                measureActive={measureActive && !digitizationToolActive}
                 measurePoints={points}
                 circleRadiusM={circleRadiusM}
                 areaFrozen={areaFrozen}
@@ -1976,20 +2685,73 @@ export function MapViewer({ projectId }: MapViewerProps) {
                 elevationMode={elevationMode && !splitView}
                 onElevationPick={onElevationPick}
                 issues={issues}
-                cropEnabled={cropEnabled}
-                cropFootprint={cropMaskPoints}
+                cropEnabled={cropEnabled && !splitView}
+                cropFootprint={splitView ? null : cropMaskPoints}
                 cogBounds={cogBounds}
                 cogTileUrl={cogTileUrl}
+                comparisonPrimaryClipPercent={splitView ? compareSliderPercent : null}
                 baseMap={selectedBaseMap}
                 userLocation={userLocation}
-                sync={splitView ? { ...syncRefs, isA: true } : undefined}
+                spatialLayers={spatialLayers}
+                selectedSpatialFeatureId={selectedSpatialFeature?.id ?? null}
+                digitizationMode={digitization.mode}
+                digitizationActive={!splitView && (digitization.mode === 'polygon' || digitization.mode === 'polyline' || digitization.mode === 'marker')}
+                draftPoints={digitization.draftPoints}
+                onDigitizationAddPoint={digitization.addDraftPoint}
+                onDigitizationFinishDraft={digitization.finishDraft}
+                onSpatialFeatureClick={handleSpatialFeatureClick}
+                onSpatialGeometryChange={(feature, geojson) => void handleSpatialGeometryChange(feature, geojson)}
               />
+              {splitView && compareCogTileUrl ? (
+                <ComparisonSwipeLayer
+                  tileUrl={compareCogTileUrl}
+                  percent={compareSliderPercent}
+                />
+              ) : null}
             </MapContainer>
+            {splitView ? (
+              <div className="mv-swipe-overlay" aria-hidden={false}>
+                <span className="mv-swipe-label mv-swipe-label--primary">Primary</span>
+                <span className="mv-swipe-label mv-swipe-label--compare">Compare</span>
+                <button
+                  type="button"
+                  className="mv-swipe-handle"
+                  style={{ left: `${compareSliderPercent}%` }}
+                  onPointerDown={onCompareSliderPointerDown}
+                  aria-label="Drag to compare selected layers"
+                >
+                  <span aria-hidden />
+                </button>
+                <input
+                  className="mv-swipe-range"
+                  type="range"
+                  min="5"
+                  max="95"
+                  value={Math.round(compareSliderPercent)}
+                  onChange={(event) => setCompareSliderPercent(Number(event.target.value))}
+                  aria-label="Comparison reveal percentage"
+                />
+              </div>
+            ) : null}
+            {digitization.isDrawing && !splitView ? (
+              <div className="digitization-hint" aria-live="polite">
+                {digitization.mode === 'marker'
+                  ? 'Click map to place marker.'
+                  : 'Click map to add vertices. Double-click or Finish to save.'}
+              </div>
+            ) : null}
             {issueMode && !splitView ? (
               <div className="mv-issue-hint" aria-live="polite">
                 Click on the map to place an issue pin.
               </div>
             ) : null}
+            <SpatialAssignmentModal
+              feature={digitization.mode === 'edit' ? null : selectedSpatialFeature}
+              saving={spatialBusy}
+              onClose={() => setSelectedSpatialFeature(null)}
+              onSave={(payload) => void handleSpatialAssignmentSave(payload)}
+              onDelete={(feature) => void handleSpatialFeatureDelete(feature)}
+            />
             {issueDraft ? (
               <div className="mv-issue-modal" role="dialog" aria-modal="true">
                 <form className="mv-issue-form" onSubmit={onIssueSubmit}>
@@ -2062,52 +2824,6 @@ export function MapViewer({ projectId }: MapViewerProps) {
             ) : null}
           </div>
         </div>
-
-        {splitView ? (
-          <div className="mv-map-wrap mv-map-wrap--compare">
-            <div className="mv-compare-head">
-              <span className="mv-map-label">Compare Layer</span>
-              <select
-                className="mv-select"
-                value={compareCogTileUrl ?? ''}
-                onChange={(e) => setCompareCogTileUrl(e.target.value || null)}
-                aria-label="Comparison base layer"
-              >
-                <option value="">No overlay selected</option>
-                {activeCogLayers.map((layer) => (
-                  <option key={layer.id} value={layer.url}>
-                    {layer.datasetType ? `${layer.datasetType.toUpperCase()} - ` : ''}{layer.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="mv-map-canvas">
-              <MapContainer {...mapProps} style={{ height: '100%', width: '100%' }}>
-                <MapPane
-                  measureMode="none"
-                  measureActive={false}
-                  measurePoints={[]}
-                  circleRadiusM={0}
-                  areaFrozen={false}
-                  onMeasureAdd={() => {}}
-                  onMeasureCloseRing={() => {}}
-                  issueMode={false}
-                  onIssuePick={() => {}}
-                  elevationMode={false}
-                  onElevationPick={() => {}}
-                  issues={issues}
-                  cropEnabled={false}
-                  cropFootprint={null}
-                  cogBounds={undefined}
-                  cogTileUrl={compareCogTileUrl}
-                  baseMap={selectedBaseMap}
-                  userLocation={userLocation}
-                  sync={{ ...syncRefs, isA: false }}
-                />
-              </MapContainer>
-            </div>
-          </div>
-        ) : null}
       </div>
     </div>
   )

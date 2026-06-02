@@ -126,6 +126,62 @@ def ensure_tables() -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS spatial_layers (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                owner_user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(owner_user_id) REFERENCES users(id),
+                FOREIGN KEY(project_id) REFERENCES projects(id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS spatial_features (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                layer_id TEXT NOT NULL,
+                owner_user_id INTEGER NOT NULL,
+                geometry_type TEXT NOT NULL,
+                geojson TEXT NOT NULL,
+                plot_id TEXT NOT NULL DEFAULT '',
+                owner_name TEXT NOT NULL DEFAULT '',
+                structure_type TEXT NOT NULL DEFAULT 'Unassigned',
+                fill_color TEXT NOT NULL DEFAULT '#f59e0b',
+                stroke_color TEXT NOT NULL DEFAULT '#f59e0b',
+                source_type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(owner_user_id) REFERENCES users(id),
+                FOREIGN KEY(project_id) REFERENCES projects(id),
+                FOREIGN KEY(layer_id) REFERENCES spatial_layers(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_spatial_layers_project
+            ON spatial_layers(project_id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_spatial_features_project
+            ON spatial_features(project_id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_spatial_features_layer
+            ON spatial_features(layer_id)
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS camera_views (
                 id TEXT PRIMARY KEY,
                 project_id TEXT NOT NULL,
