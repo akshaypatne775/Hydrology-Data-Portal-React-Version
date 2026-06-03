@@ -78,3 +78,130 @@ Future note:
 - For any future Ortho/COG issue, first check bounds_wgs84, source_crs, detected_epsg, tile URL renderer, and no-data transparency.
 - If a TIFF has missing/corrupt CRS, it must be assigned or repaired before reliable map placement is possible.
 ===============================================================================
+
+
+===============================================================================
+Date: 2026-06-02
+Area: Admin / Auth / Sidebar Visibility
+Issue:
+- Admin needed clearer user Data Catalog visibility state and a separate way to hide client sidebar tabs.
+- Data Catalog on/off was not visually obvious enough for admins.
+
+Root cause:
+- User records only stored can_access_catalog and the admin table had no per-user sidebar tab preference.
+- The Dashboard sidebar did not read any hidden-tab list from the logged-in user.
+
+Fix:
+- Added users.hidden_tabs as a JSON text column.
+- Added admin API to save hidden client tabs.
+- Added hidden_tabs to auth/me and admin activity responses.
+- Added a Hidden Tabs dropdown in Admin Control for Viewer (2D), Viewer (3D), Compare, and Data Downloads.
+- Kept Data Catalog out of the hidden-tabs dropdown because it has its own existing control.
+- Made Data Catalog button green when visible/on and red when hidden/off.
+- Dashboard sidebar and dashboard module cards now hide blocked tabs for non-admin users.
+
+Files touched:
+- backend/app/core/database.py
+- backend/app/main.py
+- frontend/src/services/adminService.ts
+- frontend/src/services/authService.ts
+- frontend/src/components/Dashboard.tsx
+- frontend/src/components/Admin/AdminDashboard.tsx
+- frontend/src/components/Admin/AdminDashboard.css
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Backend compile passed: python -m compileall backend/app
+- Frontend build passed: cmd /c npm run build
+
+Future note:
+- Data Catalog access and hidden sidebar tabs are intentionally separate controls.
+- Hidden tab IDs are: map, globe, compare, downloads.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-02
+Area: Dashboard / Auth / Admin Visibility
+Issue:
+- Login showed Request failed (500) after adding hidden tab controls.
+- Dashboard dataset metric showed duplicate file-derived counts instead of actual project dataset count.
+- Client Data Hub did not visually show when backend processing was active.
+- Dashboard had no dedicated 3D Workspace card.
+
+Root cause:
+- Running databases could miss the new users.hidden_tabs column until schema migration/restart completed.
+- Dashboard metric counted project file rows, which can include raw and processed entries for the same dataset.
+- Processing jobs were fetched once and had no active UI state.
+- Dashboard modules only had a 2D viewer entry.
+
+Fix:
+- Auth login/auth-me now call ensure_tables before reading user visibility columns.
+- Migrated both live and dev DB schemas locally.
+- Dataset metric now counts unique non-report datasets.
+- Dashboard polls project jobs/files and marks Client Data Hub active when jobs are processing.
+- Gear icon rotates while active processing exists.
+- Added 3D Workspace Viewer dashboard card linked to the 3D viewer.
+- Hidden admin tabs continue to hide matching dashboard module cards.
+
+Files touched:
+- backend/app/main.py
+- frontend/src/services/datasetService.ts
+- frontend/src/components/Dashboard.tsx
+- frontend/src/components/Dashboard.css
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Backend compile passed: python -m compileall backend/app
+- Frontend build passed: cmd /c npm run build
+- Live and dev DB schema migration commands completed.
+
+Future note:
+- For dashboard count mismatch, check whether the UI is counting raw file rows or unique dataset IDs.
+- For login 500 after schema changes, run ensure_tables/migration for both live and dev DB worlds.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-02
+Area: DevOps / Auth / Live-Dev Isolation
+Issue:
+- Dev frontend on port 5173 showed Vite proxy ECONNREFUSED for 127.0.0.1:8001 when the dev backend was not running.
+- /api/auth/me returned 500 after hidden_tabs was added.
+- Live portal could show dev updates because Live preview served frontend\dist and Live backend started directly from backend\ source.
+
+Root cause:
+- FastAPI response annotation for auth/me did not allow hidden_tabs list values.
+- Live and dev had separate ports/databases, but not fully separate deployed frontend/backend artifacts.
+
+Fix:
+- Widened auth/me and admin activity response types to allow list/object values.
+- Confirmed dev backend 8001 is listening and /api/version responds.
+- Confirmed /api/auth/me returns 401 without cookie instead of 500.
+- Added VITE_BUILD_OUT_DIR support.
+- Live frontend now serves frontend\dist_live.
+- Live backend now runs from Droid_Environment_Manager\Live_Backend_Release\backend.
+- 2_Start_Live_Portal.bat starts existing deployed artifacts and only creates them once if missing.
+- 3_Nightly_Auto_Deploy.bat refreshes dist_live and Live_Backend_Release.
+
+Files touched:
+- backend/app/main.py
+- frontend/vite.config.ts
+- Droid_Environment_Manager/2_Start_Live_Portal.bat
+- Droid_Environment_Manager/_Run_Live_Frontend_4173.bat
+- Droid_Environment_Manager/_Run_Live_Backend_8000.bat
+- Droid_Environment_Manager/3_Nightly_Auto_Deploy.bat
+- Droid_Environment_Manager/ARCHITECTURE_REFERENCE.txt
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Backend compile passed: python -m compileall backend/app
+- Frontend build passed: cmd /c npm run build
+- GET http://127.0.0.1:8001/api/version returned dev version JSON.
+- GET http://127.0.0.1:8001/api/auth/me without cookie returned 401.
+
+Future note:
+- Dev frontend 5173 requires dev backend 8001 to be running.
+- Do not use normal frontend\dist for Live. Live must use frontend\dist_live.
+- Do not run Live backend from backend\ source. Live must use Live_Backend_Release.
+===============================================================================

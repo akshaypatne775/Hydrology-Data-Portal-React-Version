@@ -9,9 +9,17 @@ import {
   disapproveAdminUser,
   getAdminUserActivity,
   setAdminUserCatalogAccess,
+  setAdminUserHiddenTabs,
   type AdminUserActivity,
 } from '../../services/adminService'
 import './AdminDashboard.css'
+
+const HIDEABLE_CLIENT_TABS = [
+  { id: 'map', label: 'Viewer (2D)' },
+  { id: 'globe', label: 'Viewer (3D)' },
+  { id: 'compare', label: 'Compare' },
+  { id: 'downloads', label: 'Data Downloads' },
+] as const
 
 function formatLastSeen(value: string): string {
   if (!value) return '--'
@@ -135,6 +143,16 @@ export default function AdminDashboard() {
     }
   }
 
+  const toggleHiddenTab = (user: AdminUserActivity, tabId: string, shouldHide: boolean) => {
+    const current = new Set(user.hidden_tabs ?? [])
+    if (shouldHide) {
+      current.add(tabId)
+    } else {
+      current.delete(tabId)
+    }
+    void runUserAction(() => setAdminUserHiddenTabs(user.user_id, Array.from(current)))
+  }
+
   return (
     <section className="admin-panel" aria-label="Admin control panel">
       <header className="admin-panel__hero">
@@ -163,6 +181,7 @@ export default function AdminDashboard() {
               <th>Last Accessed Dataset</th>
               <th>Last Seen</th>
               <th>Data Catalog</th>
+              <th>Hidden Tabs</th>
               <th>Action</th>
               <th>Approval</th>
               <th>Role</th>
@@ -171,12 +190,12 @@ export default function AdminDashboard() {
           <tbody>
             {loading && users.length === 0 ? (
               <tr>
-                <td colSpan={11}>Loading activity...</td>
+                <td colSpan={12}>Loading activity...</td>
               </tr>
             ) : null}
             {error ? (
               <tr>
-                <td colSpan={11} className="admin-panel__error">{error}</td>
+                <td colSpan={12} className="admin-panel__error">{error}</td>
               </tr>
             ) : null}
             {users.map((user) => (
@@ -222,11 +241,34 @@ export default function AdminDashboard() {
                 <td>
                   <button
                     type="button"
-                    className={user.can_access_catalog === false ? 'admin-panel__action admin-panel__action--danger' : 'admin-panel__action admin-panel__action--approve'}
+                    className={user.can_access_catalog === false ? 'admin-panel__action admin-panel__action--catalog-off' : 'admin-panel__action admin-panel__action--catalog-on'}
                     onClick={() => void runUserAction(() => setAdminUserCatalogAccess(user.user_id, user.can_access_catalog === false))}
+                    title={user.can_access_catalog === false ? 'Data Catalog is off for this user' : 'Data Catalog is on for this user'}
                   >
                     {user.can_access_catalog === false ? 'Hidden' : 'Visible'}
                   </button>
+                </td>
+                <td>
+                  <details className="admin-panel__tab-menu">
+                    <summary>
+                      Hidden ({user.hidden_tabs?.length ?? 0})
+                    </summary>
+                    <div className="admin-panel__tab-menu-list">
+                      {HIDEABLE_CLIENT_TABS.map((tab) => {
+                        const isHidden = Boolean(user.hidden_tabs?.includes(tab.id))
+                        return (
+                          <label key={tab.id} className="admin-panel__tab-option">
+                            <input
+                              type="checkbox"
+                              checked={isHidden}
+                              onChange={(event) => toggleHiddenTab(user, tab.id, event.currentTarget.checked)}
+                            />
+                            <span>{tab.label}</span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                  </details>
                 </td>
                 <td>
                   <button
@@ -315,7 +357,7 @@ export default function AdminDashboard() {
             ))}
             {!loading && !error && users.length === 0 ? (
               <tr>
-                <td colSpan={10}>No users found.</td>
+                <td colSpan={12}>No users found.</td>
               </tr>
             ) : null}
           </tbody>

@@ -1,0 +1,124 @@
+:root {
+  --color-brand-teal: #0e3e49;
+  --font-sans: 'Montserrat', ui-sans-serif, system-ui, sans-serif;
+}
+
+html {
+  font-family: var(--font-sans);
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: #eef3f5;
+  overflow: hidden;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: var(--font-sans);
+}
+
+#root {
+  min-height: 100dvh;
+  height: 100dvh;
+  overflow: auto;
+}
+
+.mobile-unavailable {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 1.2rem;
+  background:
+    radial-gradient(circle at 20% 10%, rgba(20, 184, 166, 0.18), transparent 34rem),
+    linear-gradient(145deg, #082f38 0%, #0e3e49 48%, #071e25 100%);
+  color: #f8fafc;
+}
+
+.mobile-unavailable__card {
+  width: min(100%, 28rem);
+  display: grid;
+  justify-items: center;
+  text-align: center;
+  gap: 0.75rem;
+  padding: 1.35rem;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 22px 50px rgba(2, 6, 23, 0.32);
+  backdrop-filter: blur(12px);
+}
+
+.mobile-unavailable__mark {
+  width: 3.4rem;
+  height: 3.4rem;
+  display: grid;
+  place-items: center;
+  border-radius: 16px;
+  background: #f8fafc;
+  color: #0e3e49;
+  font-size: 1.35rem;
+}
+
+.mobile-unavailable__eyebrow {
+  margin: 0;
+  color: #99f6e4;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.mobile-unavailable h1 {
+  margin: 0;
+  font-size: clamp(1.45rem, 7vw, 2rem);
+  letter-spacing: 0;
+}
+
+.mobile-unavailable p {
+  margin: 0;
+  max-width: 23rem;
+  color: rgba(248, 250, 252, 0.82);
+  font-size: 0.88rem;
+  line-height: 1.55;
+}
+
+/*
+ * Font Awesome 6 — global protection (Montserrat / resets must not override icon glyphs).
+ * Required: font-family: "Font Awesome 6 Free" !important; font-weight: 900 !important;
+ */
+.fa-solid,
+.fas,
+i.fa-solid,
+i.fas,
+svg.fa-solid {
+  font-family: "Font Awesome 6 Free" !important;
+  font-weight: 900 !important;
+}
+
+.fa-regular,
+.far,
+i.fa-regular,
+i.far {
+  font-family: "Font Awesome 6 Free" !important;
+  font-weight: 400 !important;
+}
+
+.fa-brands,
+.fab,
+i.fa-brands,
+i.fab {
+  font-family: 'Font Awesome 6 Brands' !important;
+  font-weight: 400 !important;
+}
+
+i,
+.fa,
+.fas,
+.fa-solid {
+  font-family: 'Font Awesome 6 Free' !important;
+  font-weight: 900 !important;
+}

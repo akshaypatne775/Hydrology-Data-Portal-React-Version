@@ -3,6 +3,8 @@ import StartupLoader from './components/Brand/StartupLoader'
 import LocationGate from './components/LocationGate'
 import { AuthProvider, useAuthContext } from './context/AuthContext'
 import { ModalProvider } from './context/ModalContext'
+import { useNightlyAutoRefresh } from './hooks/useNightlyAutoRefresh'
+import { useVersionCheck } from './hooks/useVersionCheck'
 
 const AuthPage = lazy(() => import('./pages/AuthPage'))
 const AdminAccessPage = lazy(() => import('./pages/AdminAccessPage'))
@@ -48,23 +50,32 @@ function AppRoot() {
   const { loading, user, isAdmin } = useAuthContext()
   const isAdminRoute = window.location.pathname.replace(/\/+$/, '') === '/admin'
   const mobileUnsupported = useMobileUnsupported()
+  const { updateAvailable, refreshNow } = useVersionCheck()
+  useNightlyAutoRefresh()
 
   if (loading) return <StartupLoader />
   if (mobileUnsupported) return <MobileUnavailable />
   return (
-    <Suspense fallback={<StartupLoader />}>
-      {isAdminRoute && !user ? (
-        <AdminAccessPage />
-      ) : !user ? (
-        <AuthPage />
-      ) : isAdmin ? (
-        <WorkspacePage />
-      ) : (
-        <LocationGate>
+    <>
+      <Suspense fallback={<StartupLoader />}>
+        {isAdminRoute && !user ? (
+          <AdminAccessPage />
+        ) : !user ? (
+          <AuthPage />
+        ) : isAdmin ? (
           <WorkspacePage />
-        </LocationGate>
-      )}
-    </Suspense>
+        ) : (
+          <LocationGate>
+            <WorkspacePage />
+          </LocationGate>
+        )}
+      </Suspense>
+      {updateAvailable ? (
+        <button type="button" className="version-update-toast" onClick={refreshNow}>
+          Update available. Click to refresh.
+        </button>
+      ) : null}
+    </>
   )
 }
 

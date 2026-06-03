@@ -3,6 +3,7 @@ import { useProjects } from '../hooks/useProjects'
 import { logout } from '../services/authService'
 import type { Project } from '../services/projectService'
 import { getProjectFiles, getProjectJobs } from '../services/datasetService'
+import type { ProjectFile, ProjectJob } from '../services/datasetService'
 import { useWorkspaceContext } from '../context/WorkspaceContext'
 import { useModal } from '../context/ModalContext'
 import './Dashboard.css'
@@ -18,7 +19,7 @@ const ComparePanel = lazy(() => import('./Compare/ComparePanel'))
 const AdminDashboard = lazy(() => import('./Admin/AdminDashboard'))
 
 const DROID_CLOUD_LOGO_URL =
-  'https://www.droidminingsolutions.com/wp-content/uploads/2026/04/ChatGPT-Image-Apr-25-2026-04_33_45-PM.png'
+  'https://www.droidminingsolutions.com/wp-content/uploads/2026/06/Droid-Cloud-Logo.png'
 
 const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: 'fa-solid fa-house' },
@@ -31,7 +32,7 @@ const NAV_ITEMS = [
   { id: 'downloads', label: 'Data Downloads', icon: 'fa-solid fa-download' },
 ] as const
 
-type DashboardMetric = { label: string; value: string; meta: string; icon: string }
+type DashboardMetric = { label: string; value: string; meta: string; icon: string; active?: boolean }
 
 const DASHBOARD_MODULES = [
   {
@@ -41,6 +42,14 @@ const DASHBOARD_MODULES = [
     description:
       'Inspect processed rasters and annotations in a clean 2D workspace viewer.',
     action: 'Open 2D viewer',
+  },
+  {
+    id: 'globe',
+    title: '3D Workspace Viewer',
+    icon: 'fa-solid fa-earth-americas',
+    description:
+      'Review 3D models and point clouds with project-scoped context for inspection and presentation.',
+    action: 'Open 3D viewer',
   },
   {
     id: 'datasets',
@@ -68,6 +77,23 @@ const DASHBOARD_MODULES = [
   },
 ] as const
 
+const INACTIVE_JOB_STATUSES = new Set(['completed', 'failed', 'web-ready', 'web ready', 'raw'])
+
+function isProcessingJob(job: ProjectJob): boolean {
+  return !INACTIVE_JOB_STATUSES.has(String(job.status || '').trim().toLowerCase())
+}
+
+function countProjectDatasets(files: ProjectFile[]): number {
+  const datasetKeys = new Set<string>()
+  for (const file of files) {
+    const kind = String(file.kind || file.type || '').trim().toLowerCase()
+    if (kind === 'reports' || kind === 'report') continue
+    const key = String(file.dataset_id || file.raw_rel_path || file.cog_rel_path || file.name || file.rel_path || '').trim()
+    if (key) datasetKeys.add(key)
+  }
+  return datasetKeys.size
+}
+
 function formatDisplayDate(dateValue: string): string {
   const date = new Date(dateValue)
   if (Number.isNaN(date.getTime())) return dateValue
@@ -85,7 +111,7 @@ function initialsFromEmail(email: string): string {
 }
 
 type DashboardProps = {
-  user: { id: number; email: string; role?: string; can_access_catalog?: boolean }
+  user: { id: number; email: string; role?: string; can_access_catalog?: boolean; hidden_tabs?: string[] }
   onLogout: () => void
 }
 
@@ -121,12 +147,18 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     { label: 'Reports', value: '0', meta: 'Downloadable files', icon: 'fa-solid fa-file-lines' },
   ])
 
+  const hiddenClientTabs = useMemo(() => new Set(isAdmin ? [] : user.hidden_tabs ?? []), [isAdmin, user.hidden_tabs])
   const visibleNavItems = useMemo(
     () =>
       (selectedProject ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.id === 'projects' || item.id === 'admin'))
         .filter((item) => item.id !== 'admin' || isAdmin)
-        .filter((item) => item.id !== 'datasets' || canAccessDataCatalog),
-    [canAccessDataCatalog, isAdmin, selectedProject],
+        .filter((item) => item.id !== 'datasets' || canAccessDataCatalog)
+        .filter((item) => !hiddenClientTabs.has(item.id)),
+    [canAccessDataCatalog, hiddenClientTabs, isAdmin, selectedProject],
+  )
+  const visibleDashboardModules = useMemo(
+    () => DASHBOARD_MODULES.filter((module) => !hiddenClientTabs.has(module.id)),
+    [hiddenClientTabs],
   )
   const activePointCloudLayer = useMemo(
     () =>
@@ -144,10 +176,10 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   }, [activeId, activeViewerTab])
 
   useEffect(() => {
-    if (activeId === 'datasets' && !canAccessDataCatalog) {
+    if ((activeId === 'datasets' && !canAccessDataCatalog) || hiddenClientTabs.has(activeId)) {
       setActiveId(selectedProject ? 'dashboard' : 'projects')
     }
-  }, [activeId, canAccessDataCatalog, selectedProject, setActiveId])
+  }, [activeId, canAccessDataCatalog, hiddenClientTabs, selectedProject, setActiveId])
 
   const handleShare = useCallback(async () => {
     const url = `${window.location.origin}${window.location.pathname}`
@@ -181,7 +213,8 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
 
   useEffect(() => {
     let cancelled = false
-    const loadMetrics = async () => {
+    let refreshTimer: number | undefined
+    const loadMetrics = async (forceRefresh = false) => {
       if (!selectedProject?.id) {
         setDashboardMetrics([
           { label: 'Projects', value: String(projects.length), meta: 'Available workspaces', icon: 'fa-solid fa-folder-tree' },
@@ -193,16 +226,17 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
       }
       try {
         const [jobs, files] = await Promise.all([
-          getProjectJobs(selectedProject.id),
-          getProjectFiles(selectedProject.id),
+          getProjectJobs(selectedProject.id, forceRefresh),
+          getProjectFiles(selectedProject.id, forceRefresh),
         ])
         if (cancelled) return
-        const processing = jobs.filter((j) => j.status !== 'Completed' && j.status !== 'Failed').length
-        const reports = files.filter((f) => f.kind === 'Reports').length
+        const processing = jobs.filter(isProcessingJob).length
+        const datasetCount = countProjectDatasets(files)
+        const reports = files.filter((f) => String(f.kind || '').trim().toLowerCase() === 'reports').length
         setDashboardMetrics([
           { label: 'Projects', value: String(projects.length), meta: 'Available workspaces', icon: 'fa-solid fa-folder-tree' },
-          { label: 'Datasets', value: String(files.length), meta: 'In selected project', icon: 'fa-solid fa-database' },
-          { label: 'Client Data Hub', value: String(processing), meta: 'Running server tasks', icon: 'fa-solid fa-gear' },
+          { label: 'Datasets', value: String(datasetCount), meta: 'In selected project', icon: 'fa-solid fa-database' },
+          { label: 'Client Data Hub', value: String(processing), meta: processing > 0 ? 'Processing active' : 'No active tasks', icon: 'fa-solid fa-gear', active: processing > 0 },
           { label: 'Reports', value: String(reports), meta: 'Downloadable files', icon: 'fa-solid fa-file-lines' },
         ])
       } catch {
@@ -217,8 +251,12 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
       }
     }
     void loadMetrics()
+    if (selectedProject?.id) {
+      refreshTimer = window.setInterval(() => void loadMetrics(true), 10000)
+    }
     return () => {
       cancelled = true
+      if (refreshTimer) window.clearInterval(refreshTimer)
     }
   }, [projects.length, selectedProject?.id])
 
@@ -536,8 +574,14 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
 
               <div className="ds-overview-metrics">
                 {dashboardMetrics.map((metric) => (
-                  <article key={metric.label} className="ds-overview-metric">
-                    <p className="ds-overview-metric__icon" aria-hidden>
+                  <article
+                    key={metric.label}
+                    className={metric.active ? 'ds-overview-metric ds-overview-metric--active' : 'ds-overview-metric'}
+                  >
+                    <p
+                      className={metric.active ? 'ds-overview-metric__icon ds-overview-metric__icon--processing' : 'ds-overview-metric__icon'}
+                      aria-hidden
+                    >
                       <i className={metric.icon} />
                     </p>
                     <p className="ds-overview-metric__label">{metric.label}</p>
@@ -548,7 +592,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
               </div>
 
               <div className="ds-module-grid">
-                {DASHBOARD_MODULES.map((module) => (
+                {visibleDashboardModules.map((module) => (
                   <article key={module.id} className="ds-module-card">
                     <div className="ds-module-card__icon" aria-hidden>
                       <i className={module.icon} />
@@ -557,12 +601,13 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                     <p className="ds-module-card__text">{module.description}</p>
                     <button
                       type="button"
-                      className="ds-module-card__action"
-                      onClick={() => {
-                        if (module.id === 'map') setActiveViewerTab('2D')
-                        setActiveId(module.id)
-                      }}
-                    >
+                    className="ds-module-card__action"
+                    onClick={() => {
+                      if (module.id === 'map') setActiveViewerTab('2D')
+                      if (module.id === 'globe') setActiveViewerTab('3D')
+                      setActiveId(module.id)
+                    }}
+                  >
                       {module.action}
                     </button>
                   </article>

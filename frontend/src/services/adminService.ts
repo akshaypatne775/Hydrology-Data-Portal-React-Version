@@ -8,6 +8,7 @@ export type AdminUserActivity = {
   requested_role?: string
   approval_status?: string
   can_access_catalog?: boolean
+  hidden_tabs?: string[]
   status: 'Active' | 'Offline'
   current_ip: string
   device_label?: string
@@ -58,6 +59,15 @@ export async function setAdminUserCatalogAccess(userId: number, enabled: boolean
     body: JSON.stringify({ enabled }),
   })
   if (!res.ok) throw new Error(`Data Catalog access update failed (${res.status})`)
+}
+
+export async function setAdminUserHiddenTabs(userId: number, hiddenTabs: string[]): Promise<void> {
+  const res = await apiRequest(`/api/admin/users/${encodeURIComponent(String(userId))}/hidden-tabs`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hidden_tabs: hiddenTabs }),
+  })
+  if (!res.ok) throw new Error(`Hidden tabs update failed (${res.status})`)
 }
 
 export async function disapproveAdminUser(userId: number): Promise<void> {

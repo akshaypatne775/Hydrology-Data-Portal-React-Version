@@ -1,0 +1,137 @@
+import { useEffect, useMemo, useState } from 'react'
+import { getProjectFiles, type ProjectFile } from '../../services/datasetService'
+import { toSameOriginBackendUrl } from '../../lib/apiBase'
+import './DownloadsPanel.css'
+
+type DownloadCategory = 'Raw Survey Data' | 'Web-Optimized Data' | 'Generated Exports' | 'Reports'
+
+type DownloadItem = {
+  id: string
+  name: string
+  size: string
+  format: string
+  category: DownloadCategory
+  href: string
+}
+
+type DownloadsPanelProps = {
+  projectId?: string
+}
+
+const CATEGORY_ORDER: DownloadCategory[] = ['Raw Survey Data', 'Web-Optimized Data', 'Generated Exports', 'Reports']
+
+function humanSize(sizeBytes: string): string {
+  const n = Number(sizeBytes)
+  if (!Number.isFinite(n) || n <= 0) return 'Size Unknown'
+  const gb = n / (1024 * 1024 * 1024)
+  if (gb >= 1) return `${gb.toFixed(2)} GB`
+  const mb = n / (1024 * 1024)
+  return `${mb.toFixed(1)} MB`
+}
+
+function isHiddenDownload(file: ProjectFile): boolean {
+  const type = String(file.type || '').toLowerCase()
+  const datasetType = String(file.dataset_type || '').toLowerCase()
+  const kind = String(file.kind || '').toLowerCase()
+  const name = String(file.name || '').toLowerCase()
+  return (
+    type === '3dmodel' ||
+    datasetType === '3dmodel' ||
+    kind.includes('3d photogrammetry') ||
+    type === 'zip' ||
+    name.endsWith('.zip')
+  )
+}
+
+export function DownloadsPanel({ projectId }: DownloadsPanelProps) {
+  const [items, setItems] = useState<DownloadItem[]>([])
+  const visibleItems = useMemo(() => (projectId ? items : []), [items, projectId])
+
+  const grouped = useMemo(
+    () =>
+      CATEGORY_ORDER.map((category) => ({
+        category,
+        items: visibleItems.filter((item) => item.category === category),
+      })),
+    [visibleItems],
+  )
+
+  useEffect(() => {
+    if (!projectId) return
+    let cancelled = false
+    const load = async () => {
+      try {
+        const files = await getProjectFiles(projectId)
+        if (cancelled) return
+        const mapped: DownloadItem[] = files.filter((file) => !isHiddenDownload(file)).map((file: ProjectFile) => {
+          const category: DownloadCategory =
+            file.kind === 'Reports'
+              ? 'Reports'
+              : file.kind === 'Generated Grid Export'
+                ? 'Generated Exports'
+              : file.kind === 'Web-Optimized Data'
+                ? 'Web-Optimized Data'
+                : 'Raw Survey Data'
+          return {
+            id: `${file.rel_path || file.name}-${file.type}`,
+            name: file.name,
+            size: humanSize(file.size_bytes),
+            format: file.type.toUpperCase(),
+            category,
+            href: toSameOriginBackendUrl(file.download_url) || toSameOriginBackendUrl(file.file_url) || file.file_url,
+          }
+        })
+        setItems(mapped)
+      } catch {
+        setItems([])
+      }
+    }
+    void load()
+    return () => {
+      cancelled = true
+    }
+  }, [projectId])
+
+  return (
+    <section className="dlp-root">
+      <header className="dlp-head">
+        <h3>Data Downloads</h3>
+        <p>Download processed reports and project datasets prepared for client delivery.</p>
+      </header>
+
+      <div className="dlp-grid">
+        {grouped.map(({ category, items: categoryItems }) => (
+          <article key={category} className="dlp-card">
+            <header className="dlp-card__head">
+              <h4>{category}</h4>
+            </header>
+
+            <ul className="dlp-list">
+              {categoryItems.map((item) => (
+                  <li key={item.id} className="dlp-item">
+                    <div className="dlp-item__meta">
+                      <p className="dlp-item__name">{item.name}</p>
+                      <p className="dlp-item__sub">
+                        <span>{item.format}</span>
+                        <span>{item.size}</span>
+                      </p>
+                    </div>
+                    <a
+                      className="dlp-download"
+                      href={item.href}
+                      download={item.name}
+                    >
+                      <i className="fa-solid fa-download" aria-hidden />
+                      Download
+                    </a>
+                  </li>
+                ))}
+            </ul>
+          </article>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+export default DownloadsPanel

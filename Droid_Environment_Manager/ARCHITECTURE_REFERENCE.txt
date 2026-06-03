@@ -1,0 +1,50 @@
+DROID SURVAIR CLOUD PORTAL - DUAL-WORLD ENVIRONMENT
+
+This machine contains two separate operating worlds for the same React + FastAPI portal.
+
+LIVE CLOUDFLARE WORLD
+- Frontend: Vite preview on http://localhost:4173
+- Backend: FastAPI on http://127.0.0.1:8000
+- Database: Project_Data\droid_cloud_prod.db
+- Frontend bundle served from: frontend\dist_live
+- Backend code served from: Droid_Environment_Manager\Live_Backend_Release\backend
+- Start script: Droid_Environment_Manager\2_Start_Live_Portal.bat
+- Cloudflare Tunnel should point to the frontend preview port 4173.
+- DEV_MODE=False tells the backend to use droid_cloud_prod.db.
+
+DEV CURSOR WORLD
+- Frontend: Vite dev server on http://localhost:5173
+- Backend: FastAPI on http://127.0.0.1:8001
+- Database: Project_Data\droid_cloud_dev.db
+- Start script: Droid_Environment_Manager\1_Start_Dev_Environment.bat
+- The dev script snapshots droid_cloud_prod.db into droid_cloud_dev.db every time it starts.
+- DEV_MODE=True tells the backend to use droid_cloud_dev.db.
+
+CRUCIAL DATA SAFETY RULE
+- NEVER copy Project_Data\droid_cloud_dev.db over Project_Data\droid_cloud_prod.db manually.
+- droid_cloud_prod.db is the live client database.
+- droid_cloud_dev.db is only a disposable developer snapshot.
+- Copying dev DB back to live can overwrite real client data, users, sessions, spatial assignments, and activity logs.
+- Legacy issues.db may remain as an old backup/source file. Do not treat it as the active live database after migration.
+
+DATABASE LOCK PROTECTION
+- Backend connections enable SQLite WAL mode:
+  PRAGMA journal_mode=WAL;
+  PRAGMA synchronous=NORMAL;
+- WAL mode may create .db-wal and .db-shm files beside the selected database. This is expected.
+
+UPDATES AND DEPLOYMENT
+- Dev source edits are made in backend\ and frontend\src.
+- Live does not serve normal frontend\dist anymore. Live serves frontend\dist_live.
+- Live backend does not run directly from backend\ anymore. Live runs from Droid_Environment_Manager\Live_Backend_Release\backend.
+- 2_Start_Live_Portal.bat starts the already deployed Live bundle/release copy. It only creates them once if missing.
+- 3_Nightly_Auto_Deploy.bat is responsible for refreshing frontend\dist_live and the Live backend release copy.
+- Frontend checks /api/version and shows a toast when a newer backend/frontend version is available.
+- The client does not hard-refresh during active work.
+- Between 2:00 AM and 4:00 AM, the frontend may silently reload only after 30 minutes of user inactivity.
+- Backend/frontend logic changes go live through Droid_Environment_Manager\3_Nightly_Auto_Deploy.bat.
+- Manual Live restart only restarts the last deployed release copy; it should not pick up current dev source changes.
+
+PORT SUMMARY
+- Live Cloudflare: Frontend 4173 -> Backend 8000 -> Project_Data\droid_cloud_prod.db
+- Dev Cursor:      Frontend 5173 -> Backend 8001 -> Project_Data\droid_cloud_dev.db

@@ -1,0 +1,1 @@
+import{t as e}from"./jsx-runtime-DAs1UGHr.js";var t=e();function n({url:e}){return(0,t.jsx)(`div`,{style:{position:`relative`,width:`100%`,height:`100%`,background:`#06171b`},children:(0,t.jsx)(`iframe`,{src:e,style:{width:`100%`,height:`100%`,border:`none`,display:`block`},title:`Droid 3D Point Cloud System`})})}export{n as PotreeViewer,n as default};

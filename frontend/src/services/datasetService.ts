@@ -186,9 +186,9 @@ export async function getDatasetStatus(
   )
 }
 
-export async function getProjectJobs(projectId: string): Promise<ProjectJob[]> {
+export async function getProjectJobs(projectId: string, forceRefresh = false): Promise<ProjectJob[]> {
   const cached = projectJobsCache.get(projectId)
-  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+  if (!forceRefresh && cached && Date.now() - cached.ts < CACHE_TTL_MS) {
     return cached.data
   }
   const data = await apiRequestJson<{ jobs: ProjectJob[] }>(
@@ -200,9 +200,9 @@ export async function getProjectJobs(projectId: string): Promise<ProjectJob[]> {
   return next
 }
 
-export async function getProjectFiles(projectId: string): Promise<ProjectFile[]> {
+export async function getProjectFiles(projectId: string, forceRefresh = false): Promise<ProjectFile[]> {
   const cached = projectFilesCache.get(projectId)
-  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+  if (!forceRefresh && cached && Date.now() - cached.ts < CACHE_TTL_MS) {
     return cached.data
   }
   const data = await apiRequestJson<{ files: ProjectFile[] }>(

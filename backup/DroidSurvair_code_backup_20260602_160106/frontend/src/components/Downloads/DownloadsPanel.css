@@ -1,0 +1,106 @@
+.dlp-root {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+  height: 100%;
+  min-height: 0;
+  background: #fff;
+}
+
+.dlp-head h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  color: #0e3e49;
+}
+
+.dlp-head p {
+  margin: 0.25rem 0 0;
+  color: #64748b;
+  font-size: 0.8rem;
+}
+
+.dlp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0.9rem;
+}
+
+.dlp-card {
+  border: 1px solid rgba(14, 62, 73, 0.18);
+  border-radius: 12px;
+  background: #f8fafb;
+  overflow: hidden;
+}
+
+.dlp-card__head {
+  background: #0e3e49;
+  color: #fff;
+  padding: 0.65rem 0.8rem;
+}
+
+.dlp-card__head h4 {
+  margin: 0;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.dlp-list {
+  margin: 0;
+  padding: 0.65rem;
+  list-style: none;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.dlp-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  padding: 0.55rem 0.6rem;
+}
+
+.dlp-item__meta {
+  min-width: 0;
+}
+
+.dlp-item__name {
+  margin: 0;
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: #0f172a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dlp-item__sub {
+  margin: 0.2rem 0 0;
+  display: flex;
+  gap: 0.5rem;
+  color: #64748b;
+  font-size: 0.68rem;
+}
+
+.dlp-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: 1px solid #0e3e49;
+  background: #0e3e49;
+  color: #fff;
+  text-decoration: none;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 0.38rem 0.68rem;
+  white-space: nowrap;
+}
+
+.dlp-download:hover {
+  background: #0b323b;
+}
