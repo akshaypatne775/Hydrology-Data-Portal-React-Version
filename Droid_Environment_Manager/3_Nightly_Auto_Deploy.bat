@@ -32,11 +32,20 @@ if errorlevel 1 (
   exit /b 1
 )
 
+echo Choose when to deploy the current Dev release to Live:
+echo   [N] Deploy Now
+echo   [S] Schedule for the next 3:00 AM
+choice /C NS /N /M "Select N or S: "
+if errorlevel 2 goto WAIT_FOR_3AM
+goto START_DEPLOY
+
+:WAIT_FOR_3AM
 for /f %%S in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$now=Get-Date; $target=$now.Date.AddHours(3); if($now -ge $target){$target=$target.AddDays(1)}; [int][Math]::Ceiling(($target-$now).TotalSeconds)"') do set "WAIT_SECONDS=%%S"
 
 echo [INFO] Waiting %WAIT_SECONDS% seconds until the next 3:00 AM deployment window...
 timeout /t %WAIT_SECONDS% /nobreak
 
+:START_DEPLOY
 echo.
 echo [INFO] Starting nightly deployment at %DATE% %TIME%
 echo [%DATE% %TIME%] Nightly deployment started.>> "%LOG_FILE%"

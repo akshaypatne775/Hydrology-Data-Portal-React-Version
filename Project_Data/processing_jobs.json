@@ -121,5 +121,23 @@
       "tileset_rel_path": "projects/proj_482e52974f060d7e/processed/3dmodel/AuroBindo-3D-2abf33bd/AuroBindo 3D/tileset.json",
       "layer_type": "3DModel"
     }
+  ],
+  "proj_0c7e667eba610b2a": [
+    {
+      "job_id": "356-Flight-1-pointcloud-b3a50c2ed750",
+      "kind": "pointcloud",
+      "file_name": "356-Flight 1-pointcloud.las",
+      "status": "Completed",
+      "updated_at": "2026-06-04T12:03:18.209846+00:00",
+      "result_url": "/data/projects/proj_0c7e667eba610b2a/processed/356-Flight-1-pointcloud-b3a50c2ed750/356-Flight-1-pointcloud-b3a50c2ed750.html"
+    },
+    {
+      "job_id": "359-Flight-1-pointcloud-82ec992af0be",
+      "kind": "pointcloud",
+      "file_name": "359-Flight 1-pointcloud.las",
+      "status": "Completed",
+      "updated_at": "2026-06-04T10:23:22.336378+00:00",
+      "result_url": "/data/projects/proj_0c7e667eba610b2a/processed/359-Flight-1-pointcloud-82ec992af0be/359-Flight-1-pointcloud-82ec992af0be.html"
+    }
   ]
 }

@@ -38,7 +38,9 @@ UPDATES AND DEPLOYMENT
 - Live does not serve normal frontend\dist anymore. Live serves frontend\dist_live.
 - Live backend does not run directly from backend\ anymore. Live runs from Droid_Environment_Manager\Live_Backend_Release\backend.
 - 2_Start_Live_Portal.bat starts the already deployed Live bundle/release copy. It only creates them once if missing.
-- 3_Nightly_Auto_Deploy.bat is responsible for refreshing frontend\dist_live and the Live backend release copy.
+- 3_Nightly_Auto_Deploy.bat asks whether to deploy immediately or wait until the next 3:00 AM.
+- Selecting Deploy Now immediately refreshes frontend\dist_live and the Live backend release copy.
+- Selecting Schedule waits until the next 3:00 AM before refreshing the Live release.
 - Frontend checks /api/version and shows a toast when a newer backend/frontend version is available.
 - The client does not hard-refresh during active work.
 - Between 2:00 AM and 4:00 AM, the frontend may silently reload only after 30 minutes of user inactivity.

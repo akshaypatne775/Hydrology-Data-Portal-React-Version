@@ -110,6 +110,100 @@ function initialsFromEmail(email: string): string {
     .join('') || 'U'
 }
 
+type Project3DAsset = {
+  id: string
+  name: string
+  url: string
+  viewer: 'potree' | 'cesium'
+}
+
+function project3DAssetsFromFiles(files: ProjectFile[]): Project3DAsset[] {
+  const assets = new Map<string, Project3DAsset>()
+  for (const file of files) {
+    const url = String(file.layer_url || file.file_url || '').trim()
+    if (!url) continue
+    const signature = [
+      file.kind,
+      file.type,
+      file.layer_type,
+      file.dataset_type,
+      file.name,
+      url,
+    ].map((value) => String(value || '').toLowerCase()).join(' ')
+    const viewer = (
+      signature.includes('pointcloud') ||
+      signature.includes('point cloud') ||
+      signature.includes('potree') ||
+      signature.includes('/pointcloud/')
+    )
+      ? 'potree'
+      : (
+          signature.includes('3dmodel') ||
+          signature.includes('3d model') ||
+          signature.includes('tileset.json') ||
+          signature.includes('cesium')
+        )
+        ? 'cesium'
+        : null
+    if (!viewer) continue
+    const id = String(file.dataset_id || file.rel_path || url)
+    assets.set(id, {
+      id,
+      name: String(file.name || file.dataset_id || (viewer === 'potree' ? 'Point Cloud' : '3D Model')),
+      url,
+      viewer,
+    })
+  }
+  return Array.from(assets.values())
+}
+
+function project3DAssetsFromJobs(jobs: ProjectJob[]): Project3DAsset[] {
+  const assets = new Map<string, Project3DAsset>()
+  for (const job of jobs) {
+    const url = String(job.result_url || '').trim()
+    if (!url) continue
+    const signature = [job.kind, job.file_name, url]
+      .map((value) => String(value || '').toLowerCase())
+      .join(' ')
+    const viewer = (
+      signature.includes('pointcloud') ||
+      signature.includes('point cloud') ||
+      signature.includes('potree') ||
+      signature.includes('/pointcloud/')
+    )
+      ? 'potree'
+      : (
+          signature.includes('3dmodel') ||
+          signature.includes('3d model') ||
+          signature.includes('tileset.json') ||
+          signature.includes('cesium')
+        )
+        ? 'cesium'
+        : null
+    if (!viewer) continue
+    const id = String(job.job_id || url)
+    assets.set(id, {
+      id,
+      name: String(job.file_name || (viewer === 'potree' ? 'Point Cloud' : '3D Model')),
+      url,
+      viewer,
+    })
+  }
+  return Array.from(assets.values())
+}
+
+function isPointCloudViewerLayer(layer: { layerType?: string; url?: string }): boolean {
+  const layerType = String(layer.layerType || '').toLowerCase().replace(/[\s_-]+/g, '')
+  const url = String(layer.url || '').toLowerCase()
+  return (
+    layerType.includes('pointcloud') ||
+    layerType.includes('potree') ||
+    url.includes('/pointcloud/') ||
+    url.includes('/potree/') ||
+    /(?:index|viewer)\.html(?:[?#].*)?$/.test(url)
+  )
+}
+
 type DashboardProps = {
   user: { id: number; email: string; role?: string; can_access_catalog?: boolean; hidden_tabs?: string[] }
   onLogout: () => void
@@ -140,6 +234,8 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   const [createProjectError, setCreateProjectError] = useState<string | null>(null)
   const [renamingProject, setRenamingProject] = useState(false)
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
+  const [project3DAssets, setProject3DAssets] = useState<Project3DAsset[]>([])
+  const [selected3DAsset, setSelected3DAsset] = useState<Project3DAsset | null>(null)
   const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetric[]>([
     { label: 'Projects', value: '0', meta: 'Available workspaces', icon: 'fa-solid fa-folder-tree' },
     { label: 'Datasets', value: '0', meta: 'In selected project', icon: 'fa-solid fa-database' },
@@ -165,11 +261,23 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
       activeLayers.find(
         (layer) =>
           layer.projectId === selectedProject?.id &&
-          String(layer.layerType).toLowerCase() === 'pointcloud' &&
-          layer.url.toLowerCase().endsWith('.html'),
+          isPointCloudViewerLayer(layer),
       ),
     [activeLayers, selectedProject?.id],
   )
+  const projectPointClouds = useMemo(
+    () => project3DAssets.filter((asset) => asset.viewer === 'potree'),
+    [project3DAssets],
+  )
+  const project3DModels = useMemo(
+    () => project3DAssets.filter((asset) => asset.viewer === 'cesium'),
+    [project3DAssets],
+  )
+  const selectedPointCloudUrl = selected3DAsset?.viewer === 'potree'
+    ? selected3DAsset.url
+    : selected3DAsset?.viewer === 'cesium'
+      ? ''
+      : activePointCloudLayer?.url || ''
   const routedViewerId = useMemo(() => {
     if (activeId !== 'map' && activeId !== 'globe') return activeId
     return activeViewerTab === '3D' ? 'globe' : 'map'
@@ -210,6 +318,35 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   useEffect(() => {
     setSelectedProject((prev) => (prev ? projects.find((p) => p.id === prev.id) ?? null : null))
   }, [projects, setSelectedProject])
+
+  useEffect(() => {
+    let cancelled = false
+    setSelected3DAsset(null)
+    if (!selectedProject?.id) {
+      setProject3DAssets([])
+      return () => {
+        cancelled = true
+      }
+    }
+    void Promise.all([
+      getProjectFiles(selectedProject.id, true),
+      getProjectJobs(selectedProject.id, true),
+    ])
+      .then(([files, jobs]) => {
+        if (cancelled) return
+        const combined = new Map<string, Project3DAsset>()
+        for (const asset of [...project3DAssetsFromFiles(files), ...project3DAssetsFromJobs(jobs)]) {
+          combined.set(`${asset.viewer}:${asset.url}`, asset)
+        }
+        setProject3DAssets(Array.from(combined.values()))
+      })
+      .catch(() => {
+        if (!cancelled) setProject3DAssets([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [activeId, selectedProject?.id])
 
   useEffect(() => {
     let cancelled = false
@@ -665,11 +802,57 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                   aria-label="3D globe viewer"
                 >
                   <Suspense fallback={<div className="ds-panel-loading">Loading 3D globe…</div>}>
-                    {activePointCloudLayer?.url ? (
-                      <PotreeViewer url={activePointCloudLayer.url} />
+                    <>
+                      {(projectPointClouds.length > 0 || project3DModels.length > 0) ? (
+                        <aside className="ds-3d-assets" aria-label="Project 3D assets">
+                          {projectPointClouds.length > 0 ? (
+                            <section className="ds-3d-assets__section">
+                              <h3><i className="fa-solid fa-cubes-stacked" aria-hidden /> Point Clouds</h3>
+                              <div className="ds-3d-assets__list">
+                                {projectPointClouds.map((asset) => (
+                                  <button
+                                    key={asset.id}
+                                    type="button"
+                                    className={selected3DAsset?.id === asset.id ? 'ds-3d-assets__item ds-3d-assets__item--active' : 'ds-3d-assets__item'}
+                                    onClick={() => setSelected3DAsset(asset)}
+                                    title={`Open ${asset.name} in Potree`}
+                                  >
+                                    <i className="fa-solid fa-cloud" aria-hidden />
+                                    <span>{asset.name}</span>
+                                    <small>Potree</small>
+                                  </button>
+                                ))}
+                              </div>
+                            </section>
+                          ) : null}
+                          {project3DModels.length > 0 ? (
+                            <section className="ds-3d-assets__section">
+                              <h3><i className="fa-solid fa-cube" aria-hidden /> 3D Models</h3>
+                              <div className="ds-3d-assets__list">
+                                {project3DModels.map((asset) => (
+                                  <button
+                                    key={asset.id}
+                                    type="button"
+                                    className={selected3DAsset?.id === asset.id ? 'ds-3d-assets__item ds-3d-assets__item--active' : 'ds-3d-assets__item'}
+                                    onClick={() => setSelected3DAsset(asset)}
+                                    title={`Open ${asset.name} in Cesium`}
+                                  >
+                                    <i className="fa-solid fa-cube" aria-hidden />
+                                    <span>{asset.name}</span>
+                                    <small>Cesium</small>
+                                  </button>
+                                ))}
+                              </div>
+                            </section>
+                          ) : null}
+                        </aside>
+                      ) : null}
+                      {selectedPointCloudUrl ? (
+                      <PotreeViewer key={selectedPointCloudUrl} url={selectedPointCloudUrl} />
                     ) : (
-                      <GlobeViewer projectId={selectedProject!.id} />
+                      <GlobeViewer key={selected3DAsset?.url || selectedProject!.id} projectId={selectedProject!.id} />
                     )}
+                    </>
                   </Suspense>
                 </div>
               ) : activeId === 'datasets' ? (

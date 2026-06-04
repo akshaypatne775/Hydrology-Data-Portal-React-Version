@@ -3122,6 +3122,11 @@ def _enforce_rate_limit(
     limit: int = RATE_LIMIT_HEAVY_REQUESTS,
     window_seconds: float = RATE_LIMIT_WINDOW_SECONDS,
 ) -> None:
+    # Chunked uploads legitimately send many sequential requests. Authentication,
+    # project access checks, disk limits, and completion processing still protect
+    # the upload flow; the generic heavy-request limiter must not block chunks.
+    if request.url.path in {"/api/upload-chunk", "/api/upload-dataset-chunk"}:
+        return
     now = time.monotonic()
     cutoff = now - window_seconds
     ip_address = _client_ip_for_limit(request)

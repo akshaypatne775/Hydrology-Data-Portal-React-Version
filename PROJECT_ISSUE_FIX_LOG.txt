@@ -205,3 +205,127 @@ Future note:
 - Do not use normal frontend\dist for Live. Live must use frontend\dist_live.
 - Do not run Live backend from backend\ source. Live must use Live_Backend_Release.
 ===============================================================================
+
+
+===============================================================================
+Date: 2026-06-04
+Area: Upload / Backend / Deployment
+Issue:
+- Live point-cloud upload failed at the first chunk.
+- Browser console showed 429 Too Many Requests for /api/upload-chunk and transient 502 responses.
+- Deployment script could only wait until 3:00 AM.
+
+Root cause:
+- The generic heavy-request rate limiter was also applied to chunk-upload endpoints.
+- Large point-cloud files legitimately send many sequential chunk requests, exceeding the generic request limit.
+
+Fix:
+- Exempted authenticated /api/upload-chunk and /api/upload-dataset-chunk requests from the generic heavy-request limiter.
+- Kept authentication, project access, disk capacity, completion, and processing checks active.
+- Added Deploy Now or Schedule for next 3:00 AM selection to 3_Nightly_Auto_Deploy.bat.
+
+Files touched:
+- backend/app/main.py
+- Droid_Environment_Manager/3_Nightly_Auto_Deploy.bat
+- Droid_Environment_Manager/ARCHITECTURE_REFERENCE.txt
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Code changes applied in Dev source.
+- Live release was intentionally not updated automatically; deploy using the updated script.
+
+Future note:
+- Never apply a low generic request-per-minute limit to individual upload chunks.
+- Use 3_Nightly_Auto_Deploy.bat and choose N for immediate deployment or S for the next 3:00 AM.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-04
+Area: 3D Viewer / Potree
+Issue:
+- A point-cloud dataset could fall back to the Cesium 3D viewer instead of opening Potree.
+- The reported live point-cloud upload had failed at 0%, so no Potree output existed to open.
+
+Root cause:
+- Dashboard Potree routing required the active layer URL to end exactly with .html.
+- Valid PointCloud/Potree entry URLs with query strings or alternate paths did not satisfy that strict suffix check.
+- Failed chunk uploads cannot generate the Potree viewer output.
+
+Fix:
+- Potree routing now detects PointCloud/Potree layer types and pointcloud/potree viewer URLs instead of requiring an exact .html suffix.
+- Point-cloud chunk upload rate-limit fix remains required before re-uploading the failed file.
+
+Files touched:
+- frontend/src/components/Dashboard.tsx
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Source routing fix applied in Dev.
+- Live deployment/restart must be run before testing the failed point-cloud upload again.
+
+Future note:
+- If Potree does not open, first confirm the upload completed and PotreeConverter output exists.
+- Point-cloud routing must be based on the layer type, not only an exact URL suffix.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-04
+Area: 3D Viewer / Potree / Cesium
+Issue:
+- The project 3D workspace did not provide one clear list of all project point clouds and 3D models.
+- Users could not explicitly choose Potree versus Cesium from the 3D workspace.
+
+Fix:
+- Added a project-scoped 3D asset sidebar to Viewer (3D).
+- Point Clouds and 3D Models render as separate sections.
+- Empty sections are not displayed.
+- Clicking a Point Cloud opens its layer in Potree.
+- Clicking a 3D Model switches the workspace to Cesium.
+- Asset detection uses dataset type, layer type, file name, and viewer URL.
+
+Files touched:
+- frontend/src/components/Dashboard.tsx
+- frontend/src/components/Dashboard.css
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Dev source changes applied.
+- Build command could not execute because the local command approval service timed out.
+- Live release was intentionally not updated automatically.
+
+Future note:
+- Keep PointCloud/Potree and 3DModel/Cesium routing explicit in the shared 3D workspace sidebar.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-04
+Area: 3D Viewer / Asset Discovery
+Issue:
+- Existing processed Potree point clouds were not appearing in the new Viewer (3D) sidebar.
+
+Root cause:
+- The sidebar only loaded project file entries.
+- Potree viewer URLs can be stored in processing job result_url instead of project file layer_url.
+- The asset list did not refresh when reopening Viewer (3D) after processing completed.
+
+Fix:
+- Viewer (3D) now combines 3D assets discovered from project files and processing jobs.
+- Point-cloud jobs with Potree result URLs are included in the Point Clouds section.
+- Viewer (3D) refreshes the project asset list whenever the 3D tab is opened.
+- 3D Models continue to appear conditionally and open the Cesium viewer.
+
+Files touched:
+- frontend/src/components/Dashboard.tsx
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Dev source fix applied.
+- Build/deploy command could not execute because the local command approval service timed out.
+- Live portal still requires Deploy Now before this correction is visible on port 4173.
+
+Future note:
+- Discover processed Potree assets from both project files and processing job result URLs.
+===============================================================================
