@@ -1,4 +1,4 @@
-import { apiRequestJson } from './api'
+import { apiRequest, apiRequestJson } from './api'
 
 export type Project = {
   id: string
@@ -7,6 +7,8 @@ export type Project = {
   date: string
   status: string
   type: string
+  owner_user_id?: number
+  owner_email?: string
 }
 
 export type CreateProjectPayload = Omit<Project, 'id'>
@@ -20,6 +22,11 @@ export async function listAdminUserProjects(userId: number): Promise<Project[]> 
   const data = await apiRequestJson<{ projects: Project[] }>(
     `/api/admin/users/${encodeURIComponent(String(userId))}/projects`,
   )
+  return data.projects ?? []
+}
+
+export async function listAdminProjects(): Promise<Project[]> {
+  const data = await apiRequestJson<{ projects: Project[] }>('/api/admin/projects')
   return data.projects ?? []
 }
 
@@ -37,4 +44,11 @@ export async function updateProjectName(projectId: string, name: string): Promis
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
   })
+}
+
+export async function deleteAdminProject(projectId: string): Promise<void> {
+  const res = await apiRequest(`/api/admin/projects/${encodeURIComponent(projectId)}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) throw new Error(`Project delete failed (${res.status})`)
 }

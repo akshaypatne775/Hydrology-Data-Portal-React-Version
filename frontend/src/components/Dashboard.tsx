@@ -6,13 +6,14 @@ import { getProjectFiles, getProjectJobs } from '../services/datasetService'
 import type { ProjectFile, ProjectJob } from '../services/datasetService'
 import { useWorkspaceContext } from '../context/WorkspaceContext'
 import { useModal } from '../context/ModalContext'
+import Viewer3DSidebar from './GlobeViewer/Viewer3DSidebar'
 import './Dashboard.css'
 
 const MapViewer = lazy(() =>
   import('./MapViewer/MapViewer').then((m) => ({ default: m.MapViewer })),
 )
 const GlobeViewer = lazy(() => import('./GlobeViewer/GlobeViewer'))
-const PotreeViewer = lazy(() => import('./GlobeViewer/PotreeViewer'))
+const PointCloudViewer = lazy(() => import('./GlobeViewer/PointCloudViewer'))
 const DatasetsPanel = lazy(() => import('./Datasets/DatasetsPanel'))
 const DownloadsPanel = lazy(() => import('./Downloads/DownloadsPanel'))
 const ComparePanel = lazy(() => import('./Compare/ComparePanel'))
@@ -20,6 +21,7 @@ const AdminDashboard = lazy(() => import('./Admin/AdminDashboard'))
 
 const DROID_CLOUD_LOGO_URL =
   'https://www.droidminingsolutions.com/wp-content/uploads/2026/06/Droid-Cloud-Logo.png'
+const WORKSPACE_STATE_KEY = 'droid_workspace_state_v1'
 
 const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: 'fa-solid fa-house' },
@@ -230,7 +232,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   } = useWorkspaceContext()
   const isAdmin = user.role === 'admin'
   const canAccessDataCatalog = isAdmin || user.can_access_catalog !== false
-  const { projects, loading: projectsLoading, error: projectsError, addProject, renameProject } = useProjects(managedUser?.userId)
+  const { projects, loading: projectsLoading, error: projectsError, addProject, renameProject, removeProject } = useProjects(managedUser?.userId, isAdmin && !managedUser)
   const [createProjectError, setCreateProjectError] = useState<string | null>(null)
   const [renamingProject, setRenamingProject] = useState(false)
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
@@ -242,6 +244,15 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     { label: 'Client Data Hub', value: '0', meta: 'Running server tasks', icon: 'fa-solid fa-gear' },
     { label: 'Reports', value: '0', meta: 'Downloadable files', icon: 'fa-solid fa-file-lines' },
   ])
+
+  useEffect(() => {
+    const payload = {
+      activeId,
+      activeViewerTab,
+      selectedProjectId: selectedProject?.id || '',
+    }
+    window.localStorage.setItem(WORKSPACE_STATE_KEY, JSON.stringify(payload))
+  }, [activeId, activeViewerTab, selectedProject?.id])
 
   const hiddenClientTabs = useMemo(() => new Set(isAdmin ? [] : user.hidden_tabs ?? []), [isAdmin, user.hidden_tabs])
   const visibleNavItems = useMemo(
@@ -316,7 +327,16 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   )
 
   useEffect(() => {
-    setSelectedProject((prev) => (prev ? projects.find((p) => p.id === prev.id) ?? null : null))
+    setSelectedProject((prev) => {
+      if (prev) return projects.find((p) => p.id === prev.id) ?? null
+      try {
+        const saved = JSON.parse(window.localStorage.getItem(WORKSPACE_STATE_KEY) || '{}') as { selectedProjectId?: string }
+        if (!saved.selectedProjectId) return null
+        return projects.find((project) => project.id === saved.selectedProjectId) ?? null
+      } catch {
+        return null
+      }
+    })
   }, [projects, setSelectedProject])
 
   useEffect(() => {
@@ -443,6 +463,25 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     }
   }, [modal, renameProject, selectedProject, setSelectedProject])
 
+  const handleDeleteProject = useCallback(async (project: Project) => {
+    const ok = await modal.confirm(
+      'Delete project',
+      `Delete "${project.name}"? This removes the project record and its uploaded project files. This action is available only to admins.`,
+    )
+    if (!ok) return
+    const typed = await modal.prompt('Confirm project delete', `Type DELETE to permanently delete "${project.name}".`)
+    if (typed !== 'DELETE') return
+    try {
+      await removeProject(project.id)
+      if (selectedProject?.id === project.id) {
+        setSelectedProject(null)
+        setActiveId('projects')
+      }
+    } catch (error) {
+      await modal.alert('Project delete failed', error instanceof Error ? error.message : 'Project delete failed')
+    }
+  }, [modal, removeProject, selectedProject?.id, setActiveId, setSelectedProject])
+
   const createProjectForm = useMemo(
     () => (
       <div className="ds-project-modal" role="dialog" aria-label="Create project">
@@ -510,7 +549,27 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   )
 
   return (
-    <div className={isSidebarCollapsed ? 'ds-dashboard ds-dashboard--sidebar-collapsed' : 'ds-dashboard'}>
+    <div
+      className={
+        routedViewerId === 'globe'
+          ? 'ds-dashboard ds-dashboard--3d-mode'
+          : isSidebarCollapsed
+            ? 'ds-dashboard ds-dashboard--sidebar-collapsed'
+            : 'ds-dashboard'
+      }
+    >
+      {routedViewerId === 'globe' ? (
+        <Viewer3DSidebar
+          pointClouds={projectPointClouds}
+          models={project3DModels}
+          selectedAsset={selected3DAsset}
+          onSelect={setSelected3DAsset}
+          onBack={() => {
+            setActiveViewerTab('2D')
+            setActiveId('map')
+          }}
+        />
+      ) : (
       <aside className="ds-sidebar" aria-label="Droid Cloud navigation">
         <div className="ds-sidebar__brand">
           <div className="ds-sidebar__brand-mark">
@@ -565,6 +624,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
 
         <div className="ds-sidebar__footer">Droid Cloud Workspace · v1</div>
       </aside>
+      )}
 
       <div className="ds-main">
         <header className="ds-topbar">
@@ -626,7 +686,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
             <Suspense fallback={<div className="ds-panel-loading">Loading admin panel...</div>}>
               <AdminDashboard />
             </Suspense>
-          ) : activeId === 'projects' && !selectedProject ? (
+          ) : (activeId === 'projects' || !selectedProject) ? (
             <section className="ds-projects" aria-label="Projects list">
               <header className="ds-projects__header">
                 <p className="ds-projects__kicker">
@@ -676,14 +736,33 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                     <p className="ds-project-card__meta">
                       <i className="fa-solid fa-compass-drafting" aria-hidden /> {project.type}
                     </p>
-                    <button
-                      type="button"
-                      className="ds-project-card__open"
-                      onClick={() => openProject(project)}
-                    >
-                      <i className="fa-solid fa-arrow-up-right-from-square" aria-hidden />
-                      Open Project
-                    </button>
+                    {isAdmin && project.owner_email ? (
+                      <p className="ds-project-card__owner">
+                        <i className="fa-solid fa-user" aria-hidden />
+                        <span>{project.owner_email}</span>
+                        {project.owner_user_id ? <small>User ID {project.owner_user_id}</small> : null}
+                      </p>
+                    ) : null}
+                    <div className="ds-project-card__actions">
+                      <button
+                        type="button"
+                        className="ds-project-card__open"
+                        onClick={() => openProject(project)}
+                      >
+                        <i className="fa-solid fa-arrow-up-right-from-square" aria-hidden />
+                        Open Project
+                      </button>
+                      {isAdmin ? (
+                        <button
+                          type="button"
+                          className="ds-project-card__delete"
+                          onClick={() => void handleDeleteProject(project)}
+                        >
+                          <i className="fa-solid fa-trash" aria-hidden />
+                          Delete
+                        </button>
+                      ) : null}
+                    </div>
                   </article>
                 ))}
               </div>
@@ -803,52 +882,12 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                 >
                   <Suspense fallback={<div className="ds-panel-loading">Loading 3D globe…</div>}>
                     <>
-                      {(projectPointClouds.length > 0 || project3DModels.length > 0) ? (
-                        <aside className="ds-3d-assets" aria-label="Project 3D assets">
-                          {projectPointClouds.length > 0 ? (
-                            <section className="ds-3d-assets__section">
-                              <h3><i className="fa-solid fa-cubes-stacked" aria-hidden /> Point Clouds</h3>
-                              <div className="ds-3d-assets__list">
-                                {projectPointClouds.map((asset) => (
-                                  <button
-                                    key={asset.id}
-                                    type="button"
-                                    className={selected3DAsset?.id === asset.id ? 'ds-3d-assets__item ds-3d-assets__item--active' : 'ds-3d-assets__item'}
-                                    onClick={() => setSelected3DAsset(asset)}
-                                    title={`Open ${asset.name} in Potree`}
-                                  >
-                                    <i className="fa-solid fa-cloud" aria-hidden />
-                                    <span>{asset.name}</span>
-                                    <small>Potree</small>
-                                  </button>
-                                ))}
-                              </div>
-                            </section>
-                          ) : null}
-                          {project3DModels.length > 0 ? (
-                            <section className="ds-3d-assets__section">
-                              <h3><i className="fa-solid fa-cube" aria-hidden /> 3D Models</h3>
-                              <div className="ds-3d-assets__list">
-                                {project3DModels.map((asset) => (
-                                  <button
-                                    key={asset.id}
-                                    type="button"
-                                    className={selected3DAsset?.id === asset.id ? 'ds-3d-assets__item ds-3d-assets__item--active' : 'ds-3d-assets__item'}
-                                    onClick={() => setSelected3DAsset(asset)}
-                                    title={`Open ${asset.name} in Cesium`}
-                                  >
-                                    <i className="fa-solid fa-cube" aria-hidden />
-                                    <span>{asset.name}</span>
-                                    <small>Cesium</small>
-                                  </button>
-                                ))}
-                              </div>
-                            </section>
-                          ) : null}
-                        </aside>
-                      ) : null}
                       {selectedPointCloudUrl ? (
-                      <PotreeViewer key={selectedPointCloudUrl} url={selectedPointCloudUrl} />
+                      <PointCloudViewer
+                        key={selectedPointCloudUrl}
+                        url={selectedPointCloudUrl}
+                        name={selected3DAsset?.name}
+                      />
                     ) : (
                       <GlobeViewer key={selected3DAsset?.url || selectedProject!.id} projectId={selectedProject!.id} />
                     )}

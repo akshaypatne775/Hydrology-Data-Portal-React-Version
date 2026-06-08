@@ -6,11 +6,13 @@ set "ROOT=%CD%"
 set "BACKEND_DIR=%ROOT%\backend"
 set "FRONTEND_DIR=%ROOT%\frontend"
 set "PROJECT_DATA_DIR=%ROOT%\Project_Data"
+set "LIVE_RELEASE_ROOT=D:\1_Portal_Workflows_development\DroidSurvair_Live_Release"
+set "LIVE_FRONTEND_DIR=%LIVE_RELEASE_ROOT%\frontend"
+set "LIVE_BACKEND_DIR=%LIVE_RELEASE_ROOT%\backend"
 set "PROD_DB=%PROJECT_DATA_DIR%\droid_cloud_prod.db"
 set "LEGACY_DB=%PROJECT_DATA_DIR%\issues.db"
 set "PYTHON_EXE=%BACKEND_DIR%\venv\Scripts\python.exe"
-set "LIVE_DIST=%FRONTEND_DIR%\dist_live\index.html"
-set "LIVE_BACKEND_DIR=%ROOT%\Droid_Environment_Manager\Live_Backend_Release\backend"
+set "LIVE_DIST=%LIVE_FRONTEND_DIR%\dist_live\index.html"
 popd
 
 color 0A
@@ -49,13 +51,16 @@ if errorlevel 1 (
 )
 
 if not exist "%PROJECT_DATA_DIR%" mkdir "%PROJECT_DATA_DIR%"
+if not exist "%LIVE_RELEASE_ROOT%" mkdir "%LIVE_RELEASE_ROOT%"
+if not exist "%LIVE_FRONTEND_DIR%" mkdir "%LIVE_FRONTEND_DIR%"
+if not exist "%LIVE_BACKEND_DIR%" mkdir "%LIVE_BACKEND_DIR%"
 if not exist "%PROD_DB%" if exist "%LEGACY_DB%" (
   echo [INFO] First-time migration: copying legacy issues.db to droid_cloud_prod.db...
   copy /Y "%LEGACY_DB%" "%PROD_DB%" >nul
 )
 
 if not exist "%LIVE_DIST%" (
-  echo [INFO] No deployed Live bundle found. Building first Live bundle into frontend\dist_live...
+  echo [INFO] No deployed Live bundle found. Building first Live bundle into external Live release...
   pushd "%FRONTEND_DIR%"
   set VITE_BACKEND_PORT=8000
   set VITE_BUILD_OUT_DIR=dist_live
@@ -67,9 +72,15 @@ if not exist "%LIVE_DIST%" (
     exit /b 1
   )
   popd
+  robocopy "%FRONTEND_DIR%\dist_live" "%LIVE_FRONTEND_DIR%\dist_live" /MIR >nul
+  if errorlevel 8 (
+    echo [ERROR] Failed to copy Live frontend bundle to "%LIVE_FRONTEND_DIR%\dist_live".
+    pause
+    exit /b 1
+  )
 ) else (
-  echo [INFO] Using existing deployed Live bundle: frontend\dist_live
-  echo [INFO] Source changes will not appear here until Nightly Auto Deploy rebuilds dist_live.
+  echo [INFO] Using existing external Live bundle: "%LIVE_FRONTEND_DIR%\dist_live"
+  echo [INFO] Source changes will not appear here until Deploy updates the external Live release.
 )
 
 if not exist "%LIVE_BACKEND_DIR%\app\main.py" (
@@ -84,8 +95,8 @@ if not exist "%LIVE_BACKEND_DIR%\app\main.py" (
   if exist "%BACKEND_DIR%\requirements.txt" copy /Y "%BACKEND_DIR%\requirements.txt" "%LIVE_BACKEND_DIR%\requirements.txt" >nul
   if exist "%BACKEND_DIR%\.env" copy /Y "%BACKEND_DIR%\.env" "%LIVE_BACKEND_DIR%\.env" >nul
 ) else (
-  echo [INFO] Using existing deployed Live backend copy: Droid_Environment_Manager\Live_Backend_Release\backend
-  echo [INFO] Backend source changes will not appear here until Nightly Auto Deploy refreshes this copy.
+  echo [INFO] Using existing external Live backend copy: "%LIVE_BACKEND_DIR%"
+  echo [INFO] Backend source changes will not appear here until Deploy refreshes this copy.
 )
 
 echo [INFO] Starting Live React preview on http://localhost:4173
@@ -98,6 +109,7 @@ echo.
 echo [READY] Live world started.
 echo        Backend:  127.0.0.1:8000  DB: Project_Data\droid_cloud_prod.db
 echo        Frontend: localhost:4173  Cloudflare tunnel target
+echo        Live release folder: "%LIVE_RELEASE_ROOT%"
 echo.
 pause
 endlocal

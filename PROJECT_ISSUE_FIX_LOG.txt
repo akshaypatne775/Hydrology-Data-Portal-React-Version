@@ -329,3 +329,151 @@ Verification:
 Future note:
 - Discover processed Potree assets from both project files and processing job result URLs.
 ===============================================================================
+
+
+===============================================================================
+Date: 2026-06-04
+Area: 3D Viewer / UI / Branding
+Issue:
+- The point-cloud rendering engine displayed its default sidebar, controls, and branding.
+- The standard portal sidebar did not provide a focused 3D asset workflow.
+
+Fix:
+- Added a clean PointCloudViewer wrapper that uses the existing renderer only as a background engine.
+- Default renderer sidebar, branding, logo, and map controls are strictly hidden.
+- Renderer canvas is forced to fill the available 3D viewer area without a sidebar gap.
+- Added a dedicated Viewer3DSidebar that replaces the normal portal sidebar in 3D mode.
+- Added Back to Map, Point Clouds, and conditional 3D Models tabs.
+- Point-cloud selection opens the clean point-cloud viewer; model selection opens Cesium.
+- Applied Deep Teal, Montserrat, and protected Font Awesome icon styling.
+
+Files touched:
+- frontend/src/components/GlobeViewer/PointCloudViewer.tsx
+- frontend/src/components/GlobeViewer/PointCloudViewer.css
+- frontend/src/components/GlobeViewer/Viewer3DSidebar.tsx
+- frontend/src/components/GlobeViewer/Viewer3DSidebar.css
+- frontend/src/components/Dashboard.tsx
+- frontend/src/components/Dashboard.css
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Dev source changes applied.
+- Build command could not execute because the local command approval service timed out.
+- Live release was intentionally not updated automatically.
+
+Future note:
+- Keep the point-cloud rendering engine visually silent; all navigation and branding must come from Droid Cloud UI.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-08
+Area: DevOps / Live-Dev Isolation / Database Safety
+Issue:
+- Live release artifacts were still stored inside the Dev project tree.
+- The desired operating model is that all code edits happen only in Dev, and Live updates happen only through BAT deployment scripts.
+
+Root cause:
+- Live frontend/backend release folders were previously under the Dev workspace, making the separation less obvious.
+
+Fix:
+- Created external Live release folder:
+  D:\1_Portal_Workflows_development\DroidSurvair_Live_Release
+- Live frontend now serves from:
+  D:\1_Portal_Workflows_development\DroidSurvair_Live_Release\frontend\dist_live
+- Live backend now runs from:
+  D:\1_Portal_Workflows_development\DroidSurvair_Live_Release\backend
+- Project_Data stays inside the Dev project folder.
+- Dev startup still snapshots live DB droid_cloud_prod.db into disposable droid_cloud_dev.db.
+- Deploy scripts copy code/builds to Live only and never copy dev DB data into live DB.
+
+Files touched:
+- Droid_Environment_Manager/2_Start_Live_Portal.bat
+- Droid_Environment_Manager/3_Nightly_Auto_Deploy.bat
+- Droid_Environment_Manager/_Run_Live_Backend_8000.bat
+- Droid_Environment_Manager/_Run_Live_Frontend_4173.bat
+- Droid_Environment_Manager/ARCHITECTURE_REFERENCE.txt
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- External Live folder structure was created with frontend, backend, and logs folders.
+- Script references now point to DroidSurvair_Live_Release for Live code artifacts.
+
+Future note:
+- Dev DB may be refreshed from Live DB on dev startup.
+- Dev DB must never be copied back into Live DB.
+- Live code changes should happen only through 3_Nightly_Auto_Deploy.bat.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-08
+Area: Projects / Auth / Update UX
+Issue:
+- Admin needed a project delete option directly from the project directory.
+- Users should not be logged out quickly after login.
+- Update refresh should not waste time by dropping the user back at the beginning of the portal.
+
+Fix:
+- Added admin-only DELETE /api/admin/projects/{project_id}.
+- Project delete removes project DB records, spatial data records, camera/crop records, processing jobs, cache, and project storage folders.
+- Added admin-only Delete button on project cards with confirm + typed DELETE safety.
+- Session TTL is guarded to never be below 24 hours.
+- Workspace tab, viewer tab, and selected project ID are saved to localStorage.
+- After an update refresh, the portal restores the user to the same project/workspace when possible.
+
+Files touched:
+- backend/app/main.py
+- frontend/src/services/projectService.ts
+- frontend/src/hooks/useProjects.ts
+- frontend/src/hooks/useWorkspaceState.ts
+- frontend/src/components/Dashboard.tsx
+- frontend/src/components/Dashboard.css
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Backend compile passed: python -m compileall backend/app
+- Frontend build passed: cmd /c npm run build
+
+Future note:
+- Project delete remains admin-only.
+- Update refresh may still reload the app shell, but workspace/project context should restore after reload.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-08
+Area: Admin / Projects / User Controls
+Issue:
+- Admin Projects view needed all users' projects with owner/user identity visible.
+- Admin Control needed easy user password reset.
+- Data Catalog visibility needed to move into the Hidden Tabs dropdown instead of a separate green/red button.
+
+Fix:
+- Added GET /api/admin/projects to return all projects with owner_user_id and owner_email.
+- Admin Projects tab now shows all user projects when admin is not managing a specific user.
+- Project cards show owner email and user ID for admins.
+- Added PATCH /api/admin/users/{user_id}/password for admin password reset and session invalidation.
+- Added Reset Password action in Admin Control.
+- Added Data Catalog to the hidden tabs dropdown.
+- Removed the separate visible/hidden Data Catalog column from Admin Control.
+- Data Catalog dropdown toggle keeps the legacy can_access_catalog flag and hidden_tabs in sync.
+
+Files touched:
+- backend/app/main.py
+- frontend/src/services/projectService.ts
+- frontend/src/hooks/useProjects.ts
+- frontend/src/services/adminService.ts
+- frontend/src/components/Admin/AdminDashboard.tsx
+- frontend/src/components/Dashboard.tsx
+- frontend/src/components/Dashboard.css
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Backend compile passed: python -m compileall backend/app
+- Frontend build passed: cmd /c npm run build
+
+Future note:
+- Data Catalog hiding is now controlled from the Hidden Tabs dropdown.
+- Admin password reset signs out that user by deleting their sessions.
+===============================================================================

@@ -8,6 +8,7 @@ import {
   deleteAdminUser,
   disapproveAdminUser,
   getAdminUserActivity,
+  resetAdminUserPassword,
   setAdminUserCatalogAccess,
   setAdminUserHiddenTabs,
   type AdminUserActivity,
@@ -15,6 +16,7 @@ import {
 import './AdminDashboard.css'
 
 const HIDEABLE_CLIENT_TABS = [
+  { id: 'datasets', label: 'Data Catalog' },
   { id: 'map', label: 'Viewer (2D)' },
   { id: 'globe', label: 'Viewer (3D)' },
   { id: 'compare', label: 'Compare' },
@@ -150,7 +152,24 @@ export default function AdminDashboard() {
     } else {
       current.delete(tabId)
     }
-    void runUserAction(() => setAdminUserHiddenTabs(user.user_id, Array.from(current)))
+    void runUserAction(async () => {
+      if (tabId === 'datasets') {
+        await setAdminUserCatalogAccess(user.user_id, !shouldHide)
+      }
+      await setAdminUserHiddenTabs(user.user_id, Array.from(current))
+    })
+  }
+
+  const resetPassword = async (user: AdminUserActivity) => {
+    const password = await modal.prompt('Reset password', `Enter new password for ${user.email}. Minimum 8 characters.`)
+    if (!password) return
+    if (password.length < 8) {
+      await modal.alert('Password too short', 'Password must be at least 8 characters.')
+      return
+    }
+    const ok = await modal.confirm('Confirm password reset', `Reset password for ${user.email}? Current sessions will be signed out.`)
+    if (!ok) return
+    void runUserAction(() => resetAdminUserPassword(user.user_id, password))
   }
 
   return (
@@ -180,7 +199,6 @@ export default function AdminDashboard() {
               <th>Total Connected IPs</th>
               <th>Last Accessed Dataset</th>
               <th>Last Seen</th>
-              <th>Data Catalog</th>
               <th>Hidden Tabs</th>
               <th>Action</th>
               <th>Approval</th>
@@ -190,12 +208,12 @@ export default function AdminDashboard() {
           <tbody>
             {loading && users.length === 0 ? (
               <tr>
-                <td colSpan={12}>Loading activity...</td>
+                <td colSpan={11}>Loading activity...</td>
               </tr>
             ) : null}
             {error ? (
               <tr>
-                <td colSpan={12} className="admin-panel__error">{error}</td>
+                <td colSpan={11} className="admin-panel__error">{error}</td>
               </tr>
             ) : null}
             {users.map((user) => (
@@ -239,23 +257,15 @@ export default function AdminDashboard() {
                 </td>
                 <td>{formatLastSeen(user.last_seen_at)}</td>
                 <td>
-                  <button
-                    type="button"
-                    className={user.can_access_catalog === false ? 'admin-panel__action admin-panel__action--catalog-off' : 'admin-panel__action admin-panel__action--catalog-on'}
-                    onClick={() => void runUserAction(() => setAdminUserCatalogAccess(user.user_id, user.can_access_catalog === false))}
-                    title={user.can_access_catalog === false ? 'Data Catalog is off for this user' : 'Data Catalog is on for this user'}
-                  >
-                    {user.can_access_catalog === false ? 'Hidden' : 'Visible'}
-                  </button>
-                </td>
-                <td>
                   <details className="admin-panel__tab-menu">
                     <summary>
-                      Hidden ({user.hidden_tabs?.length ?? 0})
+                      Hidden ({new Set([...(user.hidden_tabs ?? []), ...(user.can_access_catalog === false ? ['datasets'] : [])]).size})
                     </summary>
                     <div className="admin-panel__tab-menu-list">
                       {HIDEABLE_CLIENT_TABS.map((tab) => {
-                        const isHidden = Boolean(user.hidden_tabs?.includes(tab.id))
+                        const isHidden = tab.id === 'datasets'
+                          ? user.can_access_catalog === false || Boolean(user.hidden_tabs?.includes(tab.id))
+                          : Boolean(user.hidden_tabs?.includes(tab.id))
                         return (
                           <label key={tab.id} className="admin-panel__tab-option">
                             <input
@@ -281,6 +291,13 @@ export default function AdminDashboard() {
                     }}
                   >
                     Manage User Workspace
+                  </button>
+                  <button
+                    type="button"
+                    className="admin-panel__action admin-panel__action--ghost"
+                    onClick={() => void resetPassword(user)}
+                  >
+                    Reset Password
                   </button>
                 </td>
                 <td>
@@ -357,7 +374,7 @@ export default function AdminDashboard() {
             ))}
             {!loading && !error && users.length === 0 ? (
               <tr>
-                <td colSpan={12}>No users found.</td>
+                <td colSpan={11}>No users found.</td>
               </tr>
             ) : null}
           </tbody>

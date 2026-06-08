@@ -6,8 +6,10 @@ LIVE CLOUDFLARE WORLD
 - Frontend: Vite preview on http://localhost:4173
 - Backend: FastAPI on http://127.0.0.1:8000
 - Database: Project_Data\droid_cloud_prod.db
-- Frontend bundle served from: frontend\dist_live
-- Backend code served from: Droid_Environment_Manager\Live_Backend_Release\backend
+- External Live release folder: D:\1_Portal_Workflows_development\DroidSurvair_Live_Release
+- Frontend bundle served from: D:\1_Portal_Workflows_development\DroidSurvair_Live_Release\frontend\dist_live
+- Backend code served from: D:\1_Portal_Workflows_development\DroidSurvair_Live_Release\backend
+- Project data remains in the Dev project folder: Project_Data
 - Start script: Droid_Environment_Manager\2_Start_Live_Portal.bat
 - Cloudflare Tunnel should point to the frontend preview port 4173.
 - DEV_MODE=False tells the backend to use droid_cloud_prod.db.
@@ -25,6 +27,8 @@ CRUCIAL DATA SAFETY RULE
 - droid_cloud_prod.db is the live client database.
 - droid_cloud_dev.db is only a disposable developer snapshot.
 - Copying dev DB back to live can overwrite real client data, users, sessions, spatial assignments, and activity logs.
+- Dev startup copies Live DB -> Dev DB only.
+- Deploy scripts copy code/builds to Live only; they must never copy Dev DB -> Live DB.
 - Legacy issues.db may remain as an old backup/source file. Do not treat it as the active live database after migration.
 
 DATABASE LOCK PROTECTION
@@ -35,17 +39,21 @@ DATABASE LOCK PROTECTION
 
 UPDATES AND DEPLOYMENT
 - Dev source edits are made in backend\ and frontend\src.
-- Live does not serve normal frontend\dist anymore. Live serves frontend\dist_live.
-- Live backend does not run directly from backend\ anymore. Live runs from Droid_Environment_Manager\Live_Backend_Release\backend.
+- Live does not serve normal frontend\dist anymore.
+- Live serves only the external release bundle at D:\1_Portal_Workflows_development\DroidSurvair_Live_Release\frontend\dist_live.
+- Live backend does not run directly from backend\ anymore.
+- Live runs only from D:\1_Portal_Workflows_development\DroidSurvair_Live_Release\backend.
 - 2_Start_Live_Portal.bat starts the already deployed Live bundle/release copy. It only creates them once if missing.
 - 3_Nightly_Auto_Deploy.bat asks whether to deploy immediately or wait until the next 3:00 AM.
-- Selecting Deploy Now immediately refreshes frontend\dist_live and the Live backend release copy.
+- Selecting Deploy Now immediately refreshes the external Live frontend bundle and backend release copy.
 - Selecting Schedule waits until the next 3:00 AM before refreshing the Live release.
 - Frontend checks /api/version and shows a toast when a newer backend/frontend version is available.
 - The client does not hard-refresh during active work.
 - Between 2:00 AM and 4:00 AM, the frontend may silently reload only after 30 minutes of user inactivity.
 - Backend/frontend logic changes go live through Droid_Environment_Manager\3_Nightly_Auto_Deploy.bat.
 - Manual Live restart only restarts the last deployed release copy; it should not pick up current dev source changes.
+- Database schema changes go live when the deployed backend starts and runs ensure_tables against droid_cloud_prod.db.
+- Dev testing data never moves to Live unless explicitly entered again in Live.
 
 PORT SUMMARY
 - Live Cloudflare: Frontend 4173 -> Backend 8000 -> Project_Data\droid_cloud_prod.db

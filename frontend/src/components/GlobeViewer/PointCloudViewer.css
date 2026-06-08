@@ -1,0 +1,58 @@
+.point-cloud-viewer {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #071f25;
+  font-family: 'Montserrat', sans-serif;
+}
+
+.point-cloud-viewer > * {
+  flex: 1 1 auto;
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0;
+  min-height: 0;
+}
+
+#potree_render_area,
+.potree_render_area,
+.potree_container {
+  inset: 0 !important;
+  left: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  margin: 0 !important;
+}
+
+#potree_sidebar_container,
+#potree_branding,
+#potree_map_toggle,
+#potree_map,
+.potree-branding,
+.potree_branding,
+.potree-logo,
+.potree_logo,
+[class*='potree-brand'],
+[class*='potree-logo'],
+[id*='potree-brand'],
+[id*='potree-logo'] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.point-cloud-viewer i,
+.point-cloud-viewer i::before,
+.point-cloud-viewer i::after,
+.point-cloud-viewer .fa,
+.point-cloud-viewer .fas,
+.point-cloud-viewer .fa-solid {
+  font-family: "Font Awesome 6 Free" !important;
+  font-weight: 900 !important;
+}

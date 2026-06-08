@@ -5,9 +5,13 @@ pushd "%~dp0.."
 set "ROOT=%CD%"
 set "BACKEND_DIR=%ROOT%\backend"
 set "FRONTEND_DIR=%ROOT%\frontend"
+set "PROJECT_DATA_DIR=%ROOT%\Project_Data"
 set "PYTHON_EXE=%BACKEND_DIR%\venv\Scripts\python.exe"
-set "LOG_FILE=%ROOT%\Droid_Environment_Manager\deployment_log.txt"
-set "LIVE_BACKEND_DIR=%ROOT%\Droid_Environment_Manager\Live_Backend_Release\backend"
+set "LIVE_RELEASE_ROOT=D:\1_Portal_Workflows_development\DroidSurvair_Live_Release"
+set "LIVE_FRONTEND_DIR=%LIVE_RELEASE_ROOT%\frontend"
+set "LIVE_BACKEND_DIR=%LIVE_RELEASE_ROOT%\backend"
+set "LOG_DIR=%LIVE_RELEASE_ROOT%\logs"
+set "LOG_FILE=%LOG_DIR%\deployment_log.txt"
 popd
 
 color 09
@@ -31,6 +35,11 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+
+if not exist "%LIVE_RELEASE_ROOT%" mkdir "%LIVE_RELEASE_ROOT%"
+if not exist "%LIVE_FRONTEND_DIR%" mkdir "%LIVE_FRONTEND_DIR%"
+if not exist "%LIVE_BACKEND_DIR%" mkdir "%LIVE_BACKEND_DIR%"
+if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
 echo Choose when to deploy the current Dev release to Live:
 echo   [N] Deploy Now
@@ -62,6 +71,14 @@ if errorlevel 1 (
   exit /b 1
 )
 popd
+echo [INFO] Copying frontend bundle to external Live release...
+robocopy "%FRONTEND_DIR%\dist_live" "%LIVE_FRONTEND_DIR%\dist_live" /MIR >nul
+if errorlevel 8 (
+  echo [%DATE% %TIME%] Frontend copy to external Live release failed.>> "%LOG_FILE%"
+  echo [ERROR] Frontend copy to external Live release failed.
+  pause
+  exit /b 1
+)
 echo [%DATE% %TIME%] Frontend build completed.>> "%LOG_FILE%"
 
 echo [INFO] Refreshing Live backend release copy...
@@ -87,6 +104,7 @@ echo [INFO] Restarting Live backend on http://127.0.0.1:8000
 start "Droid Live Backend 8000" "%ComSpec%" /k call "%~dp0_Run_Live_Backend_8000.bat"
 
 echo [%DATE% %TIME%] Live backend restarted on port 8000.>> "%LOG_FILE%"
+echo [%DATE% %TIME%] Live release folder: %LIVE_RELEASE_ROOT%.>> "%LOG_FILE%"
 echo [DONE] Nightly deployment completed. Log: "%LOG_FILE%"
 pause
 endlocal

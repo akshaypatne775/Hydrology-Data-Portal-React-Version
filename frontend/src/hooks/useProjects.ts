@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   createProject,
+  deleteAdminProject,
+  listAdminProjects,
   listAdminUserProjects,
   listProjects,
   updateProjectName,
@@ -8,7 +10,7 @@ import {
   type Project,
 } from '../services/projectService'
 
-export function useProjects(managedUserId?: number) {
+export function useProjects(managedUserId?: number, includeAllAdminProjects = false) {
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -17,7 +19,11 @@ export function useProjects(managedUserId?: number) {
     setLoading(true)
     setError(null)
     try {
-      const rows = managedUserId ? await listAdminUserProjects(managedUserId) : await listProjects()
+      const rows = managedUserId
+        ? await listAdminUserProjects(managedUserId)
+        : includeAllAdminProjects
+          ? await listAdminProjects()
+          : await listProjects()
       setProjects(rows)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load projects')
@@ -25,7 +31,7 @@ export function useProjects(managedUserId?: number) {
     } finally {
       setLoading(false)
     }
-  }, [managedUserId])
+  }, [includeAllAdminProjects, managedUserId])
 
   useEffect(() => {
     void refresh()
@@ -43,5 +49,10 @@ export function useProjects(managedUserId?: number) {
     return updated
   }, [])
 
-  return { projects, loading, error, refresh, addProject, renameProject }
+  const removeProject = useCallback(async (projectId: string) => {
+    await deleteAdminProject(projectId)
+    setProjects((prev) => prev.filter((project) => project.id !== projectId))
+  }, [])
+
+  return { projects, loading, error, refresh, addProject, renameProject, removeProject }
 }

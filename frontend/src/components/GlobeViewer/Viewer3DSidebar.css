@@ -1,0 +1,134 @@
+.viewer-3d-sidebar {
+  display: flex;
+  flex-direction: column;
+  width: 18rem;
+  height: 100dvh;
+  flex: 0 0 18rem;
+  padding: 1rem;
+  overflow: hidden;
+  background: #0e3e49;
+  color: #ffffff;
+  border-right: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 8px 0 28px rgba(2, 20, 25, 0.24);
+  font-family: 'Montserrat', sans-serif;
+}
+
+.viewer-3d-sidebar__back {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 2.5rem;
+  padding: 0 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+  font-family: 'Montserrat', sans-serif;
+  font-size: 0.75rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.viewer-3d-sidebar__back:hover {
+  background: #145461;
+}
+
+.viewer-3d-sidebar__header {
+  display: grid;
+  gap: 0.2rem;
+  padding: 1.25rem 0 0.9rem;
+}
+
+.viewer-3d-sidebar__header span {
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.viewer-3d-sidebar__header strong {
+  font-size: 1rem;
+}
+
+.viewer-3d-sidebar__tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.35rem;
+  padding-bottom: 0.75rem;
+}
+
+.viewer-3d-sidebar__tab {
+  min-height: 2.3rem;
+  padding: 0 0.45rem;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.72);
+  font-family: 'Montserrat', sans-serif;
+  font-size: 0.68rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.viewer-3d-sidebar__tab--active,
+.viewer-3d-sidebar__tab:hover {
+  border-color: #ffffff;
+  background: #ffffff;
+  color: #0e3e49;
+}
+
+.viewer-3d-sidebar__list {
+  display: grid;
+  gap: 0.4rem;
+  overflow-y: auto;
+}
+
+.viewer-3d-sidebar__asset {
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.6rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.82);
+  font-family: 'Montserrat', sans-serif;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-align: left;
+  cursor: pointer;
+}
+
+.viewer-3d-sidebar__asset span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-3d-sidebar__asset:hover,
+.viewer-3d-sidebar__asset--active {
+  border-color: rgba(255, 255, 255, 0.72);
+  background: #ffffff;
+  color: #0e3e49;
+}
+
+.viewer-3d-sidebar i,
+.viewer-3d-sidebar i::before,
+.viewer-3d-sidebar i::after,
+.viewer-3d-sidebar .fa,
+.viewer-3d-sidebar .fas,
+.viewer-3d-sidebar .fa-solid {
+  font-family: "Font Awesome 6 Free" !important;
+  font-weight: 900 !important;
+}
+
+@media (max-width: 760px) {
+  .viewer-3d-sidebar {
+    width: 14rem;
+    flex-basis: 14rem;
+  }
+}

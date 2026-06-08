@@ -12,6 +12,32 @@
 }
 
 /* —— Sidebar —— */
+.ds-dashboard--3d-mode .ds-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ds-dashboard--3d-mode .ds-content,
+.ds-dashboard--3d-mode .ds-map-shell,
+.ds-dashboard--3d-mode .ds-map-body--globe {
+  display: flex;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.ds-dashboard--3d-mode .ds-map-shell {
+  flex-direction: column;
+}
+
+.ds-dashboard--3d-mode .ds-map-body--globe > * {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
 .ds-sidebar {
   display: flex;
   flex-direction: column;
@@ -470,6 +496,34 @@
   gap: 0.45rem;
 }
 
+.ds-project-card__owner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.15rem 0 0;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid rgba(14, 62, 73, 0.18);
+  border-radius: 8px;
+  background: rgba(14, 62, 73, 0.06);
+  color: #0e3e49;
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.ds-project-card__owner span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ds-project-card__owner small {
+  color: #64748b;
+  font-size: 0.66rem;
+  font-weight: 800;
+}
+
 .ds-project-card__open {
   margin-top: 0.45rem;
   align-self: flex-start;
@@ -490,6 +544,40 @@
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
+}
+
+.ds-project-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: auto;
+}
+
+.ds-project-card__delete {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: max-content;
+  padding: 0.48rem 0.75rem;
+  border: 1px solid #b91c1c;
+  border-radius: 999px;
+  background: #b91c1c;
+  color: #ffffff;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.ds-project-card__delete:hover {
+  background: #991b1b;
+}
+
+.ds-project-card__delete i,
+.ds-project-card__delete i::before,
+.ds-project-card__delete i::after {
+  font-family: "Font Awesome 6 Free" !important;
+  font-weight: 900 !important;
 }
 
 .ds-project-card__open:hover {

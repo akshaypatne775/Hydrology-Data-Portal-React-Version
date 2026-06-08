@@ -70,6 +70,15 @@ export async function setAdminUserHiddenTabs(userId: number, hiddenTabs: string[
   if (!res.ok) throw new Error(`Hidden tabs update failed (${res.status})`)
 }
 
+export async function resetAdminUserPassword(userId: number, password: string): Promise<void> {
+  const res = await apiRequest(`/api/admin/users/${encodeURIComponent(String(userId))}/password`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  })
+  if (!res.ok) throw new Error(`Password reset failed (${res.status})`)
+}
+
 export async function disapproveAdminUser(userId: number): Promise<void> {
   const res = await apiRequest(`/api/admin/users/${encodeURIComponent(String(userId))}/disapprove`, {
     method: 'POST',

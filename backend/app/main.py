@@ -137,7 +137,7 @@ TIFF_TILE_MIN_ZOOM_LIMIT = int(os.getenv("TIFF_TILE_MIN_ZOOM_LIMIT", "14"))
 TIFF_TILE_MAX_ZOOM_LIMIT = int(os.getenv("TIFF_TILE_MAX_ZOOM_LIMIT", "19"))
 TIFF_TILE_SIZE = int(os.getenv("TIFF_TILE_SIZE", "256"))
 SESSION_COOKIE_NAME = "droid_cloud_session"
-SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "604800"))
+SESSION_TTL_SECONDS = max(86_400, int(os.getenv("SESSION_TTL_SECONDS", "604800")))
 SESSION_SECRET_FILE = Path(LOCAL_DATA_PATH) / ".session_signing_secret"
 OWNER_APPROVAL_EMAIL = os.getenv("OWNER_APPROVAL_EMAIL", "akshaydroid123@gmail.com").strip()
 ADMIN_ALERT_PHONE = os.getenv("ADMIN_ALERT_PHONE", "+917057723981").strip()
@@ -537,6 +537,10 @@ class AdminUserApprovalPayload(BaseModel):
 
 class AdminUserRolePayload(BaseModel):
     role: str
+
+
+class AdminUserPasswordResetPayload(BaseModel):
+    password: str
 
 
 class AdminUserHiddenTabsPayload(BaseModel):
@@ -2478,6 +2482,13 @@ def _upsert_processing_job(project_id: str, job: dict[str, str]) -> None:
     _write_processing_jobs(jobs)
 
 
+def _remove_project_processing_jobs(project_id: str) -> None:
+    jobs = _read_processing_jobs()
+    if project_id in jobs:
+        del jobs[project_id]
+        _write_processing_jobs(jobs)
+
+
 def _sync_dataset_metadata_to_processing_job(project_id: str, dataset_id: str, st: dict[str, str]) -> None:
     jobs = _read_processing_jobs()
     current = jobs.get(project_id, [])
@@ -2890,7 +2901,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-HIDEABLE_USER_TABS = {"map", "globe", "compare", "downloads"}
+HIDEABLE_USER_TABS = {"datasets", "map", "globe", "compare", "downloads"}
 
 
 def _normalize_hidden_tabs(value: object) -> list[str]:
@@ -3547,6 +3558,39 @@ def admin_user_projects(
     }
 
 
+@app.get("/api/admin/projects")
+def admin_all_projects(
+    request: Request,
+    admin_user: dict[str, object] = Depends(verify_admin),
+) -> dict[str, list[dict[str, object]]]:
+    del request, admin_user
+    with get_db_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT p.id, p.name, p.location, p.date, p.status, p.type,
+                   u.id AS owner_user_id, u.email AS owner_email
+            FROM projects p
+            JOIN users u ON u.id = p.owner_user_id
+            ORDER BY p.created_at DESC
+            """,
+        ).fetchall()
+    return {
+        "projects": [
+            {
+                "id": str(row["id"]),
+                "name": str(row["name"]),
+                "location": str(row["location"]),
+                "date": str(row["date"]),
+                "status": str(row["status"]),
+                "type": str(row["type"]),
+                "owner_user_id": int(row["owner_user_id"]),
+                "owner_email": str(row["owner_email"]),
+            }
+            for row in rows
+        ],
+    }
+
+
 @app.post("/api/admin/users/{user_id}/approve")
 def admin_approve_user(
     user_id: int,
@@ -3619,6 +3663,30 @@ def admin_assign_user_role(
         f"Your Droid Cloud role is now: {role}.\n\nLogin: {PUBLIC_PORTAL_URL}\n",
     )
     return {"status": "success", "role": role}
+
+
+@app.patch("/api/admin/users/{user_id}/password")
+def admin_reset_user_password(
+    user_id: int,
+    payload: AdminUserPasswordResetPayload,
+    admin: dict[str, object] = Depends(verify_admin),
+) -> dict[str, object]:
+    del admin
+    password_hash = _hash_password(payload.password)
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT id, email FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+        connection.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (password_hash, user_id),
+        )
+        connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        connection.commit()
+    return {"status": "success", "user_id": user_id, "email": str(row["email"])}
 
 
 @app.patch("/api/admin/users/{user_id}/catalog-access")
@@ -3751,17 +3819,8 @@ def admin_advanced_delete_user(
         ).fetchall()
         project_ids = [str(row["id"]) for row in project_rows]
 
-    local_root = Path(LOCAL_DATA_PATH).resolve()
     for project_id in project_ids:
-        safe_project_id = _safe_project_id(project_id)
-        for target in (
-            local_root / "projects" / safe_project_id,
-            local_root / "datasets" / safe_project_id,
-            local_root / "pointclouds" / safe_project_id,
-        ):
-            resolved = target.resolve()
-            if resolved.exists() and local_root in resolved.parents:
-                shutil.rmtree(resolved, ignore_errors=True)
+        _delete_project_storage(project_id)
 
     with get_db_connection() as connection:
         for project_id in project_ids:
@@ -3774,6 +3833,19 @@ def admin_advanced_delete_user(
         connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
         connection.commit()
     return {"status": "success", "deleted_projects": len(project_ids)}
+
+
+def _delete_project_storage(project_id: str) -> None:
+    safe_project_id = _safe_project_id(project_id)
+    local_root = Path(LOCAL_DATA_PATH).resolve()
+    for target in (
+        local_root / "projects" / safe_project_id,
+        local_root / "datasets" / safe_project_id,
+        local_root / "pointclouds" / safe_project_id,
+    ):
+        resolved = target.resolve()
+        if resolved.exists() and local_root in resolved.parents:
+            shutil.rmtree(resolved, ignore_errors=True)
 
 
 @app.get("/api/admin/override/project/{project_id}")
@@ -3836,6 +3908,40 @@ def admin_patch_project_override(
     if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail="Project not found")
     return admin_get_project_override(safe_project_id, request)
+
+
+@app.delete("/api/admin/projects/{project_id}")
+def admin_delete_project(
+    project_id: str,
+    request: Request,
+    admin_user: dict[str, object] = Depends(verify_admin),
+) -> dict[str, object]:
+    del request, admin_user
+    safe_project_id = _safe_project_id(project_id)
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT id, name FROM projects WHERE id = ?",
+            (safe_project_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+    _delete_project_storage(safe_project_id)
+
+    with get_db_connection() as connection:
+        connection.execute("DELETE FROM camera_views WHERE project_id = ?", (safe_project_id,))
+        connection.execute("DELETE FROM dataset_crop_masks WHERE project_id = ?", (safe_project_id,))
+        connection.execute("DELETE FROM spatial_features WHERE project_id = ?", (safe_project_id,))
+        connection.execute("DELETE FROM spatial_layers WHERE project_id = ?", (safe_project_id,))
+        connection.execute("DELETE FROM projects WHERE id = ?", (safe_project_id,))
+        connection.commit()
+    _remove_project_processing_jobs(safe_project_id)
+    _invalidate_project_files_cache(safe_project_id)
+    return {
+        "status": "success",
+        "project_id": safe_project_id,
+        "project_name": str(row["name"]),
+    }
 
 
 @app.get("/api/projects")

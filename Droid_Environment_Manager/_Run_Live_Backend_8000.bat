@@ -4,7 +4,9 @@ setlocal EnableExtensions
 pushd "%~dp0.."
 set "ROOT=%CD%"
 set "SOURCE_BACKEND_DIR=%ROOT%\backend"
-set "LIVE_BACKEND_DIR=%ROOT%\Droid_Environment_Manager\Live_Backend_Release\backend"
+set "PROJECT_DATA_DIR=%ROOT%\Project_Data"
+set "LIVE_RELEASE_ROOT=D:\1_Portal_Workflows_development\DroidSurvair_Live_Release"
+set "LIVE_BACKEND_DIR=%LIVE_RELEASE_ROOT%\backend"
 set "PYTHON_EXE=%SOURCE_BACKEND_DIR%\venv\Scripts\python.exe"
 popd
 
@@ -32,11 +34,12 @@ if not exist "%LIVE_BACKEND_DIR%\app\main.py" (
 
 pushd "%LIVE_BACKEND_DIR%"
 set DEV_MODE=False
-set LOCAL_DATA_PATH=%ROOT%\Project_Data
+set LOCAL_DATA_PATH=%PROJECT_DATA_DIR%
 set PORTAL_VERSION=live-%RANDOM%
 echo [INFO] Starting FastAPI on http://127.0.0.1:8000
 echo [INFO] Database: Project_Data\droid_cloud_prod.db
-echo [INFO] Backend code: Droid_Environment_Manager\Live_Backend_Release\backend
+echo [INFO] Backend code: "%LIVE_BACKEND_DIR%"
+echo [INFO] Project data: "%PROJECT_DATA_DIR%"
 echo.
 "%PYTHON_EXE%" -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 set "EXIT_CODE=%ERRORLEVEL%"

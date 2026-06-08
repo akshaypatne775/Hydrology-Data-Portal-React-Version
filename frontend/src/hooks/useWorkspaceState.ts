@@ -1,6 +1,21 @@
 import { useCallback, useMemo, useState } from 'react'
 import type { Project } from '../services/projectService'
 
+const WORKSPACE_STATE_KEY = 'droid_workspace_state_v1'
+
+function readSavedWorkspaceState(): { activeId?: WorkspaceTabId; activeViewerTab?: ActiveViewerTab } {
+  if (typeof window === 'undefined') return {}
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(WORKSPACE_STATE_KEY) || '{}') as {
+      activeId?: WorkspaceTabId
+      activeViewerTab?: ActiveViewerTab
+    }
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
 export type WorkspaceTabId =
   | 'dashboard'
   | 'projects'
@@ -34,7 +49,8 @@ export type ActiveLayerConfig = {
 }
 
 export function useWorkspaceState() {
-  const [activeId, setActiveId] = useState<WorkspaceTabId>('projects')
+  const saved = readSavedWorkspaceState()
+  const [activeId, setActiveId] = useState<WorkspaceTabId>(saved.activeId || 'projects')
   const [selectedProject, setSelectedProject] = useState<Project | null>(null)
   const [managedUser, setManagedUser] = useState<{ userId: number; email: string } | null>(null)
   const [floodSimulationLevel, setFloodSimulationLevel] = useState(0)
@@ -48,7 +64,7 @@ export function useWorkspaceState() {
   })
   const [shareCopied, setShareCopied] = useState(false)
   const [activeLayers, setActiveLayers] = useState<ActiveLayerConfig[]>([])
-  const [activeViewerTab, setActiveViewerTab] = useState<ActiveViewerTab>('2D')
+  const [activeViewerTab, setActiveViewerTab] = useState<ActiveViewerTab>(saved.activeViewerTab || '2D')
 
   const upsertLayer = useCallback((layerConfig: ActiveLayerConfig) => {
     setActiveLayers((prev) => {
