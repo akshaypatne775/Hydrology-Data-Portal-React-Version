@@ -139,8 +139,9 @@
 }
 
 .ds-sidebar__link:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.14);
   color: #fff;
+  border-color: rgba(255, 255, 255, 0.16);
 }
 
 .ds-sidebar__link--active {
@@ -155,10 +156,16 @@
 }
 
 .ds-sidebar__link--admin.ds-sidebar__link--active {
-  background: #b91c1c;
+  background: #c81e1e;
   color: #fff;
   border-color: rgba(254, 202, 202, 0.75);
-  box-shadow: 0 8px 22px rgba(185, 28, 28, 0.32);
+  box-shadow: 0 8px 22px rgba(200, 30, 30, 0.32);
+}
+
+.ds-sidebar__link--admin:hover {
+  background: rgba(200, 30, 30, 0.22);
+  color: #ffffff;
+  border-color: rgba(254, 202, 202, 0.32);
 }
 
 .ds-sidebar__link i {
@@ -314,7 +321,9 @@
 }
 
 .ds-share:hover {
-  background: #f8fafb;
+  background: #e7f2f4;
+  border-color: rgba(14, 62, 73, 0.34);
+  color: #0e3e49;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
 }
 
@@ -559,9 +568,9 @@
   gap: 0.4rem;
   width: max-content;
   padding: 0.48rem 0.75rem;
-  border: 1px solid #b91c1c;
+  border: 1px solid #c81e1e;
   border-radius: 999px;
-  background: #b91c1c;
+  background: #c81e1e;
   color: #ffffff;
   font-size: 0.68rem;
   font-weight: 800;
@@ -571,6 +580,8 @@
 
 .ds-project-card__delete:hover {
   background: #991b1b;
+  border-color: #991b1b;
+  color: #ffffff;
 }
 
 .ds-project-card__delete i,
@@ -1180,6 +1191,121 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+}
+
+@media (max-width: 1440px) and (min-width: 901px) {
+  .ds-sidebar {
+    width: 14.25rem;
+  }
+
+  .ds-sidebar__brand {
+    padding: 1rem 0.9rem 0.85rem;
+  }
+
+  .ds-sidebar__logo-img {
+    width: min(142px, 76%);
+  }
+
+  .ds-sidebar__nav {
+    gap: 0.28rem;
+    padding: 0.85rem 0.62rem;
+  }
+
+  .ds-sidebar__link {
+    gap: 0.58rem;
+    padding: 0.66rem 0.72rem;
+    border-radius: 10px;
+    font-size: 0.78rem;
+  }
+
+  .ds-topbar {
+    height: auto;
+    min-height: 3.75rem;
+    padding: 0.55rem 1rem;
+  }
+
+  .ds-topbar__project {
+    flex: 1 1 auto;
+    max-width: min(34vw, 28rem);
+  }
+
+  .ds-topbar__actions {
+    min-width: 0;
+    gap: 0.55rem;
+  }
+
+  .ds-share {
+    padding: 0.45rem 0.78rem;
+    font-size: 0.68rem;
+  }
+
+  .ds-profile {
+    max-width: min(30vw, 18rem);
+  }
+
+  .ds-profile__meta {
+    min-width: 0;
+  }
+
+  .ds-profile__name {
+    max-width: 12rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ds-content {
+    padding: 0.9rem 1rem 1.1rem;
+  }
+
+  .ds-map-shell,
+  .ds-map-shell--viewer,
+  .ds-map-shell--analysis {
+    height: calc(100dvh - 5.6rem);
+    min-height: 30rem;
+  }
+
+  .ds-overview-hero {
+    padding: 1rem 1.05rem;
+  }
+
+  .ds-overview-metrics {
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  }
+
+  .ds-module-grid {
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  }
+}
+
+@media (max-width: 1120px) and (min-width: 901px) {
+  .ds-sidebar {
+    width: 12.75rem;
+  }
+
+  .ds-sidebar__link {
+    font-size: 0.72rem;
+    padding-inline: 0.58rem;
+  }
+
+  .ds-topbar {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .ds-topbar__actions {
+    flex: 1 1 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .ds-topbar__project {
+    max-width: calc(100% - 9rem);
+  }
+
+  .ds-profile {
+    max-width: 22rem;
   }
 }
 

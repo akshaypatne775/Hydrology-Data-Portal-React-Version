@@ -19,10 +19,12 @@ import { completeUpload, getPointCloudStatus, uploadChunk } from '../services/po
 import { saveWebReadyCogLayer } from '../utils/datasetLayerStorage'
 import { readUploadedTilesets, writeUploadedTilesets } from '../utils/pointCloudStorage'
 
-const POINT_CLOUD_CHUNK_SIZE_BYTES = 10 * 1024 * 1024
+const POINT_CLOUD_CHUNK_SIZE_BYTES = 8 * 1024 * 1024
 const DATASET_CHUNK_SIZE_BYTES = 8 * 1024 * 1024
 const LARGE_RASTER_DIRECT_UPLOAD_LIMIT_BYTES = 1024 * 1024 * 1024
+const POINT_CLOUD_CHUNK_MAX_RETRIES = 8
 const DATASET_CHUNK_MAX_RETRIES = 4
+const POINT_CLOUD_CONVERSION_TIMEOUT_MS = 24 * 60 * 60 * 1000
 
 export type UploadTask = {
   id: string
@@ -90,6 +92,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
   const startPointCloudUpload = useCallback(
     async (file: File, projectId: string) => {
       const id = taskId('pointcloud', projectId, file.name)
+      const uploadStartedAt = Date.now()
       createTask({
         id,
         kind: 'pointcloud',
@@ -99,7 +102,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
         statusText: `Uploading ${file.name}...`,
         state: 'uploading',
         stage: 'Uploading file',
-        startedAt: Date.now(),
+        startedAt: uploadStartedAt,
       })
 
       const totalChunks = Math.ceil(file.size / POINT_CLOUD_CHUNK_SIZE_BYTES)
@@ -108,21 +111,56 @@ export function UploadProvider({ children }: PropsWithChildren) {
         for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
           const start = chunkIndex * POINT_CLOUD_CHUNK_SIZE_BYTES
           const end = Math.min(start + POINT_CLOUD_CHUNK_SIZE_BYTES, file.size)
-          const chunk = file.slice(start, end)
-          const chunkForm = new FormData()
-          chunkForm.append('filename', file.name)
-          chunkForm.append('project_id', projectId)
-          chunkForm.append('chunkIndex', String(chunkIndex))
-          chunkForm.append('totalChunks', String(totalChunks))
-          chunkForm.append('chunk', chunk, `${file.name}.part.${chunkIndex}`)
-
-          const chunkResponse = await uploadChunk(chunkForm)
-          if (!chunkResponse.ok) {
-            throw new Error(`Chunk upload failed at part ${chunkIndex + 1}`)
+          let uploaded = false
+          let lastError: Error | null = null
+          for (let attempt = 1; attempt <= POINT_CLOUD_CHUNK_MAX_RETRIES; attempt += 1) {
+            const chunk = file.slice(start, end)
+            const chunkForm = new FormData()
+            chunkForm.append('filename', file.name)
+            chunkForm.append('project_id', projectId)
+            chunkForm.append('chunkIndex', String(chunkIndex))
+            chunkForm.append('totalChunks', String(totalChunks))
+            chunkForm.append('chunk', chunk, `${file.name}.part.${chunkIndex}`)
+            try {
+              const chunkResponse = await uploadChunk(chunkForm)
+              if (chunkResponse.ok) {
+                uploaded = true
+                break
+              }
+              let detail = ''
+              try {
+                const data = (await chunkResponse.json()) as { detail?: unknown }
+                detail = data.detail ? `: ${String(data.detail)}` : ''
+              } catch {
+                detail = ''
+              }
+              lastError = new Error(`Point cloud chunk upload failed (${chunkResponse.status})${detail}`)
+              if (![408, 429, 500, 502, 503, 504].includes(chunkResponse.status)) {
+                ;(lastError as Error & { nonRetryable?: boolean }).nonRetryable = true
+                throw lastError
+              }
+            } catch (error) {
+              lastError = error instanceof Error ? error : new Error('Point cloud chunk upload failed')
+              if ((lastError as Error & { nonRetryable?: boolean }).nonRetryable) throw lastError
+              if (attempt >= POINT_CLOUD_CHUNK_MAX_RETRIES) break
+              const uploadPercent = ((chunkIndex + 1) / totalChunks) * 100
+              upsertTask(id, {
+                progressPercent: Math.max(1, Math.min(99, uploadPercent)),
+                state: 'uploading',
+                stage: `Retrying upload chunk ${chunkIndex + 1}/${totalChunks}`,
+                etaText: estimateEtaFromProgress(uploadStartedAt, uploadPercent),
+                statusText: `Network interruption. Retrying point cloud part ${chunkIndex + 1}/${totalChunks} (${attempt + 1}/${POINT_CLOUD_CHUNK_MAX_RETRIES})...`,
+              })
+              await wait(1600 * attempt)
+            }
           }
+          if (!uploaded) throw lastError || new Error(`Point cloud chunk upload failed at part ${chunkIndex + 1}`)
           upsertTask(id, {
             progressPercent: ((chunkIndex + 1) / totalChunks) * 100,
-            statusText: `Uploading ${file.name}...`,
+            state: 'uploading',
+            stage: 'Uploading file in chunks',
+            etaText: estimateEtaFromProgress(uploadStartedAt, ((chunkIndex + 1) / totalChunks) * 100),
+            statusText: `Uploading ${file.name} (${chunkIndex + 1}/${totalChunks})...`,
           })
         }
 
@@ -154,7 +192,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
         })
 
         const started = Date.now()
-        while (Date.now() - started < 2 * 60 * 60 * 1000) {
+        while (Date.now() - started < POINT_CLOUD_CONVERSION_TIMEOUT_MS) {
           const status = await getPointCloudStatus(projectId, completeData.tileset_id)
           if (status?.failed) {
             throw new Error(status.error || 'Point cloud conversion failed.')
@@ -171,9 +209,15 @@ export function UploadProvider({ children }: PropsWithChildren) {
             })
             return
           }
+          upsertTask(id, {
+            state: 'processing',
+            statusText: `Converting ${file.name} to Potree viewer...`,
+            stage: 'Potree conversion running',
+            etaText: 'Large point clouds can take several hours',
+          })
           await new Promise((resolve) => window.setTimeout(resolve, 2000))
         }
-        throw new Error('Timed out waiting for point cloud conversion.')
+        throw new Error('Timed out waiting for point cloud conversion after 24 hours.')
       } catch (error) {
         upsertTask(id, {
           state: 'error',

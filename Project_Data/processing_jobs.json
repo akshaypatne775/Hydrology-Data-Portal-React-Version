@@ -57,6 +57,22 @@
   ],
   "proj_482e52974f060d7e": [
     {
+      "job_id": "Auro-Point-Cloud-Cropped-new-b1d1f6bfb647",
+      "kind": "pointcloud",
+      "file_name": "Auro-Point Cloud Cropped new.las",
+      "status": "Completed",
+      "updated_at": "2026-06-09T06:35:26.661557+00:00",
+      "result_url": "/data/projects/proj_482e52974f060d7e/processed/Auro-Point-Cloud-Cropped-new-b1d1f6bfb647/Auro-Point-Cloud-Cropped-new-b1d1f6bfb647.html"
+    },
+    {
+      "job_id": "Auro-Point-Cloud-Cropped-newsmall-f139b19ad3ba",
+      "kind": "pointcloud",
+      "file_name": "Auro-Point Cloud Cropped newsmall.las",
+      "status": "Completed",
+      "updated_at": "2026-06-09T06:05:35.223067+00:00",
+      "result_url": "/data/projects/proj_482e52974f060d7e/processed/Auro-Point-Cloud-Cropped-newsmall-f139b19ad3ba/Auro-Point-Cloud-Cropped-newsmall-f139b19ad3ba.html"
+    },
+    {
       "job_id": "manual-Ortho_New_038cab94808d.tif-dd338bc7",
       "kind": "dataset",
       "file_name": "Ortho_New_038cab94808d.tif",

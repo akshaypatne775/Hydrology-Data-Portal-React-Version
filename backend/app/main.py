@@ -138,7 +138,11 @@ TIFF_TILE_MAX_ZOOM_LIMIT = int(os.getenv("TIFF_TILE_MAX_ZOOM_LIMIT", "19"))
 TIFF_TILE_SIZE = int(os.getenv("TIFF_TILE_SIZE", "256"))
 SESSION_COOKIE_NAME = "droid_cloud_session"
 SESSION_TTL_SECONDS = max(86_400, int(os.getenv("SESSION_TTL_SECONDS", "604800")))
+SESSION_RENEW_GRACE_SECONDS = max(86_400, int(os.getenv("SESSION_RENEW_GRACE_SECONDS", "604800")))
+SESSION_REFRESH_THRESHOLD_SECONDS = max(3_600, int(os.getenv("SESSION_REFRESH_THRESHOLD_SECONDS", "86400")))
+SESSION_AUTH_CACHE_SECONDS = max(5, int(os.getenv("SESSION_AUTH_CACHE_SECONDS", "30")))
 SESSION_SECRET_FILE = Path(LOCAL_DATA_PATH) / ".session_signing_secret"
+_SESSION_USER_CACHE: dict[str, tuple[float, int, dict[str, object]]] = {}
 OWNER_APPROVAL_EMAIL = os.getenv("OWNER_APPROVAL_EMAIL", "akshaydroid123@gmail.com").strip()
 ADMIN_ALERT_PHONE = os.getenv("ADMIN_ALERT_PHONE", "+917057723981").strip()
 PUBLIC_PORTAL_URL = os.getenv("PUBLIC_PORTAL_URL", "https://portal.droidminingsolutions.com").strip()
@@ -306,19 +310,28 @@ class ProtectedDataPathMiddleware(BaseHTTPMiddleware):
                         return Response(status_code=403)
                 except Exception:  # noqa: BLE001
                     return Response(status_code=403)
-        admin_only_upload = (
+        user_upload_path = (
             path.startswith("/api/upload")
             or path.startswith("/api/complete-upload")
             or path.startswith("/api/complete-dataset-upload")
-            or path in {"/api/process-dataset", "/api/process-pointcloud", "/api/dataset-metadata"}
+            or path == "/api/process-dataset"
+        )
+        admin_only_upload = (
+            path == "/api/process-pointcloud"
+            or path == "/api/dataset-metadata"
             or "metadata-probe" in path
             or re.match(r"^/api/datasets/[^/]+/(sync|open-manual-folder)$", path) is not None
             or ("manual" in path and ("folder" in path or "sync" in path))
         )
-        if admin_only_upload and request.method.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+        protected_upload = user_upload_path or admin_only_upload
+        if protected_upload and request.method.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
             try:
                 user = _require_user(request)
-                if str(user.get("role", "")).lower() != "admin":
+                is_admin = str(user.get("role", "")).lower() == "admin"
+                can_upload = bool(user.get("can_upload_data", False))
+                if admin_only_upload and not is_admin:
+                    return Response(status_code=403)
+                if user_upload_path and not (is_admin or can_upload):
                     return Response(status_code=403)
             except HTTPException:
                 return Response(status_code=403)
@@ -541,6 +554,10 @@ class AdminUserRolePayload(BaseModel):
 
 class AdminUserPasswordResetPayload(BaseModel):
     password: str
+
+
+class AdminUserUploadAccessPayload(BaseModel):
+    enabled: bool = False
 
 
 class AdminUserHiddenTabsPayload(BaseModel):
@@ -3070,6 +3087,10 @@ def _clear_session_cookie(response: Response) -> None:
     response.delete_cookie(SESSION_COOKIE_NAME)
 
 
+def _clear_session_auth_cache() -> None:
+    _SESSION_USER_CACHE.clear()
+
+
 def _require_user(request: Request) -> dict[str, object]:
     signed = request.cookies.get(SESSION_COOKIE_NAME)
     if not signed:
@@ -3079,28 +3100,66 @@ def _require_user(request: Request) -> dict[str, object]:
         raise HTTPException(status_code=401, detail="Invalid session token")
 
     now_ts = int(datetime.now(timezone.utc).timestamp())
+    token_hash = _token_hash(raw)
+    cached = _SESSION_USER_CACHE.get(token_hash)
+    if cached:
+        cached_until, cached_expires_at, cached_user = cached
+        if cached_until >= time.time() and cached_expires_at >= now_ts:
+            return dict(cached_user)
+        _SESSION_USER_CACHE.pop(token_hash, None)
+
     with get_db_connection() as connection:
         row = connection.execute(
             """
-            SELECT u.id AS user_id, u.email, u.role, u.approval_status, u.can_access_catalog, u.hidden_tabs
+            SELECT
+                s.expires_at,
+                u.id AS user_id,
+                u.email,
+                u.role,
+                u.approval_status,
+                u.can_access_catalog,
+                u.can_upload_data,
+                u.hidden_tabs
             FROM sessions s
             JOIN users u ON u.id = s.user_id
-            WHERE s.token_hash = ? AND s.expires_at >= ?
+            WHERE s.token_hash = ?
             """,
-            (_token_hash(raw), now_ts),
+            (token_hash,),
         ).fetchone()
     if not row:
         raise HTTPException(status_code=401, detail="Session expired")
+    expires_at = int(row["expires_at"])
+    if expires_at < now_ts:
+        if expires_at + SESSION_RENEW_GRACE_SECONDS < now_ts:
+            raise HTTPException(status_code=401, detail="Session expired")
+        expires_at = now_ts + SESSION_TTL_SECONDS
+        with get_db_connection() as connection:
+            connection.execute(
+                "UPDATE sessions SET expires_at = ? WHERE token_hash = ?",
+                (expires_at, token_hash),
+            )
+            connection.commit()
+    elif expires_at - now_ts < SESSION_REFRESH_THRESHOLD_SECONDS:
+        expires_at = now_ts + SESSION_TTL_SECONDS
+        with get_db_connection() as connection:
+            connection.execute(
+                "UPDATE sessions SET expires_at = ? WHERE token_hash = ?",
+                (expires_at, token_hash),
+            )
+            connection.commit()
     if str(row["approval_status"] or "pending").lower() != "approved":
         raise HTTPException(status_code=403, detail="Account approval is pending")
-    return {
+    user = {
         "id": int(row["user_id"]),
         "email": str(row["email"]),
         "role": str(row["role"] or "user"),
         "can_access_catalog": bool(row["can_access_catalog"]),
+        "can_upload_data": bool(row["can_upload_data"]),
         "hidden_tabs": _normalize_hidden_tabs(row["hidden_tabs"]),
         "approval_status": str(row["approval_status"] or "pending"),
     }
+    _SESSION_USER_CACHE[token_hash] = (time.time() + SESSION_AUTH_CACHE_SECONDS, expires_at, dict(user))
+    return user
 
 
 def _get_optional_user(request: Request) -> dict[str, object] | None:
@@ -3334,7 +3393,7 @@ def auth_login(payload: AuthPayload, response: Response) -> dict[str, str]:
         raise HTTPException(status_code=400, detail="Invalid email")
     with get_db_connection() as connection:
         row = connection.execute(
-            "SELECT id, password_hash, role, approval_status, can_access_catalog, hidden_tabs FROM users WHERE email = ?",
+            "SELECT id, password_hash, role, approval_status, can_access_catalog, can_upload_data, hidden_tabs FROM users WHERE email = ?",
             (email,),
         ).fetchone()
     if not row or not _verify_password(payload.password, str(row["password_hash"])):
@@ -3352,6 +3411,7 @@ def auth_login(payload: AuthPayload, response: Response) -> dict[str, str]:
             (_token_hash(raw_token), int(row["id"]), expires_at, _now_iso()),
         )
         connection.commit()
+    _clear_session_auth_cache()
     _set_session_cookie(response, raw_token)
     _send_owner_sms(f"Droid Cloud login: {email} logged in as {str(row['role'] or 'user')}.")
     return {"status": "success", "email": email}
@@ -3382,6 +3442,7 @@ def auth_logout(request: Request, response: Response) -> dict[str, str]:
                     ),
                 )
             connection.commit()
+    _clear_session_auth_cache()
     _clear_session_cookie(response)
     return {"status": "success"}
 
@@ -3445,6 +3506,7 @@ def auth_me(request: Request) -> dict[str, object]:
         "email": str(user["email"]),
         "role": str(user.get("role", "user")),
         "can_access_catalog": bool(user.get("can_access_catalog", True)),
+        "can_upload_data": bool(user.get("can_upload_data", False)),
         "hidden_tabs": _normalize_hidden_tabs(user.get("hidden_tabs", [])),
         "approval_status": str(user.get("approval_status", "approved")),
     }
@@ -3460,7 +3522,7 @@ def admin_user_activity(
     with get_db_connection() as connection:
         users = connection.execute(
             """
-            SELECT id, email, role, requested_role, approval_status, created_at, can_access_catalog, hidden_tabs
+            SELECT id, email, role, requested_role, approval_status, created_at, can_access_catalog, can_upload_data, hidden_tabs
             FROM users
             ORDER BY created_at ASC
             """
@@ -3498,6 +3560,7 @@ def admin_user_activity(
                 "role": str(user_row["role"] or "user"),
                 "requested_role": str(user_row["requested_role"] or user_row["role"] or "user"),
                 "can_access_catalog": bool(user_row["can_access_catalog"]),
+                "can_upload_data": bool(user_row["can_upload_data"]),
                 "hidden_tabs": _normalize_hidden_tabs(user_row["hidden_tabs"]),
                 "approval_status": str(user_row["approval_status"] or "pending"),
                 "status": (
@@ -3619,6 +3682,7 @@ def admin_approve_user(
             (role, role, _now_iso(), user_id),
         )
         connection.commit()
+    _clear_session_auth_cache()
     _send_email(
         str(row["email"]),
         "Droid Cloud access approved",
@@ -3657,6 +3721,7 @@ def admin_assign_user_role(
             (role, role, _now_iso(), user_id),
         )
         connection.commit()
+    _clear_session_auth_cache()
     _send_email(
         str(row["email"]),
         "Droid Cloud role updated",
@@ -3686,6 +3751,7 @@ def admin_reset_user_password(
         )
         connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
         connection.commit()
+    _clear_session_auth_cache()
     return {"status": "success", "user_id": user_id, "email": str(row["email"])}
 
 
@@ -3709,7 +3775,32 @@ def admin_set_user_catalog_access(
             (1 if enabled else 0, user_id),
         )
         connection.commit()
+    _clear_session_auth_cache()
     return {"status": "success", "user_id": user_id, "can_access_catalog": enabled}
+
+
+@app.patch("/api/admin/users/{user_id}/upload-access")
+def admin_set_user_upload_access(
+    user_id: int,
+    payload: AdminUserUploadAccessPayload,
+    admin: dict[str, str] = Depends(verify_admin),
+) -> dict[str, object]:
+    del admin
+    enabled = bool(payload.enabled)
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT id, email FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+        connection.execute(
+            "UPDATE users SET can_upload_data = ? WHERE id = ?",
+            (1 if enabled else 0, user_id),
+        )
+        connection.commit()
+    _clear_session_auth_cache()
+    return {"status": "success", "user_id": user_id, "can_upload_data": enabled}
 
 
 @app.patch("/api/admin/users/{user_id}/hidden-tabs")
@@ -3732,6 +3823,7 @@ def admin_set_user_hidden_tabs(
             (json.dumps(hidden_tabs), user_id),
         )
         connection.commit()
+    _clear_session_auth_cache()
     return {"status": "success", "user_id": user_id, "hidden_tabs": hidden_tabs}
 
 
@@ -3759,6 +3851,7 @@ def admin_disapprove_user(
         )
         connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
         connection.commit()
+    _clear_session_auth_cache()
     _send_email(
         str(row["email"]),
         "Droid Cloud access request update",
@@ -3797,6 +3890,7 @@ def admin_delete_user(
                 (f"deleted-user-{user_id}@local.invalid", user_id),
             )
         connection.commit()
+    _clear_session_auth_cache()
     return {"status": "success"}
 
 
@@ -3832,6 +3926,7 @@ def admin_advanced_delete_user(
         connection.execute("DELETE FROM activity_logs WHERE user_id = ?", (user_id,))
         connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
         connection.commit()
+    _clear_session_auth_cache()
     return {"status": "success", "deleted_projects": len(project_ids)}
 
 
@@ -6906,7 +7001,11 @@ def _serve_project_data_file(project_id: str, file_path: str, request: Request) 
     safe_project_id = _safe_project_id(project_id)
     _ensure_project_file_access(request, safe_project_id)
     target_path = _safe_project_file_response_path(safe_project_id, file_path)
-    return FileResponse(str(target_path))
+    response = FileResponse(str(target_path))
+    cleaned_path = file_path.replace("\\", "/").lower()
+    if cleaned_path.startswith("processed/"):
+        response.headers["Cache-Control"] = "private, max-age=86400"
+    return response
 
 
 def _serve_pointcloud_data_file(project_id: str, file_path: str, request: Request) -> FileResponse:
@@ -6923,7 +7022,9 @@ def _serve_pointcloud_data_file(project_id: str, file_path: str, request: Reques
         raise HTTPException(status_code=400, detail="Invalid file path")
     if not target_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(str(target_path))
+    response = FileResponse(str(target_path))
+    response.headers["Cache-Control"] = "private, max-age=86400"
+    return response
 
 
 @app.get("/api/data/projects/{project_id}/{file_path:path}")

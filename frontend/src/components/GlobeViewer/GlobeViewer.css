@@ -142,6 +142,8 @@
 
 .gv-action:hover {
   background: #135160;
+  border-color: #135160;
+  color: #ffffff;
 }
 
 .gv-action:disabled {
@@ -157,6 +159,8 @@
 
 .gv-action--ghost:hover {
   background: rgba(209, 231, 235, 0.96);
+  border-color: #0e3e49;
+  color: #0e3e49;
 }
 
 .gv-overlay-actions {
@@ -228,8 +232,9 @@
 
 .gv-tool-button:hover,
 .gv-tool-button--active {
-  background: #14b8a6;
-  color: #06272d;
+  border-color: #145461;
+  background: #145461;
+  color: #ffffff;
 }
 
 .gv-tool-button--ghost {
@@ -239,6 +244,8 @@
 
 .gv-tool-button--ghost:hover {
   background: rgba(209, 231, 235, 0.96);
+  border-color: #0e3e49;
+  color: #0e3e49;
 }
 
 .gv-camera-controls {
@@ -383,6 +390,7 @@
 .d3d-layer-panel__btn:hover {
   background: #135160;
   border-color: #135160;
+  color: #ffffff;
 }
 
 .d3d-layer-panel__btn--ghost {
@@ -393,6 +401,7 @@
 .d3d-layer-panel__btn--ghost:hover {
   background: #d1e7eb;
   border-color: #0e3e49;
+  color: #0e3e49;
 }
 .d3d-layer-panel__select {
   height: 2.1rem;
@@ -532,6 +541,41 @@
   }
 }
 
+@media (max-width: 1440px) and (min-width: 1201px) {
+  .gv-panel {
+    top: 0.75rem;
+    right: 0.75rem;
+    bottom: 0.75rem;
+    width: 292px;
+    max-height: calc(100% - 1.5rem);
+    padding: 0.82rem;
+  }
+
+  .gv-panel__title {
+    margin-bottom: 0.65rem;
+    font-size: 0.78rem;
+  }
+
+  .gv-field,
+  .gv-panel__hint,
+  .gv-action,
+  .gv-tool-button,
+  .gv-tool-select {
+    font-size: 0.72rem;
+  }
+
+  .gv-tool-button,
+  .gv-tool-select,
+  .gv-action {
+    min-height: 2rem;
+  }
+
+  .gv-nav-readout {
+    left: 0.75rem;
+    bottom: 0.75rem;
+  }
+}
+
 @media (max-width: 1200px) and (min-width: 768px) {
   .gv-panel {
     top: 0.65rem;
@@ -557,5 +601,64 @@
 
   .d3d-height-control__actions {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1366px), (max-height: 820px) {
+  .gv-panel {
+    top: 0.5rem;
+    right: 0.5rem;
+    bottom: 0.5rem;
+    width: min(260px, calc(100% - 1rem));
+    max-height: calc(100% - 1rem);
+    padding: 0.62rem;
+    border-radius: 10px;
+  }
+
+  .gv-panel__title {
+    margin-bottom: 0.52rem;
+    font-size: 0.72rem;
+  }
+
+  .gv-field {
+    gap: 0.28rem;
+    margin-bottom: 0.55rem;
+  }
+
+  .gv-field,
+  .gv-panel__hint,
+  .gv-action,
+  .gv-tool-button,
+  .gv-tool-select,
+  .d3d-layer-panel__btn,
+  .d3d-layer-panel__select {
+    font-size: 0.66rem;
+  }
+
+  .gv-action,
+  .gv-tool-button,
+  .gv-tool-select,
+  .gv-upload {
+    min-height: 1.82rem;
+    border-radius: 8px;
+  }
+
+  .gv-camera-grid,
+  .gv-camera-actions {
+    gap: 0.25rem;
+  }
+
+  .gv-nav-readout {
+    left: 0.5rem;
+    bottom: 0.5rem;
+    max-width: calc(100% - 1rem);
+    font-size: 0.66rem;
+  }
+
+  .d3d-layer-panel {
+    top: 3.4rem;
+    right: 0.5rem;
+    width: min(238px, calc(100% - 1rem));
+    padding: 0.62rem;
   }
 }

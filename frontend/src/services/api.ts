@@ -1,4 +1,4 @@
-import { API_BASE } from '../lib/apiBase'
+import { API_BASE, formatApiNetworkError } from '../lib/apiBase'
 import { getDeviceLabel, readCurrentDeviceLocation } from '../utils/locationSession'
 
 export class ApiError extends Error {
@@ -55,9 +55,7 @@ export async function apiRequest(path: string, init: RequestInit = {}): Promise<
     })
     return response
   } catch (error) {
-    throw new Error(
-      error instanceof Error ? error.message : 'Network request failed',
-    )
+    throw new Error(formatApiNetworkError(API_BASE, error))
   }
 }
 

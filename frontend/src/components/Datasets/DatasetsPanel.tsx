@@ -5,6 +5,7 @@ import { useAuthContext } from '../../context/AuthContext'
 import { useModal } from '../../context/ModalContext'
 import { API_BASE, toSameOriginBackendUrl } from '../../lib/apiBase'
 import { forceDeleteAdminDataset, updateAdminDatasetMetadata } from '../../services/adminService'
+import { getPointCloudStatus } from '../../services/pointCloudService'
 import {
   deleteProjectFile,
   exportDatasetGrid,
@@ -352,6 +353,19 @@ function isTwoDLayer(layerType?: DatasetRow['layerType']): boolean {
   return ['cog', 'Ortho', 'DTM', 'DSM', 'Vector'].includes(String(layerType))
 }
 
+function isPointCloudLayer(layerType?: DatasetRow['layerType']): boolean {
+  return String(layerType).toLowerCase() === 'pointcloud'
+}
+
+function isRawPointCloudUrl(url: string): boolean {
+  return /\.(las|laz)(?:[?#].*)?$/i.test(url.trim())
+}
+
+function isPotreeViewerUrl(url: string): boolean {
+  const normalized = url.trim().toLowerCase().split(/[?#]/, 1)[0] || ''
+  return normalized.endsWith('.html') || normalized.endsWith('/tileset.json')
+}
+
 function buildActiveLayer(projectId: string, row: DatasetRow) {
   if (!row.layerType || !row.layerUrl) return null
   if (row.layerType === 'Reports') return null
@@ -377,8 +391,9 @@ function buildActiveLayer(projectId: string, row: DatasetRow) {
 
 export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   const { tasks, startDatasetUpload, startPointCloudUpload } = useUploadContext()
-  const { setActiveId, setActiveViewerTab, toggleLayer, upsertLayer, removeLayer } = useWorkspaceContext()
-  const { isAdmin } = useAuthContext()
+  const { setActiveId, setActiveViewerTab, upsertLayer, removeLayer } = useWorkspaceContext()
+  const { isAdmin, user } = useAuthContext()
+  const canUploadData = isAdmin || user?.can_upload_data === true
   const modal = useModal()
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [isDragging, setIsDragging] = useState(false)
@@ -521,7 +536,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
 
   const prepareFile = useCallback(
     async (file: File) => {
-      if (!projectId || !isAdmin) return
+      if (!projectId || !canUploadData) return
       const ext = file.name.split('.').pop()?.toLowerCase() || ''
       if (!ALLOWED_EXTENSIONS.has(ext)) return
       const defaultName = file.name.replace(/\.[^.]+$/, '')
@@ -534,23 +549,23 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         epsg: '',
       })
     },
-    [isAdmin, projectId],
+    [canUploadData, projectId],
   )
 
   const onDropFile = useCallback(async (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
     event.stopPropagation()
     setIsDragging(false)
-    if (!isAdmin) return
+    if (!canUploadData) return
     const droppedFile = event.dataTransfer.files?.[0]
     if (!droppedFile) return
     await prepareFile(droppedFile)
-  }, [isAdmin, prepareFile])
+  }, [canUploadData, prepareFile])
 
   const submitUpload = useCallback(async () => {
     if (!projectId || !selectedFile || !uploadForm.name.trim()) return
-    if (!isAdmin) {
-      await modal.alert('Admin access required', 'Only admins can upload or manage datasets.')
+    if (!canUploadData) {
+      await modal.alert('Upload access required', 'Your upload access is currently off. Please ask the admin to enable User Upload for your account.')
       return
     }
     const ext = selectedFile.name.split('.').pop() || 'dat'
@@ -573,7 +588,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     }
     invalidateProjectDataCache(projectId)
     setSelectedFile(null)
-  }, [isAdmin, modal, projectId, selectedFile, startDatasetUpload, startPointCloudUpload, uploadForm.date, uploadForm.epsg, uploadForm.name, uploadForm.type])
+  }, [canUploadData, modal, projectId, selectedFile, startDatasetUpload, startPointCloudUpload, uploadForm.date, uploadForm.epsg, uploadForm.name, uploadForm.type])
 
   const getActionLabel = useCallback((row: DatasetRow) => {
     if (['cog', 'Ortho', 'DTM', 'DSM'].includes(String(row.layerType))) return `Show ${row.type} on Map`
@@ -813,7 +828,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       <header className="dsp-head">
         <div>
           <h3>Dataset Management</h3>
-          <p>{isAdmin ? 'Upload only from this panel with metadata and automatic EPSG detection.' : 'View and download project datasets from this panel.'}</p>
+          <p>{canUploadData ? 'Upload from this panel with metadata and automatic EPSG detection.' : 'View and download project datasets from this panel.'}</p>
         </div>
         {isAdmin ? (
         <div className="dsp-head__actions">
@@ -837,7 +852,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         ) : null}
       </header>
 
-      {isAdmin ? (
+      {canUploadData ? (
       <div
         className={isDragging ? 'dsp-dropzone dsp-dropzone--dragging' : 'dsp-dropzone'}
         onClick={() => fileInputRef.current?.click()}
@@ -875,11 +890,11 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       </div>
       ) : (
         <div className="dsp-readonly-note">
-          Uploads and manual sync are available only to Droid Cloud admins.
+          Upload is currently blocked for your account. Ask the admin to enable User Upload when you need to add data.
         </div>
       )}
 
-      {isAdmin && selectedFile ? (
+      {canUploadData && selectedFile ? (
         <div className="dsp-form">
           <label>
             Name
@@ -942,7 +957,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         </div>
       ) : null}
 
-      {isAdmin && primaryTask ? (
+      {canUploadData && primaryTask ? (
         <div className="dsp-progress" aria-live="polite">
           <div className="dsp-progress__summary">
             <strong>{primaryTask.fileName}</strong>
@@ -1027,7 +1042,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                       <button
                         type="button"
                         className="dsp-action"
-                        onClick={() => {
+                        onClick={async () => {
                           if (!projectId || !row.layerType || !row.layerUrl) return
                           if (row.layerType === 'Reports') {
                             setReportViewer({
@@ -1037,9 +1052,21 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                             })
                             return
                           }
-                          const layer = buildActiveLayer(projectId, row)
+                          let layer = buildActiveLayer(projectId, row)
                           if (!layer) return
-                          toggleLayer(layer)
+                          if (isPointCloudLayer(row.layerType) && (!isPotreeViewerUrl(layer.url) || isRawPointCloudUrl(layer.url))) {
+                            const status = await getPointCloudStatus(projectId, row.datasetId)
+                            const resolvedUrl = toSameOriginBackendUrl(status?.tileset_url)
+                            if (!status?.ready || !resolvedUrl) {
+                              await modal.alert(
+                                'Point cloud is still preparing',
+                                'This LAS/LAZ file is uploaded, but the Potree web viewer is not ready yet. Keep it processing, then open it again from Data Catalog.',
+                              )
+                              return
+                            }
+                            layer = { ...layer, url: resolvedUrl }
+                          }
+                          upsertLayer(layer)
                           if (isTwoDLayer(row.layerType)) {
                             setActiveViewerTab('2D')
                             setActiveId('map')

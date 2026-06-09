@@ -6,6 +6,7 @@ import { getProjectFiles, getProjectJobs } from '../services/datasetService'
 import type { ProjectFile, ProjectJob } from '../services/datasetService'
 import { useWorkspaceContext } from '../context/WorkspaceContext'
 import { useModal } from '../context/ModalContext'
+import { toSameOriginBackendUrl } from '../lib/apiBase'
 import Viewer3DSidebar from './GlobeViewer/Viewer3DSidebar'
 import './Dashboard.css'
 
@@ -117,12 +118,104 @@ type Project3DAsset = {
   name: string
   url: string
   viewer: 'potree' | 'cesium'
+  dedupeKey?: string
+}
+
+function normalize3DAssetToken(value: unknown): string {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  let normalized = raw
+  try {
+    normalized = decodeURIComponent(raw)
+  } catch {
+    normalized = raw
+  }
+  normalized = normalized
+    .replace(/\\/g, '/')
+    .replace(/^https?:\/\/[^/]+/i, '')
+    .replace(/[?#].*$/, '')
+    .toLowerCase()
+    .replace(/\/+/g, '/')
+    .replace(/^\/+/, '')
+    .replace(/\/+$/, '')
+  return normalized
+}
+
+function canonical3DAssetKey(viewer: Project3DAsset['viewer'], values: unknown[]): string {
+  const tokens = values.map(normalize3DAssetToken).filter(Boolean)
+  for (const token of tokens) {
+    const parts = token.split('/').filter(Boolean)
+    const processedIndex = parts.findIndex((part) => part === 'processed')
+    if (processedIndex >= 0 && parts[processedIndex + 1]) {
+      return `${viewer}:processed:${parts[processedIndex + 1]}`
+    }
+    const pointCloudIndex = parts.findIndex((part) => part === 'pointcloud' || part === 'pointclouds' || part === 'potree')
+    if (pointCloudIndex >= 0 && parts[pointCloudIndex + 1]) {
+      return `${viewer}:pointcloud:${parts[pointCloudIndex + 1]}`
+    }
+    const tilesetIndex = parts.findIndex((part) => part === 'tileset.json')
+    if (tilesetIndex > 0) {
+      return `${viewer}:tileset:${parts[tilesetIndex - 1]}`
+    }
+    const htmlIndex = parts.findIndex((part) => part === 'index.html' || part === 'viewer.html' || part.endsWith('.html'))
+    if (htmlIndex > 0) {
+      return `${viewer}:html:${parts[htmlIndex - 1]}`
+    }
+  }
+  return `${viewer}:${tokens[0] || 'asset'}`
+}
+
+function isRawPointCloudAssetUrl(url: string): boolean {
+  return /\.(las|laz)(?:[?#].*)?$/i.test(url.trim())
+}
+
+function isConvertedPointCloudAssetUrl(url: string): boolean {
+  const normalized = normalize3DAssetToken(url)
+  return normalized.includes('/processed/') && (
+    normalized.endsWith('.html') ||
+    normalized.endsWith('/tileset.json') ||
+    normalized.includes('/metadata.json')
+  )
+}
+
+function isBetter3DAsset(candidate: Project3DAsset, current: Project3DAsset): boolean {
+  const candidateUrl = normalize3DAssetToken(candidate.url)
+  const currentUrl = normalize3DAssetToken(current.url)
+  if (candidate.viewer === 'potree') {
+    const candidateConverted = isConvertedPointCloudAssetUrl(candidate.url)
+    const currentConverted = isConvertedPointCloudAssetUrl(current.url)
+    if (candidateConverted && !currentConverted) return true
+    if (!candidateConverted && currentConverted) return false
+    if (!isRawPointCloudAssetUrl(candidate.url) && isRawPointCloudAssetUrl(current.url)) return true
+    if (isRawPointCloudAssetUrl(candidate.url) && !isRawPointCloudAssetUrl(current.url)) return false
+  }
+  if (candidateUrl && !currentUrl) return true
+  if (!candidateUrl && currentUrl) return false
+  const candidateName = candidate.name.trim()
+  const currentName = current.name.trim()
+  if (candidateName.length > currentName.length && /point|cloud|3d|model/i.test(candidateName)) return true
+  return false
+}
+
+function specific3DAssetNameKey(asset: Project3DAsset): string {
+  const name = normalize3DAssetToken(asset.name)
+  if (!name || name === 'point cloud' || name === '3d model') return ''
+  return `${asset.viewer}:name:${name}`
+}
+
+function set3DAssetOnce(assets: Map<string, Project3DAsset>, asset: Project3DAsset) {
+  const key = specific3DAssetNameKey(asset) || asset.dedupeKey || canonical3DAssetKey(asset.viewer, [asset.url, asset.id, asset.name])
+  const existing = assets.get(key)
+  if (!existing || isBetter3DAsset(asset, existing)) {
+    assets.set(key, asset)
+  }
 }
 
 function project3DAssetsFromFiles(files: ProjectFile[]): Project3DAsset[] {
   const assets = new Map<string, Project3DAsset>()
   for (const file of files) {
-    const url = String(file.layer_url || file.file_url || '').trim()
+    const rawUrl = String(file.layer_url || file.file_url || '').trim()
+    const url = toSameOriginBackendUrl(rawUrl) || rawUrl
     if (!url) continue
     const signature = [
       file.kind,
@@ -148,13 +241,16 @@ function project3DAssetsFromFiles(files: ProjectFile[]): Project3DAsset[] {
         ? 'cesium'
         : null
     if (!viewer) continue
+    if (viewer === 'potree' && isRawPointCloudAssetUrl(url)) continue
     const id = String(file.dataset_id || file.rel_path || url)
-    assets.set(id, {
+    const asset: Project3DAsset = {
       id,
       name: String(file.name || file.dataset_id || (viewer === 'potree' ? 'Point Cloud' : '3D Model')),
       url,
       viewer,
-    })
+      dedupeKey: canonical3DAssetKey(viewer, [file.dataset_id, file.rel_path, file.raw_rel_path, file.file_path, url, file.name]),
+    }
+    set3DAssetOnce(assets, asset)
   }
   return Array.from(assets.values())
 }
@@ -162,7 +258,8 @@ function project3DAssetsFromFiles(files: ProjectFile[]): Project3DAsset[] {
 function project3DAssetsFromJobs(jobs: ProjectJob[]): Project3DAsset[] {
   const assets = new Map<string, Project3DAsset>()
   for (const job of jobs) {
-    const url = String(job.result_url || '').trim()
+    const rawUrl = String(job.result_url || '').trim()
+    const url = toSameOriginBackendUrl(rawUrl) || rawUrl
     if (!url) continue
     const signature = [job.kind, job.file_name, url]
       .map((value) => String(value || '').toLowerCase())
@@ -183,13 +280,16 @@ function project3DAssetsFromJobs(jobs: ProjectJob[]): Project3DAsset[] {
         ? 'cesium'
         : null
     if (!viewer) continue
+    if (viewer === 'potree' && isRawPointCloudAssetUrl(url)) continue
     const id = String(job.job_id || url)
-    assets.set(id, {
+    const asset: Project3DAsset = {
       id,
       name: String(job.file_name || (viewer === 'potree' ? 'Point Cloud' : '3D Model')),
       url,
       viewer,
-    })
+      dedupeKey: canonical3DAssetKey(viewer, [job.result_url, job.file_name, job.job_id]),
+    }
+    set3DAssetOnce(assets, asset)
   }
   return Array.from(assets.values())
 }
@@ -207,7 +307,7 @@ function isPointCloudViewerLayer(layer: { layerType?: string; url?: string }): b
 }
 
 type DashboardProps = {
-  user: { id: number; email: string; role?: string; can_access_catalog?: boolean; hidden_tabs?: string[] }
+  user: { id: number; email: string; role?: string; can_access_catalog?: boolean; can_upload_data?: boolean; hidden_tabs?: string[] }
   onLogout: () => void
 }
 
@@ -276,6 +376,16 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
       ),
     [activeLayers, selectedProject?.id],
   )
+  const active3DLayer = useMemo(
+    () =>
+      activeLayers.find(
+        (layer) =>
+          layer.projectId === selectedProject?.id &&
+          ['pointcloud', '3dmodel'].includes(String(layer.layerType || '').toLowerCase()) &&
+          Boolean(layer.url),
+      ),
+    [activeLayers, selectedProject?.id],
+  )
   const projectPointClouds = useMemo(
     () => project3DAssets.filter((asset) => asset.viewer === 'potree'),
     [project3DAssets],
@@ -288,7 +398,14 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     ? selected3DAsset.url
     : selected3DAsset?.viewer === 'cesium'
       ? ''
-      : activePointCloudLayer?.url || ''
+      : String(active3DLayer?.layerType || '').toLowerCase() === 'pointcloud'
+        ? active3DLayer?.url || ''
+        : ''
+
+  useEffect(() => {
+    if (active3DLayer) setSelected3DAsset(null)
+  }, [active3DLayer?.id, active3DLayer?.url])
+
   const routedViewerId = useMemo(() => {
     if (activeId !== 'map' && activeId !== 'globe') return activeId
     return activeViewerTab === '3D' ? 'globe' : 'map'
@@ -356,7 +473,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
         if (cancelled) return
         const combined = new Map<string, Project3DAsset>()
         for (const asset of [...project3DAssetsFromFiles(files), ...project3DAssetsFromJobs(jobs)]) {
-          combined.set(`${asset.viewer}:${asset.url}`, asset)
+          set3DAssetOnce(combined, asset)
         }
         setProject3DAssets(Array.from(combined.values()))
       })
@@ -366,7 +483,29 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     return () => {
       cancelled = true
     }
-  }, [activeId, selectedProject?.id])
+  }, [selectedProject?.id])
+
+  useEffect(() => {
+    if (routedViewerId !== 'globe') return
+    const prefetchUrls = projectPointClouds
+      .map((asset) => asset.url)
+      .filter((url) => url && !isRawPointCloudAssetUrl(url))
+      .slice(0, 2)
+    for (const url of prefetchUrls) {
+      let hash = 0
+      for (let index = 0; index < url.length; index += 1) {
+        hash = ((hash << 5) - hash + url.charCodeAt(index)) | 0
+      }
+      const id = `droid-prefetch-${Math.abs(hash)}`
+      if (document.getElementById(id)) continue
+      const link = document.createElement('link')
+      link.id = id
+      link.rel = 'prefetch'
+      link.as = 'document'
+      link.href = url
+      document.head.appendChild(link)
+    }
+  }, [projectPointClouds, routedViewerId])
 
   useEffect(() => {
     let cancelled = false

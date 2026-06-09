@@ -477,3 +477,443 @@ Future note:
 - Data Catalog hiding is now controlled from the Hidden Tabs dropdown.
 - Admin password reset signs out that user by deleting their sessions.
 ===============================================================================
+
+
+===============================================================================
+Date: 2026-06-08
+Area: Admin / Data Catalog / User Upload Permission
+Issue:
+- Users could view Data Catalog, but upload access was only admin-only with no separate admin switch.
+- Data Catalog visibility and upload permission needed to be independent controls.
+
+Fix:
+- Added users.can_upload_data SQLite column with default off for normal users.
+- Added can_upload_data to auth session/user responses and admin activity rows.
+- Added PATCH /api/admin/users/{user_id}/upload-access for admin-controlled user upload access.
+- Updated upload middleware so admins and upload-enabled users can use upload endpoints, while manual sync/metadata admin tools stay admin-only.
+- Added User Upload green/red toggle in Admin Control.
+- Updated Data Catalog UI so upload controls appear for admins or upload-enabled users, while read-only users can still view/download data.
+
+Files touched:
+- backend/app/core/database.py
+- backend/app/main.py
+- frontend/src/services/authService.ts
+- frontend/src/services/adminService.ts
+- frontend/src/components/Admin/AdminDashboard.tsx
+- frontend/src/components/Admin/AdminDashboard.css
+- frontend/src/components/Dashboard.tsx
+- frontend/src/components/Datasets/DatasetsPanel.tsx
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Backend compile passed: python -m compileall backend/app
+- Frontend build passed: cmd /c npm run build
+
+Future note:
+- Data Catalog hidden/off controls tab visibility.
+- User Upload on/off controls whether a non-admin can upload data into allowed projects.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-08
+Area: Responsive Layout / Admin Control / Viewer Panels
+Issue:
+- Admin Control hidden-tab dropdown could be clipped inside the scrollable table on Mac/laptop screens.
+- Wide admin/data tables did not clearly indicate that more columns were available horizontally.
+- Laptop-width layouts needed tighter sidebar/topbar/viewer controls so workspace content remained visible.
+
+Fix:
+- Changed Admin Control hidden-tab dropdown to expand inline instead of absolute-positioning inside the scroll container.
+- Added left/right reveal indicators to the Admin Control table and a right reveal indicator to Data Catalog table scrolling.
+- Added laptop responsive breakpoints for dashboard sidebar, topbar, profile actions, map shell height, overview cards, and module grids.
+- Added compact laptop breakpoints for 2D viewer and 3D viewer control panels.
+- Updated Compare and Downloads panels for better laptop and 4K behavior.
+
+Files touched:
+- frontend/src/components/Admin/AdminDashboard.css
+- frontend/src/components/Dashboard.css
+- frontend/src/components/Datasets/DatasetsPanel.css
+- frontend/src/components/MapViewer/MapViewer.css
+- frontend/src/components/GlobeViewer/GlobeViewer.css
+- frontend/src/components/Compare/ComparePanel.css
+- frontend/src/components/Downloads/DownloadsPanel.css
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Not run in this turn because the local shell approval/usage limit blocked further command execution.
+
+Future note:
+- If another screen clips content, first check for absolute-positioned menus inside overflow:auto containers.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-08
+Area: Full Desktop Responsive Coverage
+Issue:
+- Portal needed to remain fully usable across common and premium desktop screens:
+  1366x768, 1920x1080, 2560x1440, 2560x1600, 3440x1440, and 3840x2160.
+- 1366x768 required compact controls so sidebars/viewers do not overlap.
+- 4K/ultrawide screens required readable UI sizing and stretch control.
+
+Fix:
+- Added global desktop responsive safety layer in frontend/src/index.css.
+- Added 1366x768 compact mode for sidebar, topbar, map shells, dashboard cards, admin table, 2D viewer, 3D viewer, and custom 3D sidebar.
+- Added 2K/QHD and 4K scaling rules so controls and fonts do not become too tiny.
+- Added ultrawide max-width behavior for non-map content while keeping 2D/3D map viewers full working width.
+- Added tighter 2D/3D viewer controls for short-height laptop screens.
+
+Files touched:
+- frontend/src/index.css
+- frontend/src/components/MapViewer/MapViewer.css
+- frontend/src/components/GlobeViewer/GlobeViewer.css
+- frontend/src/components/GlobeViewer/Viewer3DSidebar.css
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Not run in this turn because local shell execution was blocked by the current tool usage limit.
+
+Future note:
+- QA should manually check 1366x768 first, then 1920x1080, 2560x1600, 3440x1440, and 3840x2160.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-08
+Area: Responsive Layout / Admin Table Overlay
+Issue:
+- Responsive/MacBook preview showed the horizontal scroll arrow indicator floating over Admin Control rows and action buttons.
+- User identity column could be partially hidden when the wide table was scrolled horizontally.
+
+Fix:
+- Replaced floating arrow indicators with subtle left/right edge fade shadows that do not cover buttons or table content.
+- Applied the same non-overlapping edge hint pattern to Data Catalog table scrolling.
+- Made the first Admin Control user column sticky so the user/email context stays visible while scrolling wide columns.
+- Tightened action, upload, and hidden-tab control sizing for laptop-width responsive views.
+
+Files touched:
+- frontend/src/components/Admin/AdminDashboard.css
+- frontend/src/components/Datasets/DatasetsPanel.css
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Frontend build passed: cmd /c npm run build
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-08
+Area: Dev Proxy / Failed To Fetch
+Issue:
+- Frontend could show "Failed to fetch" when the Vite dev server pointed at the wrong backend port or the backend was not ready.
+- The Vite config defaulted to backend port 8000 unless an environment variable explicitly set 8001, which made direct dev starts fragile.
+
+Fix:
+- Updated frontend/vite.config.ts so Vite dev server defaults to backend 8001 and live preview/build defaults to backend 8000.
+- Existing VITE_BACKEND_PORT/BACKEND_PORT overrides still work.
+- Updated frontend API service network errors to use the clearer "Cannot reach the API at ..." diagnostic instead of raw browser "Failed to fetch".
+
+Files touched:
+- frontend/vite.config.ts
+- frontend/src/services/api.ts
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Frontend build passed: cmd /c npm run build
+- Backend compile passed: python -m compileall backend/app
+- Dev backend health passed: http://127.0.0.1:8001/api/version
+- Dev frontend proxy health passed: http://127.0.0.1:5173/api/version
+
+Future note:
+- If localhost:4173 is used, live backend on 8000 must also be running.
+- If localhost:5173 is used, dev backend on 8001 must be running.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-09
+Area: API Base / Relative Tile Base
+Issue:
+- App showed: "Cannot reach the API at ." because API_BASE became an empty string.
+- Root cause was frontend/.env.local using VITE_S3_TILE_BASE_URL=/tiles.
+- getApiBaseUrl derived API base by removing trailing /tiles; for relative "/tiles" that resulted in "".
+
+Fix:
+- Updated frontend/src/lib/apiBase.ts so relative tile bases like /tiles use the browser origin as API base.
+- Added fallback when removing /tiles would produce an empty API base.
+
+Files touched:
+- frontend/src/lib/apiBase.ts
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Frontend build passed: cmd /c npm run build
+- Dev backend health passed: http://127.0.0.1:8001/api/version
+- Dev frontend proxy health passed: http://127.0.0.1:5173/api/version
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-09
+Area: Point Cloud Upload / Chunk Network Resilience
+Issue:
+- Large LAS point cloud upload could fail around early progress with "Cannot reach the API at http://localhost:5173".
+- Backend/proxy health was OK and an 8MB multipart route probe reached the backend, indicating transient chunk upload/network interruption rather than a dead API.
+- Point cloud upload did not have retry handling, unlike large raster dataset upload.
+
+Fix:
+- Reduced point cloud chunk size from 10MB to 8MB for better dev proxy stability.
+- Added retry handling for point cloud chunk uploads with 8 attempts per chunk.
+- Retry status now shows the chunk number and attempt count instead of failing immediately.
+- Non-retryable API errors still stop the upload with the backend error detail.
+
+Files touched:
+- frontend/src/context/UploadContext.tsx
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Frontend build passed: cmd /c npm run build
+- Dev backend health passed: http://localhost:5173/api/version
+- 8MB multipart /api/upload-chunk probe reached backend via Vite proxy and returned expected unauthenticated 403.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-08
+Area: Point Cloud Upload / Large LAS-LAZ Conversion
+Issue:
+- Large point cloud uploads could show frontend timeout while Potree conversion was still running.
+- 20GB+ point cloud conversion can take several hours depending on CPU, disk speed, and PotreeConverter.
+
+Fix:
+- Confirmed point cloud chunk uploads bypass the generic heavy request rate limiter.
+- Confirmed backend merges chunks using streaming copy and starts Potree conversion in background after merge.
+- Extended frontend point cloud conversion polling window from 2 hours to 24 hours.
+- Updated processing status text for long-running Potree conversions.
+- Confirmed project files endpoint lists completed Potree HTML viewers from projects/<id>/processed/<pointcloud>/*.html.
+
+Files touched:
+- frontend/src/context/UploadContext.tsx
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Frontend build passed: cmd /c npm run build
+
+Future note:
+- 20GB+ uploads still require enough disk space for uploaded chunks, merged LAS/LAZ, and Potree output.
+- PotreeConverter must be installed/configured via POTREE_CONVERTER_EXE or C:\PotreeConverter\PotreeConverter.exe.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-08
+Area: Responsive Layout / Remove Table Visual Hints
+Issue:
+- Admin Control still showed a faint vertical line in responsive preview after earlier sticky/fade fixes.
+- The line was caused by responsive table helper styling, not application data.
+
+Fix:
+- Removed Admin Control table pseudo edge fades completely.
+- Removed Admin Control sticky first-column behavior completely.
+- Removed Data Catalog table pseudo edge fade completely.
+- Portal now relies on the native horizontal scrollbar with no custom visual overlay helpers.
+
+Files touched:
+- frontend/src/components/Admin/AdminDashboard.css
+- frontend/src/components/Datasets/DatasetsPanel.css
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Frontend build passed: cmd /c npm run build
+- Dev backend /api/version on 127.0.0.1:8001 responded successfully after startup.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-08
+Area: UI States / Hover And Active Button Contrast
+Issue:
+- Some buttons, especially Admin Control ghost/reset actions, became low-contrast on hover.
+- Hover states needed consistent Droid teal variants, with red reserved for Admin Control and destructive/highlight actions.
+
+Fix:
+- Added Admin Control color variables for Droid teal, teal hover, soft teal, and red variants.
+- Normalized Admin primary, ghost, upload toggle, hidden tabs, approval, role, and destructive button hover states.
+- Updated Dashboard sidebar/share/delete button states for clearer active/hover contrast.
+- Updated Data Catalog, 2D Viewer, 3D Viewer, Compare, and Downloads button hover states so text remains visible.
+
+Files touched:
+- frontend/src/components/Admin/AdminDashboard.css
+- frontend/src/components/Dashboard.css
+- frontend/src/components/Datasets/DatasetsPanel.css
+- frontend/src/components/MapViewer/MapViewer.css
+- frontend/src/components/GlobeViewer/GlobeViewer.css
+- frontend/src/components/Compare/ComparePanel.css
+- frontend/src/components/Downloads/DownloadsPanel.css
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Frontend build passed: cmd /c npm run build
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-08
+Area: Responsive Layout / Overall Visual QA
+Issue:
+- Overall responsive review found Admin Control hero/card stretching vertically on large responsive previews.
+- 4K/ultrawide global max-width could constrain map viewer workspace more than intended.
+
+Fix:
+- Set Admin Control layout rows to auto header + flexible table area, preventing oversized header-card stretch.
+- Removed global 4K ds-content max-width so 2D/3D map viewers can use full professional screen width.
+- Kept ultrawide max-width controls scoped to non-map content only.
+
+Files touched:
+- frontend/src/components/Admin/AdminDashboard.css
+- frontend/src/index.css
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Frontend build passed: cmd /c npm run build
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-08
+Area: Responsive Layout / Admin Table Sticky Column
+Issue:
+- MacBook responsive preview showed a vertical shadow/line behind Hidden Tabs after the first Admin Control column became sticky.
+
+Fix:
+- Removed the sticky first-column box-shadow and replaced it with a very light border.
+- Reduced table edge fade opacity so responsive scroll hints do not look like vertical overlays.
+
+Files touched:
+- frontend/src/components/Admin/AdminDashboard.css
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Frontend build passed: cmd /c npm run build
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-09
+Area: 3D Viewer / Asset Sidebar Duplicates
+
+Issue:
+- Clicking Point Clouds and 3D Models tabs showed repeated copies of the same project assets.
+- The same Potree/Cesium dataset could arrive from both project files and processing jobs with slightly different URLs/IDs, so the sidebar received duplicates.
+
+Fix:
+- Added canonical 3D asset dedupe keys in Dashboard based on viewer type and normalized processed/pointcloud/tileset paths.
+- Merged file and job assets through the canonical key instead of raw URL only.
+- Added a defensive sidebar-level unique filter so repeated asset props still render once.
+
+Files touched:
+- frontend/src/components/Dashboard.tsx
+- frontend/src/components/GlobeViewer/Viewer3DSidebar.tsx
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Frontend build passed: cmd /c npm run build
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-09
+Area: 3D Viewer / Data Catalog Targeted Opens
+
+Issue:
+- Clicking an uploaded LAS point cloud could send the raw /data/projects/.../raw/*.las URL into the Potree iframe.
+- Raw /data paths are intentionally hidden by backend security middleware, so the browser saw a 404 even though the file existed.
+- Data Catalog "Show/Open" buttons used toggle behavior, so clicking a dataset could remove it instead of opening that exact item.
+
+Fix:
+- Prevented raw .las/.laz URLs from becoming 3D sidebar Potree assets.
+- Prioritized converted Potree processed viewer URLs over raw point cloud URLs when merging 3D assets.
+- Data Catalog now uses upsert/open behavior for dataset actions instead of toggle/off behavior.
+- Point cloud open action resolves the ready Potree viewer URL through /api/pointcloud-status when a raw or non-viewer URL is encountered.
+- 3D viewer now prioritizes the latest clicked 3D layer so Point Cloud opens Potree and 3D Model opens Cesium correctly.
+
+Files touched:
+- frontend/src/components/Dashboard.tsx
+- frontend/src/components/Datasets/DatasetsPanel.tsx
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Frontend build passed: cmd /c npm run build
+- Confirmed converted Potree HTML exists under Project_Data/projects/proj_482e52974f060d7e/processed/.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-09
+Area: 3D Viewer / Potree Authentication In Iframe
+
+Issue:
+- Potree iframe showed {"detail":"Authentication required"} after selecting a point cloud from the 3D sidebar.
+- Root cause was absolute backend URLs such as http://127.0.0.1:8001/data/... being used as iframe src while the app ran on http://localhost:5173.
+- The iframe request did not carry the current localhost session cookie to the backend origin.
+
+Fix:
+- Normalized 3D asset URLs in Dashboard through toSameOriginBackendUrl().
+- Potree and Cesium assets now open as same-origin /data/... URLs through the frontend proxy/session path.
+
+Files touched:
+- frontend/src/components/Dashboard.tsx
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Frontend build passed: cmd /c npm run build
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-09
+Area: 3D Viewer / Point Cloud Open Performance
+
+Issue:
+- Switching from Data Catalog to 3D Viewer could trigger extra project files/jobs refetching.
+- Potree iframe had no explicit eager-load hint for selected local viewer HTML.
+
+Fix:
+- Removed active tab from the 3D asset loading dependency so project 3D assets are loaded by project change, not every tab switch.
+- Added same-origin document prefetch hints for the first project point cloud viewer URLs when entering 3D mode.
+- Marked the Potree iframe as eager loading for the selected viewer.
+
+Files touched:
+- frontend/src/components/Dashboard.tsx
+- frontend/src/components/GlobeViewer/PotreeViewer.tsx
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Frontend build passed: cmd /c npm run build
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-09
+Area: Auth / Potree Point Cloud Session Stability
+
+Issue:
+- While viewing Potree point clouds, internal files such as hierarchy.bin returned 401 Unauthorized.
+- The iframe could show {"detail":"Session expired"} even though the portal topbar still looked logged in.
+- Root cause was old DB session expiry combined with many authenticated Potree asset requests.
+
+Fix:
+- Added sliding session renewal in backend _require_user().
+- Added a grace window so recoverable old sessions can be revived instead of failing during active use.
+- Added a short in-memory auth cache to reduce repeated DB auth checks while Potree loads many small .bin/.js files.
+- Cleared the auth cache after login, logout, password reset, role/permission updates, and user deletion.
+- Added private browser cache headers for processed project data and pointcloud assets to improve repeated point cloud loads.
+
+Files touched:
+- backend/app/main.py
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Backend compile passed: python -m compileall backend/app
+===============================================================================

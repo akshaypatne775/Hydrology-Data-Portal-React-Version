@@ -99,6 +99,10 @@ def ensure_tables() -> None:
             connection.execute(
                 "ALTER TABLE users ADD COLUMN can_access_catalog INTEGER NOT NULL DEFAULT 1"
             )
+        if "can_upload_data" not in user_columns:
+            connection.execute(
+                "ALTER TABLE users ADD COLUMN can_upload_data INTEGER NOT NULL DEFAULT 0"
+            )
         if "hidden_tabs" not in user_columns:
             connection.execute(
                 "ALTER TABLE users ADD COLUMN hidden_tabs TEXT NOT NULL DEFAULT '[]'"

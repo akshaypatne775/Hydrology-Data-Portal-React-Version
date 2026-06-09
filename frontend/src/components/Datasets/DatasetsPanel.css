@@ -184,12 +184,15 @@
 }
 
 .dsp-table-wrap {
+  position: relative;
   border: 1px solid #dbe4ee;
   border-radius: 8px;
   overflow: auto;
   min-height: 9rem;
   min-width: 0;
   flex: 1 1 auto;
+  scrollbar-color: #0e3e49 rgba(14, 62, 73, 0.1);
+  scrollbar-width: thin;
 }
 
 .dsp-table {
@@ -325,7 +328,8 @@
 
 .dsp-action:hover:not(:disabled) {
   border-color: #0e3e49;
-  background: #edf7f8;
+  background: #e7f2f4;
+  color: #0e3e49;
 }
 
 .dsp-action:disabled {
@@ -341,22 +345,31 @@
 
 .dsp-action--primary:hover:not(:disabled) {
   background: #145461;
+  border-color: #145461;
   color: #fff;
 }
 
 .dsp-action--secondary {
+  border-color: rgba(14, 62, 73, 0.32);
   background: #fff;
+  color: #0e3e49;
+}
+
+.dsp-action--secondary:hover:not(:disabled) {
+  background: #e7f2f4;
+  color: #0e3e49;
 }
 
 .dsp-action--danger {
-  border-color: #b91c1c;
-  color: #b91c1c;
-  background: #fff5f5;
+  border-color: #c81e1e;
+  color: #c81e1e;
+  background: #fff1f2;
 }
 
 .dsp-action--danger:hover:not(:disabled) {
   border-color: #991b1b;
   background: #fee2e2;
+  color: #991b1b;
 }
 
 .dsp-action-group {
@@ -371,6 +384,11 @@
   color: #0e3e49;
   background: #f8fbfc;
   white-space: nowrap;
+}
+
+.dsp-action--sync:hover:not(:disabled) {
+  background: #e7f2f4;
+  color: #0e3e49;
 }
 
 .dsp-toast {
@@ -415,6 +433,19 @@
 }
 
 @media (max-width: 1100px) {
+  .dsp-root {
+    padding: 0.8rem;
+  }
+
+  .dsp-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .dsp-head__actions {
+    flex-wrap: wrap;
+  }
+
   .dsp-form {
     grid-template-columns: repeat(2, minmax(150px, 1fr));
   }
@@ -449,15 +480,6 @@
 }
 
 @media (max-width: 900px) and (min-width: 768px) {
-  .dsp-head {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .dsp-head__actions {
-    flex-wrap: wrap;
-  }
-
   .dsp-table {
     min-width: 880px;
   }

@@ -1,8 +1,17 @@
 .admin-panel {
+  --admin-teal: #0e3e49;
+  --admin-teal-hover: #145461;
+  --admin-teal-soft: #e7f2f4;
+  --admin-teal-border: rgba(14, 62, 73, 0.34);
+  --admin-red: #c81e1e;
+  --admin-red-hover: #991b1b;
+  --admin-red-soft: #fff1f2;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: start;
   gap: 1rem;
   min-height: 100%;
-  color: #0e3e49;
+  color: var(--admin-teal);
 }
 
 .admin-panel__hero {
@@ -60,17 +69,22 @@
 }
 
 .admin-panel__table-wrap {
+  position: relative;
   overflow: auto;
+  max-width: 100%;
+  min-height: 0;
   border: 1px solid rgba(14, 62, 73, 0.16);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.78);
   box-shadow: 0 14px 45px rgba(14, 62, 73, 0.1);
   backdrop-filter: blur(14px);
+  scrollbar-color: #0e3e49 rgba(14, 62, 73, 0.1);
+  scrollbar-width: thin;
 }
 
 .admin-panel__table {
   width: 100%;
-  min-width: 1180px;
+  min-width: 1320px;
   border-collapse: collapse;
 }
 
@@ -82,6 +96,14 @@
   letter-spacing: 0.06em;
   text-align: left;
   text-transform: uppercase;
+}
+
+.admin-panel__table td:first-child strong {
+  display: block;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .admin-panel__table td {
@@ -143,69 +165,157 @@
   justify-content: center;
   min-height: 2rem;
   padding: 0 0.75rem;
-  border: 1px solid #0e3e49;
+  border: 1px solid var(--admin-teal);
   border-radius: 6px;
-  background: #0e3e49;
+  background: var(--admin-teal);
   color: #fff;
   font-size: 0.72rem;
   font-weight: 800;
   cursor: pointer;
   white-space: nowrap;
+  max-width: 100%;
 }
 
 .admin-panel__action:hover {
-  background: #145461;
+  border-color: var(--admin-teal-hover);
+  background: var(--admin-teal-hover);
+  color: #ffffff;
+  box-shadow: 0 8px 18px rgba(14, 62, 73, 0.18);
+}
+
+.admin-panel__action:focus-visible,
+.admin-panel__upload-toggle:focus-visible,
+.admin-panel__tab-menu summary:focus-visible {
+  outline: 3px solid rgba(20, 184, 166, 0.28);
+  outline-offset: 2px;
 }
 
 .admin-panel__actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
+  min-width: 0;
 }
 
 .admin-panel__action--approve {
-  border-color: #15803d;
-  background: #15803d;
+  border-color: var(--admin-teal);
+  background: var(--admin-teal);
+  color: #ffffff;
 }
 
 .admin-panel__action--ghost {
-  background: #fff;
-  color: #0e3e49;
+  border-color: var(--admin-teal-border);
+  background: #ffffff;
+  color: var(--admin-teal);
+}
+
+.admin-panel__action--ghost:hover {
+  border-color: var(--admin-teal);
+  background: var(--admin-teal-soft);
+  color: var(--admin-teal);
+  box-shadow: 0 8px 18px rgba(14, 62, 73, 0.1);
 }
 
 .admin-panel__action--danger {
-  border-color: #b91c1c;
-  background: #b91c1c;
+  border-color: var(--admin-red);
+  background: var(--admin-red);
+  color: #ffffff;
+}
+
+.admin-panel__action--danger:hover {
+  border-color: var(--admin-red-hover);
+  background: var(--admin-red-hover);
+  color: #ffffff;
+  box-shadow: 0 8px 18px rgba(200, 30, 30, 0.2);
 }
 
 .admin-panel__action--catalog-on {
-  border-color: #16a34a;
-  background: #16a34a;
-  box-shadow: 0 8px 18px rgba(22, 163, 74, 0.22);
+  border-color: var(--admin-teal);
+  background: var(--admin-teal);
+  color: #ffffff;
+  box-shadow: 0 8px 18px rgba(14, 62, 73, 0.18);
 }
 
 .admin-panel__action--catalog-on:hover {
-  background: #15803d;
+  background: var(--admin-teal-hover);
 }
 
 .admin-panel__action--catalog-off {
-  border-color: #dc2626;
-  background: #dc2626;
-  box-shadow: 0 8px 18px rgba(220, 38, 38, 0.22);
+  border-color: var(--admin-red);
+  background: var(--admin-red);
+  color: #ffffff;
+  box-shadow: 0 8px 18px rgba(200, 30, 30, 0.22);
 }
 
 .admin-panel__action--catalog-off:hover {
-  background: #b91c1c;
+  background: var(--admin-red-hover);
 }
 
 .admin-panel__action--advanced {
   border-color: #7f1d1d;
   background: #7f1d1d;
+  color: #ffffff;
+}
+
+.admin-panel__action--advanced:hover {
+  border-color: #631717;
+  background: #631717;
+  color: #ffffff;
+}
+
+.admin-panel__upload-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 2rem;
+  min-width: 6.8rem;
+  padding: 0 0.7rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #fff;
+  font-family: 'Montserrat', sans-serif;
+  font-size: 0.72rem;
+  font-weight: 900;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.admin-panel__upload-toggle--on {
+  border-color: var(--admin-teal);
+  background: var(--admin-teal);
+  box-shadow: 0 8px 18px rgba(14, 62, 73, 0.18);
+}
+
+.admin-panel__upload-toggle--on:hover {
+  background: var(--admin-teal-hover);
+}
+
+.admin-panel__upload-toggle--off {
+  border-color: var(--admin-red);
+  background: var(--admin-red);
+  box-shadow: 0 8px 18px rgba(200, 30, 30, 0.22);
+}
+
+.admin-panel__upload-toggle--off:hover {
+  background: var(--admin-red-hover);
+}
+
+.admin-panel__upload-toggle i,
+.admin-panel__upload-toggle i::before,
+.admin-panel__upload-toggle i::after,
+.admin-panel__upload-toggle .fa,
+.admin-panel__upload-toggle .fas,
+.admin-panel__upload-toggle .fa-solid {
+  font-family: "Font Awesome 6 Free" !important;
+  font-weight: 900 !important;
 }
 
 .admin-panel__tab-menu {
   position: relative;
-  min-width: 10.5rem;
+  width: min(12rem, 100%);
+  min-width: 9rem;
 }
 
 .admin-panel__tab-menu summary {
@@ -235,13 +345,12 @@
 }
 
 .admin-panel__tab-menu-list {
-  position: absolute;
+  position: static;
   z-index: 20;
-  top: calc(100% + 0.35rem);
-  left: 0;
   display: grid;
   gap: 0.35rem;
   min-width: 12.5rem;
+  margin-top: 0.4rem;
   padding: 0.65rem;
   border: 1px solid rgba(14, 62, 73, 0.22);
   border-radius: 8px;
@@ -261,6 +370,53 @@
 
 .admin-panel__tab-option input {
   accent-color: #dc2626;
+}
+
+@media (min-width: 1600px) {
+  .admin-panel__table {
+    min-width: 1500px;
+  }
+
+  .admin-panel__table th,
+  .admin-panel__table td {
+    padding-inline: 0.95rem;
+  }
+}
+
+@media (max-width: 1366px) and (min-width: 781px) {
+  .admin-panel {
+    gap: 0.8rem;
+  }
+
+  .admin-panel__hero {
+    padding: 1rem;
+  }
+
+  .admin-panel h2 {
+    font-size: 1.15rem;
+  }
+
+  .admin-panel__table {
+    min-width: 1280px;
+  }
+
+  .admin-panel__table th,
+  .admin-panel__table td {
+    padding: 0.62rem 0.65rem;
+    font-size: 0.74rem;
+  }
+
+  .admin-panel__action,
+  .admin-panel__upload-toggle,
+  .admin-panel__tab-menu summary {
+    min-height: 1.85rem;
+    padding-inline: 0.62rem;
+    font-size: 0.66rem;
+  }
+
+  .admin-panel__table td:first-child strong {
+    max-width: 13rem;
+  }
 }
 
 @media (max-width: 780px) {

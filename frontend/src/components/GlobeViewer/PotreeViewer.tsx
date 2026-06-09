@@ -7,6 +7,7 @@ export function PotreeViewer({ url }: PotreeViewerProps) {
     <div style={{ position: 'relative', width: '100%', height: '100%', background: '#06171b' }}>
       <iframe
         src={url}
+        loading="eager"
         style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
         title="Droid 3D Point Cloud System"
       />

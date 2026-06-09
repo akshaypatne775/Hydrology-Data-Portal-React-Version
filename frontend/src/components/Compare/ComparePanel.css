@@ -41,6 +41,12 @@
   cursor: pointer;
 }
 
+.cmp-actions button:hover:not(:disabled) {
+  border-color: #145461;
+  background: #145461;
+  color: #ffffff;
+}
+
 .cmp-actions button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -63,6 +69,7 @@
 
 .cmp-table {
   width: 100%;
+  min-width: 520px;
   border-collapse: collapse;
 }
 
@@ -151,8 +158,26 @@
   text-align: center;
 }
 
-@media (max-width: 900px) {
+@media (min-width: 1800px) {
+  .cmp-root {
+    padding: 1.25rem;
+  }
+
+  .cmp-layout {
+    grid-template-columns: minmax(420px, 0.8fr) minmax(560px, 1.2fr);
+  }
+}
+
+@media (max-width: 1250px) {
   .cmp-layout {
     grid-template-columns: 1fr;
+  }
+
+  .cmp-table-wrap {
+    max-width: 100%;
+  }
+
+  .cmp-chart {
+    min-height: 220px;
   }
 }

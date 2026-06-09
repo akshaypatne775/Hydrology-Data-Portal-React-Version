@@ -36,8 +36,12 @@ export function getApiBaseUrl(): string {
     return defaultApiBase()
   }
 
+  if (tileBase.startsWith('/')) {
+    return defaultApiBase()
+  }
+
   if (tileBase.toLowerCase().endsWith('/tiles')) {
-    return tileBase.slice(0, -'/tiles'.length)
+    return tileBase.slice(0, -'/tiles'.length) || defaultApiBase()
   }
 
   try {

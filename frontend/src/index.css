@@ -148,3 +148,241 @@ i,
   font-family: 'Font Awesome 6 Free' !important;
   font-weight: 900 !important;
 }
+
+/*
+ * Desktop responsive safety layer
+ * Targets: 1366x768, 1920x1080, 2560x1440, 2560x1600, 3440x1440, 3840x2160.
+ */
+@media (max-width: 1366px), (max-height: 820px) {
+  html {
+    font-size: 15px;
+  }
+
+  .ds-dashboard {
+    min-width: 0;
+  }
+
+  .ds-sidebar {
+    width: 13.25rem;
+  }
+
+  .ds-sidebar__brand {
+    padding: 0.8rem 0.7rem 0.72rem;
+  }
+
+  .ds-sidebar__logo-img {
+    width: min(124px, 78%);
+  }
+
+  .ds-sidebar__nav {
+    gap: 0.22rem;
+    padding: 0.72rem 0.5rem;
+  }
+
+  .ds-sidebar__link {
+    gap: 0.52rem;
+    min-height: 2.35rem;
+    padding: 0.56rem 0.58rem;
+    border-radius: 9px;
+    font-size: 0.72rem;
+  }
+
+  .ds-sidebar__footer {
+    padding: 0.65rem 0.7rem 0.8rem;
+  }
+
+  .ds-topbar {
+    min-height: 3.35rem;
+    height: auto;
+    padding: 0.45rem 0.8rem;
+    gap: 0.65rem;
+  }
+
+  .ds-topbar__name {
+    max-width: 30vw;
+    font-size: 0.88rem;
+  }
+
+  .ds-topbar__actions {
+    gap: 0.42rem;
+  }
+
+  .ds-share {
+    min-height: 2rem;
+    padding: 0.38rem 0.68rem;
+    font-size: 0.64rem;
+  }
+
+  .ds-profile {
+    max-width: 15rem;
+    gap: 0.45rem;
+    padding: 0.25rem 0.5rem 0.25rem 0.25rem;
+  }
+
+  .ds-profile__avatar {
+    width: 1.75rem;
+    height: 1.75rem;
+  }
+
+  .ds-profile__name {
+    max-width: 10rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ds-content {
+    padding: 0.7rem 0.8rem 0.85rem;
+  }
+
+  .ds-map-shell,
+  .ds-map-shell--viewer,
+  .ds-map-shell--analysis {
+    height: calc(100dvh - 4.75rem);
+    min-height: 0;
+  }
+
+  .ds-projects__header,
+  .ds-overview-hero {
+    padding: 0.85rem;
+  }
+
+  .ds-overview {
+    gap: 0.75rem;
+  }
+
+  .ds-overview-metrics {
+    grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+    gap: 0.65rem;
+  }
+
+  .ds-overview-metric,
+  .ds-module-card,
+  .ds-project-card {
+    border-radius: 10px;
+    padding: 0.78rem;
+  }
+
+  .ds-module-grid {
+    grid-template-columns: repeat(auto-fit, minmax(205px, 1fr));
+    gap: 0.72rem;
+  }
+
+  .admin-panel__hero {
+    padding: 0.85rem;
+  }
+
+  .admin-panel__table {
+    min-width: 1180px;
+  }
+
+  .mv-chrome,
+  .gv-panel {
+    max-height: calc(100% - 1rem);
+  }
+}
+
+@media (min-width: 1367px) and (max-width: 1920px) and (min-height: 821px) {
+  html {
+    font-size: 16px;
+  }
+
+  .ds-map-shell,
+  .ds-map-shell--viewer,
+  .ds-map-shell--analysis {
+    min-height: min(38rem, calc(100dvh - 5.25rem));
+  }
+}
+
+@media (min-width: 2200px) and (max-width: 2899px) {
+  .ds-sidebar {
+    width: 18.5rem;
+  }
+
+  .ds-content {
+    padding: 1.25rem 1.55rem 1.55rem;
+  }
+
+  .ds-overview-metrics {
+    grid-template-columns: repeat(4, minmax(220px, 1fr));
+  }
+
+  .ds-module-grid,
+  .ds-project-grid {
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  }
+
+  .mv-chrome {
+    width: 310px;
+  }
+
+  .gv-panel {
+    width: 330px;
+  }
+}
+
+@media (min-width: 3000px) {
+  html {
+    font-size: 17px;
+  }
+
+  .ds-sidebar {
+    width: 20rem;
+  }
+
+  .ds-content {
+    padding: 1.6rem 2rem 2rem;
+  }
+
+  .ds-topbar {
+    min-height: 4.4rem;
+    padding-inline: 2rem;
+  }
+
+  .ds-map-shell,
+  .ds-map-shell--viewer,
+  .ds-map-shell--analysis {
+    height: calc(100dvh - 7.4rem);
+  }
+
+  .mv-chrome {
+    width: 340px;
+    padding: 0.95rem;
+  }
+
+  .gv-panel {
+    width: 360px;
+    padding: 1.1rem;
+  }
+
+  .admin-panel__table,
+  .dsp-table,
+  .cmp-table {
+    font-size: 1rem;
+  }
+}
+
+@media (min-aspect-ratio: 21/9) and (min-width: 2500px) {
+  .ds-overview,
+  .ds-projects,
+  .cmp-root,
+  .dlp-root {
+    max-width: 2400px;
+    width: 100%;
+    margin-inline: auto;
+  }
+
+  .ds-map-shell,
+  .ds-map-shell--viewer,
+  .ds-map-shell--analysis {
+    max-width: none;
+  }
+
+  .ds-overview-metrics {
+    grid-template-columns: repeat(4, minmax(230px, 1fr));
+  }
+
+  .ds-module-grid {
+    grid-template-columns: repeat(4, minmax(280px, 1fr));
+  }
+}

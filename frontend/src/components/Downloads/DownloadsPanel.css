@@ -5,6 +5,7 @@
   height: 100%;
   min-height: 0;
   background: #fff;
+  overflow: auto;
 }
 
 .dlp-head h3 {
@@ -21,7 +22,7 @@
 
 .dlp-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
   gap: 0.9rem;
 }
 
@@ -102,5 +103,25 @@
 }
 
 .dlp-download:hover {
-  background: #0b323b;
+  border-color: #145461;
+  background: #145461;
+  color: #ffffff;
+}
+
+@media (min-width: 1800px) {
+  .dlp-grid {
+    grid-template-columns: repeat(4, minmax(280px, 1fr));
+  }
+}
+
+@media (max-width: 980px) {
+  .dlp-item {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .dlp-download {
+    width: 100%;
+    justify-content: center;
+  }
 }

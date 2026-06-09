@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import './Viewer3DSidebar.css'
 
 export type Viewer3DAsset = {
@@ -23,18 +23,20 @@ export default function Viewer3DSidebar({
   onSelect,
   onBack,
 }: Viewer3DSidebarProps) {
+  const uniquePointClouds = useMemo(() => unique3DAssets(pointClouds), [pointClouds])
+  const uniqueModels = useMemo(() => unique3DAssets(models), [models])
   const [activeTab, setActiveTab] = useState<'pointclouds' | 'models'>(
-    pointClouds.length > 0 ? 'pointclouds' : 'models',
+    uniquePointClouds.length > 0 ? 'pointclouds' : 'models',
   )
-  const assets = activeTab === 'pointclouds' ? pointClouds : models
+  const assets = activeTab === 'pointclouds' ? uniquePointClouds : uniqueModels
 
   useEffect(() => {
-    if (activeTab === 'pointclouds' && pointClouds.length === 0 && models.length > 0) {
+    if (activeTab === 'pointclouds' && uniquePointClouds.length === 0 && uniqueModels.length > 0) {
       setActiveTab('models')
-    } else if (activeTab === 'models' && models.length === 0 && pointClouds.length > 0) {
+    } else if (activeTab === 'models' && uniqueModels.length === 0 && uniquePointClouds.length > 0) {
       setActiveTab('pointclouds')
     }
-  }, [activeTab, models.length, pointClouds.length])
+  }, [activeTab, uniqueModels.length, uniquePointClouds.length])
 
   return (
     <aside className="viewer-3d-sidebar" aria-label="3D viewer navigation">
@@ -48,7 +50,7 @@ export default function Viewer3DSidebar({
       </header>
 
       <div className="viewer-3d-sidebar__tabs" role="tablist" aria-label="3D asset types">
-        {pointClouds.length > 0 ? (
+        {uniquePointClouds.length > 0 ? (
           <button
             type="button"
             role="tab"
@@ -59,7 +61,7 @@ export default function Viewer3DSidebar({
             Point Clouds
           </button>
         ) : null}
-        {models.length > 0 ? (
+        {uniqueModels.length > 0 ? (
           <button
             type="button"
             role="tab"
@@ -87,4 +89,29 @@ export default function Viewer3DSidebar({
       </div>
     </aside>
   )
+}
+
+function normalizeAssetKey(asset: Viewer3DAsset): string {
+  const specificName = String(asset.name || '').trim().toLowerCase()
+  const raw = specificName && specificName !== 'point cloud' && specificName !== '3d model'
+    ? `${asset.viewer}:name:${asset.name}`
+    : `${asset.viewer}:${asset.url || asset.id || asset.name}`
+  try {
+    return decodeURIComponent(raw)
+      .replace(/\\/g, '/')
+      .replace(/^https?:\/\/[^/]+/i, '')
+      .replace(/[?#].*$/, '')
+      .toLowerCase()
+  } catch {
+    return raw.replace(/\\/g, '/').replace(/[?#].*$/, '').toLowerCase()
+  }
+}
+
+function unique3DAssets(assets: Viewer3DAsset[]): Viewer3DAsset[] {
+  const unique = new Map<string, Viewer3DAsset>()
+  for (const asset of assets) {
+    const key = normalizeAssetKey(asset)
+    if (!unique.has(key)) unique.set(key, asset)
+  }
+  return Array.from(unique.values())
 }

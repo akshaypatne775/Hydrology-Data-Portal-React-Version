@@ -132,3 +132,59 @@
     flex-basis: 14rem;
   }
 }
+.viewer-3d-sidebar {
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+@media (max-width: 1366px), (max-height: 820px) {
+  .viewer-3d-sidebar {
+    width: 13.25rem;
+    padding: 0.72rem;
+  }
+
+  .viewer-3d-sidebar__back {
+    min-height: 2rem;
+    font-size: 0.7rem;
+  }
+
+  .viewer-3d-sidebar__header {
+    gap: 0.32rem;
+  }
+
+  .viewer-3d-sidebar__header span {
+    font-size: 0.58rem;
+  }
+
+  .viewer-3d-sidebar__header strong {
+    font-size: 0.85rem;
+  }
+
+  .viewer-3d-sidebar__tabs {
+    gap: 0.3rem;
+  }
+
+  .viewer-3d-sidebar__tab {
+    min-height: 1.9rem;
+    font-size: 0.66rem;
+  }
+
+  .viewer-3d-sidebar__asset {
+    min-height: 2.1rem;
+    padding: 0.42rem 0.48rem;
+    font-size: 0.66rem;
+  }
+}
+
+@media (min-width: 2200px) {
+  .viewer-3d-sidebar {
+    width: 19rem;
+  }
+}
+
+@media (min-width: 3000px) {
+  .viewer-3d-sidebar {
+    width: 21rem;
+    padding: 1.15rem;
+  }
+}
