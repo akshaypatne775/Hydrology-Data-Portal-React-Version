@@ -108,6 +108,35 @@
   box-shadow: 0 0 0 2px rgba(45, 212, 191, 0.8), 0 8px 18px rgba(2, 6, 23, 0.28);
 }
 
+.spatial-point-marker {
+  width: 30px !important;
+  height: 38px !important;
+  margin-left: -15px !important;
+  margin-top: -36px !important;
+  background: transparent;
+  border: 0;
+}
+
+.spatial-point-marker__pin {
+  width: 30px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  color: var(--spatial-marker-color, #f59e0b);
+  filter: drop-shadow(0 8px 12px rgba(2, 6, 23, 0.36));
+}
+
+.spatial-point-marker__pin i {
+  font-size: 2rem;
+  line-height: 1;
+  -webkit-text-stroke: 2px #ffffff;
+}
+
+.spatial-point-marker--selected .spatial-point-marker__pin {
+  transform: translateY(-2px) scale(1.08);
+  filter: drop-shadow(0 0 0 rgba(255, 255, 255, 0)) drop-shadow(0 0 10px rgba(45, 212, 191, 0.95));
+}
+
 .spatial-feature-tooltip {
   border: 1px solid rgba(45, 212, 191, 0.42);
   border-radius: 8px;
@@ -238,6 +267,18 @@
   font-weight: 700;
 }
 
+.spatial-modal__permission {
+  margin: 0;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid rgba(245, 158, 11, 0.36);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.12);
+  color: #fde68a;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
 .spatial-modal__actions {
   display: flex;
   align-items: center;
@@ -290,7 +331,13 @@
 .spatial-modal i::after,
 .spatial-modal .fa,
 .spatial-modal .fas,
-.spatial-modal .fa-solid {
+.spatial-modal .fa-solid,
+.spatial-point-marker i,
+.spatial-point-marker i::before,
+.spatial-point-marker i::after,
+.spatial-point-marker .fa,
+.spatial-point-marker .fas,
+.spatial-point-marker .fa-solid {
   font-family: "Font Awesome 6 Free" !important;
   font-weight: 900 !important;
 }

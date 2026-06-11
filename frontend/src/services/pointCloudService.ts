@@ -5,6 +5,8 @@ export type PointCloudStatus = {
   failed?: boolean
   error?: string
   tileset_url?: string
+  ept_url?: string
+  viewer_type?: 'ept' | string
 }
 
 export async function getPointCloudStatus(

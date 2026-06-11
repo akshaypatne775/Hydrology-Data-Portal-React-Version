@@ -149,9 +149,13 @@ function canonical3DAssetKey(viewer: Project3DAsset['viewer'], values: unknown[]
     if (processedIndex >= 0 && parts[processedIndex + 1]) {
       return `${viewer}:processed:${parts[processedIndex + 1]}`
     }
-    const pointCloudIndex = parts.findIndex((part) => part === 'pointcloud' || part === 'pointclouds' || part === 'potree')
+    const pointCloudIndex = parts.findIndex((part) => part === 'pointcloud' || part === 'pointclouds' || part === 'droid-ept-viewer')
     if (pointCloudIndex >= 0 && parts[pointCloudIndex + 1]) {
       return `${viewer}:pointcloud:${parts[pointCloudIndex + 1]}`
+    }
+    const eptIndex = parts.findIndex((part) => part === 'ept.json')
+    if (eptIndex > 0) {
+      return `${viewer}:ept:${parts[eptIndex - 1]}`
     }
     const tilesetIndex = parts.findIndex((part) => part === 'tileset.json')
     if (tilesetIndex > 0) {
@@ -171,10 +175,13 @@ function isRawPointCloudAssetUrl(url: string): boolean {
 
 function isConvertedPointCloudAssetUrl(url: string): boolean {
   const normalized = normalize3DAssetToken(url)
-  return normalized.includes('/processed/') && (
-    normalized.endsWith('.html') ||
-    normalized.endsWith('/tileset.json') ||
-    normalized.includes('/metadata.json')
+  return (
+    normalized.includes('/droid-ept-viewer/') ||
+    normalized.endsWith('/ept.json') ||
+    (
+      normalized.includes('/processed/') &&
+      normalized.endsWith('/ept.json')
+    )
   )
 }
 
@@ -228,8 +235,8 @@ function project3DAssetsFromFiles(files: ProjectFile[]): Project3DAsset[] {
     const viewer = (
       signature.includes('pointcloud') ||
       signature.includes('point cloud') ||
-      signature.includes('potree') ||
-      signature.includes('/pointcloud/')
+      signature.includes('/droid-ept-viewer/') ||
+      signature.includes('/ept.json')
     )
       ? 'potree'
       : (
@@ -267,8 +274,8 @@ function project3DAssetsFromJobs(jobs: ProjectJob[]): Project3DAsset[] {
     const viewer = (
       signature.includes('pointcloud') ||
       signature.includes('point cloud') ||
-      signature.includes('potree') ||
-      signature.includes('/pointcloud/')
+      signature.includes('/droid-ept-viewer/') ||
+      signature.includes('/ept.json')
     )
       ? 'potree'
       : (
@@ -299,10 +306,8 @@ function isPointCloudViewerLayer(layer: { layerType?: string; url?: string }): b
   const url = String(layer.url || '').toLowerCase()
   return (
     layerType.includes('pointcloud') ||
-    layerType.includes('potree') ||
-    url.includes('/pointcloud/') ||
-    url.includes('/potree/') ||
-    /(?:index|viewer)\.html(?:[?#].*)?$/.test(url)
+    url.includes('/droid-ept-viewer/') ||
+    url.includes('/ept.json')
   )
 }
 
@@ -399,8 +404,13 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     : selected3DAsset?.viewer === 'cesium'
       ? ''
       : String(active3DLayer?.layerType || '').toLowerCase() === 'pointcloud'
-        ? active3DLayer?.url || ''
+        ? (active3DLayer?.url && !isRawPointCloudAssetUrl(active3DLayer.url) ? active3DLayer.url : '')
         : ''
+  const selectedPointCloudDatasetId = selected3DAsset?.viewer === 'potree'
+    ? selected3DAsset.id
+    : String(active3DLayer?.layerType || '').toLowerCase() === 'pointcloud'
+      ? String(active3DLayer?.datasetId || active3DLayer?.id || '')
+      : ''
 
   useEffect(() => {
     if (active3DLayer) setSelected3DAsset(null)
@@ -1026,6 +1036,8 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                         key={selectedPointCloudUrl}
                         url={selectedPointCloudUrl}
                         name={selected3DAsset?.name}
+                        projectId={selectedProject!.id}
+                        datasetId={selectedPointCloudDatasetId}
                       />
                     ) : (
                       <GlobeViewer key={selected3DAsset?.url || selectedProject!.id} projectId={selectedProject!.id} />

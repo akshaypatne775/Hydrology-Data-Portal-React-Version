@@ -5,6 +5,7 @@ import { useAuthContext } from '../../context/AuthContext'
 import { useModal } from '../../context/ModalContext'
 import { API_BASE, toSameOriginBackendUrl } from '../../lib/apiBase'
 import { forceDeleteAdminDataset, updateAdminDatasetMetadata } from '../../services/adminService'
+import { logClientError } from '../../services/errorLogService'
 import { getPointCloudStatus } from '../../services/pointCloudService'
 import {
   deleteProjectFile,
@@ -280,7 +281,7 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
             fileType === 'cad' ? 'CAD' :
               type === 'Reports' ? 'Reports' :
           undefined
-  const layerUrl =
+  const rawLayerUrl =
     layerType === 'Reports'
       ? toSameOriginBackendUrl(file.file_url)
       : layerType === '3DModel'
@@ -288,6 +289,7 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
       : (file.layer_url || '').toLowerCase().endsWith('tileset.json')
         ? `${API_BASE}/data/${file.rel_path.replace(/\/tileset\.json$/i, '').replace(/\/$/, '')}/{z}/{x}/{y}.png`
         : toSameOriginBackendUrl(file.layer_url)
+  const layerUrl = layerType === 'pointcloud' && rawLayerUrl && isRawPointCloudUrl(rawLayerUrl) ? '' : rawLayerUrl
   const parseBounds = (value?: string): [number, number, number, number] | undefined => {
     if (!value) return undefined
     try {
@@ -357,17 +359,51 @@ function isPointCloudLayer(layerType?: DatasetRow['layerType']): boolean {
   return String(layerType).toLowerCase() === 'pointcloud'
 }
 
+function isPointCloudRow(row: Pick<DatasetRow, 'layerType' | 'type' | 'fileName'>): boolean {
+  return isPointCloudLayer(row.layerType) || row.type === 'Point Cloud' || /\.(las|laz)$/i.test(row.fileName)
+}
+
+function datasetMergeKey(row: Pick<DatasetRow, 'datasetId' | 'fileName' | 'layerType' | 'type'>): string {
+  if (isPointCloudRow(row)) return `pointcloud:${row.fileName.toLowerCase()}`
+  return row.datasetId || row.fileName
+}
+
 function isRawPointCloudUrl(url: string): boolean {
   return /\.(las|laz)(?:[?#].*)?$/i.test(url.trim())
 }
 
-function isPotreeViewerUrl(url: string): boolean {
+function isPointCloudViewerUrl(url: string): boolean {
   const normalized = url.trim().toLowerCase().split(/[?#]/, 1)[0] || ''
-  return normalized.endsWith('.html') || normalized.endsWith('/tileset.json')
+  return normalized.includes('/droid-ept-viewer/') || normalized.endsWith('/ept.json')
+}
+
+function eptApiUrlToViewerUrl(eptUrl: string, projectId: string, datasetId: string, displayName: string): string {
+  const normalizedEptUrl = toSameOriginBackendUrl(eptUrl) || eptUrl
+  const params = new URLSearchParams({
+    ept: normalizedEptUrl,
+    project: projectId,
+    dataset: datasetId || normalizedPointCloudName(displayName),
+    name: displayName,
+  })
+  return `/droid-ept-viewer/index.html?${params.toString()}`
+}
+
+function normalizePointCloudViewerUrl(url: string | undefined, projectId: string, datasetId: string, displayName: string): string {
+  const sameOriginUrl = toSameOriginBackendUrl(url) || ''
+  if (!sameOriginUrl || isRawPointCloudUrl(sameOriginUrl)) return ''
+  if (sameOriginUrl.toLowerCase().split(/[?#]/, 1)[0]?.endsWith('/ept.json')) {
+    return eptApiUrlToViewerUrl(sameOriginUrl, projectId, datasetId, displayName)
+  }
+  return isPointCloudViewerUrl(sameOriginUrl) ? sameOriginUrl : ''
+}
+
+function normalizedPointCloudName(name: string): string {
+  return name.trim().toLowerCase().replace(/\.(las|laz)$/i, '')
 }
 
 function buildActiveLayer(projectId: string, row: DatasetRow) {
   if (!row.layerType || !row.layerUrl) return null
+  if (isPointCloudLayer(row.layerType) && isRawPointCloudUrl(row.layerUrl)) return null
   if (row.layerType === 'Reports') return null
   return {
     id: `${projectId}:${row.datasetId || row.fileName}`,
@@ -423,7 +459,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
 
   const loadRows = useCallback(async (currentProjectId: string, cacheKey: string, cancelledRef: () => boolean) => {
     try {
-      const [jobs, files] = await Promise.all([getProjectJobs(currentProjectId), getProjectFiles(currentProjectId)])
+      const [jobs, files] = await Promise.all([getProjectJobs(currentProjectId, true), getProjectFiles(currentProjectId, true)])
       if (cancelledRef()) return
       const fileRows = files
         .filter((file) => file.kind !== 'Raw Survey Data' && file.kind !== 'Generated Grid Export')
@@ -444,7 +480,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         }))
       const mergedMap = new Map<string, DatasetRow>()
       ;[...fileRows, ...jobRows].forEach((row) => {
-        const key = row.datasetId || row.fileName
+        const key = datasetMergeKey(row)
         const previous = mergedMap.get(key)
         if (!previous || (row.status === 'Web-Ready' && previous.status !== 'Web-Ready') || row.layerUrl) {
           mergedMap.set(key, row)
@@ -473,14 +509,14 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
 
   useEffect(() => {
     if (!projectId) return
-    const cacheKey = `datasets:rows:${projectId}`
+    const cacheKey = `datasets:rows:v2:${projectId}`
     let cancelled = false
     setLoadingRows(true)
     try {
       const raw = window.sessionStorage.getItem(cacheKey)
       if (raw) {
         const cachedRows = JSON.parse(raw) as DatasetRow[]
-        setDatasets(cachedRows)
+        setDatasets(cachedRows.filter((row) => !isPointCloudRow(row) || Boolean(row.layerUrl)))
       }
     } catch {
       // ignore cache parse issues
@@ -512,12 +548,26 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
           etaText: task.etaText,
           datasetId: task.datasetId,
         } as DatasetRow))
-      const liveKeys = new Set(live.map((row) => row.datasetId || row.fileName))
-      const base = prev.filter((row) => !row.id.startsWith('live-') && !liveKeys.has(row.datasetId || row.fileName))
+      const readyPointCloudNames = new Set(
+        prev
+          .filter((row) => isPointCloudLayer(row.layerType) && row.layerUrl && isPointCloudViewerUrl(row.layerUrl))
+          .map((row) => row.fileName.toLowerCase()),
+      )
+      const filteredLive = live.filter((row) => !readyPointCloudNames.has(row.fileName.toLowerCase()))
+      const filteredLiveKeys = new Set(filteredLive.map((row) => datasetMergeKey(row)))
+      const base = prev.filter((row) => !row.id.startsWith('live-') && !filteredLiveKeys.has(datasetMergeKey(row)))
       const mergedMap = new Map<string, DatasetRow>()
-      ;[...live, ...base].forEach((row) => {
-        const key = row.datasetId || row.fileName
-        if (!mergedMap.has(key) || row.id.startsWith('live-') || row.status === 'Processing') mergedMap.set(key, row)
+      ;[...filteredLive, ...base].forEach((row) => {
+        const key = datasetMergeKey(row)
+        const previous = mergedMap.get(key)
+        if (
+          !previous ||
+          (row.status === 'Web-Ready' && previous.status !== 'Web-Ready') ||
+          (row.layerUrl && !previous.layerUrl) ||
+          (row.id.startsWith('live-') && previous.status !== 'Web-Ready')
+        ) {
+          mergedMap.set(key, row)
+        }
       })
       return [...mergedMap.values()].sort((a, b) => {
         const aProcessing = a.status === 'Processing' ? 0 : 1
@@ -614,7 +664,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     try {
       await generateContours(projectId, { dataset_id: row.datasetId, interval })
       invalidateProjectDataCache(projectId)
-      const cacheKey = `datasets:rows:${projectId}`
+      const cacheKey = `datasets:rows:v2:${projectId}`
       setLoadingRows(true)
       await loadRows(projectId, cacheKey, () => false)
       await modal.alert('Contours started', 'Contour generation started. The Vector layer will appear when ready.')
@@ -638,7 +688,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     setExportingGrid((prev) => ({ ...prev, [key]: format }))
     try {
       const filename = await exportDatasetGrid(projectId, row.datasetId, { format, interval, fileName: row.fileName })
-      window.sessionStorage.removeItem(`datasets:rows:${projectId}`)
+      window.sessionStorage.removeItem(`datasets:rows:v2:${projectId}`)
       setExportToast({
         title: 'Grid export ready',
         body: `${filename} added to Data Downloads.`,
@@ -671,7 +721,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         dataset_type: row.datasetType || toBackendDatasetType(row.type),
       })
       invalidateProjectDataCache(projectId)
-      const cacheKey = `datasets:rows:${projectId}`
+      const cacheKey = `datasets:rows:v2:${projectId}`
       setLoadingRows(true)
       await loadRows(projectId, cacheKey, () => false)
     } catch (error) {
@@ -720,7 +770,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       invalidateProjectDataCache(projectId)
       const layer = buildActiveLayer(projectId, row)
       if (layer) removeLayer(layer.id)
-      window.sessionStorage.removeItem(`datasets:rows:${projectId}`)
+      window.sessionStorage.removeItem(`datasets:rows:v2:${projectId}`)
       setDatasets((prev) => prev.filter((item) => (
         item.id !== row.id &&
         item.datasetId !== row.datasetId &&
@@ -737,7 +787,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     try {
       const res = await syncManualDatasetFolders(projectId)
       await modal.alert('Manual sync complete', res.message || `Found ${res.new_count} manual datasets`)
-      const cacheKey = `datasets:rows:${projectId}`
+      const cacheKey = `datasets:rows:v2:${projectId}`
       setLoadingRows(true)
       await loadRows(projectId, cacheKey, () => false)
     } catch (err) {
@@ -1038,13 +1088,14 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                       <button type="button" className="dsp-action" disabled>
                         {row.stage || 'Processing...'}
                       </button>
-                    ) : row.layerType && row.layerUrl ? (
+                    ) : row.layerType && (row.layerUrl || (isPointCloudLayer(row.layerType) && row.datasetId)) ? (
                       <button
                         type="button"
                         className="dsp-action"
                         onClick={async () => {
-                          if (!projectId || !row.layerType || !row.layerUrl) return
+                          if (!projectId || !row.layerType) return
                           if (row.layerType === 'Reports') {
+                            if (!row.layerUrl) return
                             setReportViewer({
                               name: row.fileName,
                               url: row.layerUrl,
@@ -1053,19 +1104,98 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                             return
                           }
                           let layer = buildActiveLayer(projectId, row)
-                          if (!layer) return
-                          if (isPointCloudLayer(row.layerType) && (!isPotreeViewerUrl(layer.url) || isRawPointCloudUrl(layer.url))) {
-                            const status = await getPointCloudStatus(projectId, row.datasetId)
-                            const resolvedUrl = toSameOriginBackendUrl(status?.tileset_url)
-                            if (!status?.ready || !resolvedUrl) {
-                              await modal.alert(
-                                'Point cloud is still preparing',
-                                'This LAS/LAZ file is uploaded, but the Potree web viewer is not ready yet. Keep it processing, then open it again from Data Catalog.',
+                          if (isPointCloudLayer(row.layerType)) {
+                            try {
+                              const directUrl = normalizePointCloudViewerUrl(
+                                row.layerUrl,
+                                projectId,
+                                row.datasetId || row.fileName,
+                                row.fileName,
                               )
+                              if (directUrl) {
+                                layer = buildActiveLayer(projectId, {
+                                  ...row,
+                                  layerType: 'pointcloud',
+                                  layerUrl: directUrl,
+                                  datasetType: 'pointcloud',
+                                })
+                              } else {
+                                let status = await getPointCloudStatus(projectId, row.datasetId || row.fileName)
+                                if ((!status?.ready || (!status?.tileset_url && !status?.ept_url)) && row.datasetId && row.fileName) {
+                                  status = await getPointCloudStatus(projectId, row.fileName)
+                                }
+                                if (!status?.ready || (!status?.tileset_url && !status?.ept_url)) {
+                                  status = await getPointCloudStatus(projectId)
+                                }
+                                const resolvedUrl = normalizePointCloudViewerUrl(
+                                  status?.tileset_url,
+                                  projectId,
+                                  row.datasetId || row.fileName,
+                                  row.fileName,
+                                )
+                                const statusEptViewerUrl =
+                                  status?.ready && status?.ept_url
+                                    ? normalizePointCloudViewerUrl(
+                                      status.ept_url,
+                                      projectId,
+                                      row.datasetId || row.fileName,
+                                      row.fileName,
+                                    )
+                                    : ''
+                                let readyUrl =
+                                  status?.ready && resolvedUrl
+                                    ? resolvedUrl
+                                    : statusEptViewerUrl
+                                      ? statusEptViewerUrl
+                                      : ''
+                                const sameNameReadyRow = datasets.find((candidate) => {
+                                  const candidateUrl = candidate.layerUrl
+                                  if (!candidateUrl) return false
+                                  return (
+                                    candidate !== row &&
+                                    isPointCloudRow(candidate) &&
+                                    isPointCloudViewerUrl(candidateUrl) &&
+                                    normalizedPointCloudName(candidate.fileName) === normalizedPointCloudName(row.fileName)
+                                  )
+                                })
+                                const sameNameReadyUrl = sameNameReadyRow?.layerUrl || ''
+                                if (!readyUrl && sameNameReadyUrl) {
+                                  readyUrl = normalizePointCloudViewerUrl(
+                                    sameNameReadyUrl,
+                                    projectId,
+                                    sameNameReadyRow?.datasetId || row.datasetId || row.fileName,
+                                    sameNameReadyRow?.fileName || row.fileName,
+                                  )
+                                }
+                                if (!readyUrl || isRawPointCloudUrl(readyUrl) || !isPointCloudViewerUrl(readyUrl)) {
+                                  await modal.alert(
+                                    status?.failed ? 'Point cloud conversion failed' : 'Point cloud is still preparing',
+                                    status?.failed
+                                      ? 'This point cloud did not finish cleanly. Please reprocess/upload it again; the detailed error is saved in the portal error log.'
+                                      : 'This LAS/LAZ file is uploaded, but the EPT point cloud viewer is not ready yet. Keep it processing, then open it again from Data Catalog.',
+                                  )
+                                  return
+                                }
+                                layer = buildActiveLayer(projectId, {
+                                  ...(sameNameReadyRow || row),
+                                  layerType: 'pointcloud',
+                                  layerUrl: readyUrl,
+                                  datasetType: 'pointcloud',
+                                })
+                              }
+                            } catch (error) {
+                              logClientError({
+                                area: 'data_catalog_pointcloud_open',
+                                message: error instanceof Error ? error.message : String(error || 'Point cloud open failed'),
+                                project_id: projectId,
+                                dataset_id: row.datasetId || row.fileName,
+                                extra: { fileName: row.fileName },
+                              })
+                              await modal.alert('Point cloud open failed', 'Could not open the processed 3D viewer. The error has been logged.')
                               return
                             }
-                            layer = { ...layer, url: resolvedUrl }
                           }
+                          if (!layer) return
                           upsertLayer(layer)
                           if (isTwoDLayer(row.layerType)) {
                             setActiveViewerTab('2D')
@@ -1088,7 +1218,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                             await deleteProjectFile(projectId, row.relPath)
                             const layer = buildActiveLayer(projectId, row)
                             if (layer) removeLayer(layer.id)
-                            window.sessionStorage.removeItem(`datasets:rows:${projectId}`)
+                            window.sessionStorage.removeItem(`datasets:rows:v2:${projectId}`)
                             setDatasets((prev) => prev.filter((item) => (
                               item.id !== row.id &&
                               item.datasetId !== row.datasetId &&

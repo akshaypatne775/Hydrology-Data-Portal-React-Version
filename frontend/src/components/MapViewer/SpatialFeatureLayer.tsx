@@ -2,6 +2,7 @@ import L, { type LatLng } from 'leaflet'
 import { Marker, Polygon, Polyline, Tooltip } from 'react-leaflet'
 import {
   buildPointFeature,
+  colorForStructure,
   featureStyle,
   positionToLatLng,
   type GeoJsonFeature,
@@ -21,6 +22,18 @@ const vertexIcon = L.divIcon({
   className: 'spatial-vertex-handle',
   iconSize: [14, 14],
 })
+
+function spatialMarkerIcon(feature: SpatialFeature, selected: boolean) {
+  const color = colorForStructure(feature.structure_type)
+  return L.divIcon({
+    className: selected ? 'spatial-point-marker spatial-point-marker--selected' : 'spatial-point-marker',
+    html: `<span class="spatial-point-marker__pin" style="--spatial-marker-color: ${color};"><i class="fa-solid fa-location-dot" aria-hidden="true"></i></span>`,
+    iconSize: [30, 38],
+    iconAnchor: [15, 36],
+    popupAnchor: [0, -34],
+    tooltipAnchor: [0, -32],
+  })
+}
 
 function coordinatesToPositions(coordinates: unknown): [number, number][] {
   if (!Array.isArray(coordinates)) return []
@@ -84,6 +97,7 @@ export function SpatialFeatureLayer({
         const geometry = feature.geojson.geometry
         if (!geometry) return []
         const selected = selectedFeatureId === feature.id
+        const canEditFeature = feature.can_edit !== false
         const style = featureStyle(feature, selected)
         const eventHandlers = {
           click: (event: L.LeafletMouseEvent) => {
@@ -99,10 +113,12 @@ export function SpatialFeatureLayer({
             <Marker
               key={feature.id}
               position={position}
-              draggable={selected && editMode}
+              icon={spatialMarkerIcon(feature, selected)}
+              draggable={selected && editMode && canEditFeature}
               eventHandlers={{
                 ...eventHandlers,
                 dragend: (event) => {
+                  if (!canEditFeature) return
                   const point = event.target.getLatLng() as LatLng
                   onGeometryChange(feature, buildPointFeature(point))
                 },
@@ -116,7 +132,7 @@ export function SpatialFeatureLayer({
         if (geometry.type === 'LineString') {
           const positions = coordinatesToPositions(geometry.coordinates)
           if (positions.length < 2) return []
-          const handles = selected && editMode
+          const handles = selected && editMode && canEditFeature
             ? positions.map((position, index) => (
                 <Marker
                   key={`${feature.id}-handle-${index}`}
@@ -156,7 +172,7 @@ export function SpatialFeatureLayer({
           const rawOuter = geometry.coordinates[0]
           const positions = openRing(coordinatesToPositions(rawOuter))
           if (positions.length < 3) return []
-          const handles = selected && editMode
+          const handles = selected && editMode && canEditFeature
             ? positions.map((position, index) => (
                 <Marker
                   key={`${feature.id}-handle-${index}`}

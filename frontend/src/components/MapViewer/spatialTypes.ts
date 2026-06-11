@@ -26,6 +26,7 @@ export type SpatialFeature = {
   id: string
   project_id: string
   layer_id: string
+  owner_user_id?: number
   geometry_type: string
   geojson: GeoJsonFeature
   plot_id: string
@@ -34,6 +35,8 @@ export type SpatialFeature = {
   fill_color: string
   stroke_color: string
   source_type: string
+  can_edit?: boolean
+  can_delete?: boolean
   created_at: string
   updated_at: string
 }

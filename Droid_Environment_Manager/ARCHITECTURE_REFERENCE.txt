@@ -58,3 +58,14 @@ UPDATES AND DEPLOYMENT
 PORT SUMMARY
 - Live Cloudflare: Frontend 4173 -> Backend 8000 -> Project_Data\droid_cloud_prod.db
 - Dev Cursor:      Frontend 5173 -> Backend 8001 -> Project_Data\droid_cloud_dev.db
+
+POINT CLOUD EPT CONVERSION
+- The old PotreeConverter workflow is removed.
+- Droid Cloud now converts LAS/LAZ point clouds to EPT and opens them in the Droid EPT viewer.
+- Preferred converter is Untwine because it is the fastest EPT path.
+- Fallback converters are Entwine and PDAL writers.ept.
+- Portable converter files can be placed in Tools\EPT.
+- Dev and Live backend startup scripts automatically check Tools\EPT and the system PATH.
+- This machine also checks the isolated Miniforge environment at:
+  C:\Users\droid\miniforge3\envs\droid-ept\Library\bin
+- If no EPT converter is found, point cloud uploads can start but conversion cannot finish until Untwine, Entwine, or PDAL is installed.

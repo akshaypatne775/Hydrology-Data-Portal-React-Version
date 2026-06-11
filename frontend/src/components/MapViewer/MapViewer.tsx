@@ -1487,6 +1487,10 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const handleSpatialAssignmentSave = useCallback(
     async (payload: { plot_id: string; owner_name: string; structure_type: StructureType }) => {
       if (!projectId || !selectedSpatialFeature) return
+      if (selectedSpatialFeature.can_edit === false) {
+        await modal.alert('Read-only shape', 'Only the creator or an admin can edit this spatial shape.')
+        return
+      }
       setSpatialBusy(true)
       try {
         const feature = await updateSpatialFeature(projectId, selectedSpatialFeature.id, payload)
@@ -1504,6 +1508,10 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const handleSpatialFeatureDelete = useCallback(
     async (feature: SpatialFeature) => {
       if (!projectId) return
+      if (feature.can_delete === false) {
+        await modal.alert('Delete not allowed', 'Only the creator or an admin can delete this spatial shape.')
+        return
+      }
       const confirmed = await modal.confirm('Delete shape', 'This will permanently remove the selected spatial shape.')
       if (!confirmed) return
       setSpatialBusy(true)
@@ -1523,6 +1531,10 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const handleSpatialGeometryChange = useCallback(
     async (feature: SpatialFeature, geojson: GeoJsonFeature) => {
       if (!projectId) return
+      if (feature.can_edit === false) {
+        await modal.alert('Read-only shape', 'Only the creator or an admin can edit this spatial shape.')
+        return
+      }
       setSpatialBusy(true)
       try {
         const updated = await updateSpatialFeature(projectId, feature.id, { geojson })

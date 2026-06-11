@@ -917,3 +917,217 @@ Files touched:
 Verification:
 - Backend compile passed: python -m compileall backend/app
 ===============================================================================
+
+
+===============================================================================
+Date: 2026-06-09
+Area: 2D Viewer / Digitization Marker And Ownership Permissions
+
+Issue:
+- Digitization point markers could save but the marker icon did not render reliably because Leaflet default marker image assets were not always resolved by the Vite bundle.
+- Spatial shapes had owner_user_id in SQLite, but edit/delete permissions were not exposed to the frontend or enforced per feature.
+- A normal user could attempt to edit/delete admin-created plot/marker shapes from the UI.
+
+Fix:
+- Replaced default Leaflet point marker icon with a custom Font Awesome location-dot div icon styled by structure color.
+- Added owner_user_id, can_edit, and can_delete fields to spatial feature API responses.
+- Backend now allows spatial feature edit/delete only for the creator or an admin.
+- Backend now allows spatial layer delete only for the layer creator or an admin.
+- Spatial assignment modal is read-only for features the current user cannot edit, and hides delete when delete is not allowed.
+- Geometry drag/edit handles only appear for editable selected features.
+- Frontend handlers also guard against unauthorized edit/delete attempts and show clear messages.
+
+Files touched:
+- backend/app/main.py
+- frontend/src/components/MapViewer/spatialTypes.ts
+- frontend/src/components/MapViewer/SpatialFeatureLayer.tsx
+- frontend/src/components/MapViewer/SpatialAssignmentModal.tsx
+- frontend/src/components/MapViewer/MapViewer.tsx
+- frontend/src/components/MapViewer/Digitization.css
+- frontend/src/services/spatialDataService.ts
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Backend compile passed: python -m compileall backend/app
+- Frontend build passed: cmd /c npm run build
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-10
+Area: Point Cloud / Safe Viewer Open And Persistent Error Logs
+
+Issue:
+- Clicking a point cloud from Data Catalog could route to a raw LAS/LAZ asset instead of the processed Potree viewer, which risked accidental browser download.
+- Failed/partial Potree output folders could still appear as Web-Ready if an HTML file existed beside .conversion_error.txt.
+- Potree runtime errors such as "Offset is outside the bounds of the DataView" were only visible in browser console screenshots, not in a persistent project log.
+
+Fix:
+- Blocked raw point cloud downloads through dataset raw download and direct project raw data API paths.
+- Data Catalog now resolves point cloud clicks through /api/pointcloud-status and only opens a ready Potree HTML/tileset viewer URL.
+- Failed/partial point cloud conversion folders are skipped from Web-Ready file listings.
+- Added backend JSONL error logging under Project_Data/logs/portal_errors_YYYY-MM-DD.log.
+- Added /api/client-error-log for authenticated frontend error reporting.
+- Upload failures and Potree iframe runtime/console errors now write to the backend error log.
+- Added a responsive viewer error overlay for point cloud runtime decode/load problems.
+
+Files touched:
+- backend/app/main.py
+- frontend/src/services/errorLogService.ts
+- frontend/src/context/UploadContext.tsx
+- frontend/src/components/Datasets/DatasetsPanel.tsx
+- frontend/src/components/Dashboard.tsx
+- frontend/src/components/GlobeViewer/PotreeViewer.tsx
+- frontend/src/components/GlobeViewer/PointCloudViewer.tsx
+- frontend/src/components/GlobeViewer/PointCloudViewer.css
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Backend compile passed: .\backend\venv\Scripts\python.exe -m compileall backend/app
+- Frontend build passed: cmd /c npm run build
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-10
+Area: Standalone Conversion Workbench / Portal-Compatible External Engine UI
+
+Issue:
+- Large Ortho/DTM/DSM and point cloud conversions inside the portal can be slower or more fragile because files go through browser upload/server workflow.
+- User needed a separate copyable folder with its own UI to convert local files directly into portal-compatible Project_Data processed folders.
+
+Fix:
+- Added Droid_Standalone_Converter folder with a mini FastAPI + static browser UI.
+- Copied the existing raster conversion engine into Droid_Standalone_Converter/engine/raster_tiler.py.
+- Added GeoTIFF to COG conversion for Ortho/DTM/DSM/DEM with optional manual EPSG assignment.
+- Added LAS/LAZ to Potree conversion using PotreeConverter.exe.
+- Added automatic LAS bounding-box repair and retry for Potree conversion failures.
+- Outputs are written directly to:
+  Project_Data/projects/<project_id>/processed/<type>/<dataset_name>/<dataset_name>.cog.tif
+  Project_Data/projects/<project_id>/processed/<dataset_name>/<dataset_name>.html
+- Added responsive dark teal UI, job progress polling, output paths, logs, requirements, README, and START_CONVERTER_UI.bat.
+
+Files touched:
+- Droid_Standalone_Converter/app.py
+- Droid_Standalone_Converter/engine/raster_tiler.py
+- Droid_Standalone_Converter/static/index.html
+- Droid_Standalone_Converter/static/styles.css
+- Droid_Standalone_Converter/static/app.js
+- Droid_Standalone_Converter/requirements.txt
+- Droid_Standalone_Converter/START_CONVERTER_UI.bat
+- Droid_Standalone_Converter/README.txt
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Standalone converter compile passed: .\backend\venv\Scripts\python.exe -m compileall Droid_Standalone_Converter
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-10
+Area: Standalone Conversion Workbench / Portable Venv Installer
+
+Issue:
+- The standalone converter folder did not include an automatic virtual-environment installer for use on another PC.
+- Copying an existing .venv between PCs is not reliable because Python package binaries can be machine/Python-version specific.
+
+Fix:
+- Added INSTALL_CONVERTER_ENV.bat to create Droid_Standalone_Converter/.venv and install requirements.txt.
+- Updated START_CONVERTER_UI.bat to prefer the standalone .venv, then fall back to the portal backend venv, then system Python.
+- Updated README with first-time install steps for another PC.
+
+Files touched:
+- Droid_Standalone_Converter/INSTALL_CONVERTER_ENV.bat
+- Droid_Standalone_Converter/START_CONVERTER_UI.bat
+- Droid_Standalone_Converter/README.txt
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Standalone converter compile passed: .\backend\venv\Scripts\python.exe -m compileall Droid_Standalone_Converter
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-10
+Area: Point Cloud / Delete Fallback, Runtime Failure Marker, Raw URL Cache Cleanup
+
+Issue:
+- Portal error log confirmed Potree runtime failure:
+  "Uncaught RangeError: Offset is outside the bounds of the DataView"
+  in DecoderWorker.js for May-2026-Point-Cloud-d5c3bae17981.
+- Admin Force Delete returned 404 for processed point cloud folders that did not have a matching dataset status row.
+- Old browser localStorage/cache could still contain raw .las/.laz point cloud URLs, making the 3D sidebar show raw LAS entries and risking accidental downloads.
+
+Fix:
+- Admin dataset delete now falls back to safely deleting processed point cloud folders under:
+  Project_Data/projects/<project_id>/processed/<dataset_id>
+  and legacy Project_Data/pointclouds/<project_id>/<dataset_id>.
+- Potree viewer client error logging now writes .conversion_error.txt into the matching processed point cloud folder and marks the processing job Failed, so corrupt/partial output is not treated as Web-Ready after refresh.
+- Point cloud localStorage helper now removes any stored raw .las/.laz URLs.
+- Globe viewer option builders now reject raw .las/.laz URLs from file rows, active layers, and stored point cloud entries.
+
+Files touched:
+- backend/app/main.py
+- frontend/src/utils/pointCloudStorage.ts
+- frontend/src/components/GlobeViewer/GlobeViewer.tsx
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Backend compile passed: .\backend\venv\Scripts\python.exe -m compileall backend/app
+- Frontend build passed: cmd /c npm run build
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-10
+Area: Data Catalog / User Upload Permission Enforcement
+
+Issue:
+- Admin Control showed User Upload On for a normal user, but point cloud chunk upload still failed with 403: "Admin access required".
+- Root cause: middleware allowed can_upload_data users, but the upload endpoint functions still called verify_admin() internally.
+- The same mismatch could affect point cloud complete upload, large raster chunk upload, direct dataset upload, and EPSG metadata probing.
+
+Fix:
+- Added _require_upload_user() backend helper: admins OR users with can_upload_data are allowed.
+- Updated upload-related endpoints to use _require_upload_user():
+  /api/upload-chunk, /api/complete-upload, /api/process-pointcloud,
+  /api/upload-dataset-chunk, /api/complete-dataset-upload,
+  /api/process-dataset, /api/upload-dataset, /api/dataset-metadata.
+- Moved /api/process-pointcloud and /api/dataset-metadata from admin-only middleware category to upload-enabled category.
+- Kept manual sync/open-folder tools admin-only.
+
+Files touched:
+- backend/app/main.py
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Backend compile passed: python -m compileall backend/app
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-10
+Area: Point Cloud / LAS Bounding Box Repair And Responsive Upload Errors
+
+Issue:
+- Large LAS point cloud conversion failed in PotreeConverter with "encountered point outside bounding box".
+- Root cause: the LAS header min/max bounding box was stale/invalid compared with the actual point coordinates.
+- The frontend upload progress popup displayed the raw converter log, causing long red text overflow on the screen.
+
+Fix:
+- Added automatic LAS/LAZ bounding-box repair fallback before Potree conversion retry.
+- If PotreeConverter reports an invalid bounding box, backend now recalculates LAS header min/max from point chunks, writes a temporary repaired LAS, retries conversion once, then removes the temporary repair file.
+- Added disk-space guard before creating the temporary repaired copy.
+- Added friendly frontend error summaries for point cloud conversion failures.
+- Made the upload progress widget responsive with wrapped, scrollable error text and safer mobile sizing.
+
+Files touched:
+- backend/app/main.py
+- frontend/src/context/UploadContext.tsx
+- frontend/src/components/Uploads/UploadProgressWidget.css
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Backend compile passed: python -m compileall backend/app
+- Frontend build passed: cmd /c npm run build
+===============================================================================

@@ -1,0 +1,763 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Droid EPT Point Cloud Viewer</title>
+  <link rel="stylesheet" href="./build/potree/potree.css">
+  <link rel="stylesheet" href="./libs/jquery-ui/jquery-ui.min.css">
+  <link rel="stylesheet" href="./libs/openlayers3/ol.css">
+  <link rel="stylesheet" href="./libs/spectrum/spectrum.css">
+  <link rel="stylesheet" href="./libs/jstree/themes/mixed/style.css">
+  <style>
+    :root {
+      color-scheme: dark;
+      --droid-teal: #0e3e49;
+      --droid-teal-2: #145564;
+      --droid-bg: #06171b;
+      --droid-panel: rgba(14, 62, 73, 0.92);
+      --droid-line: rgba(203, 251, 241, 0.22);
+      --droid-text: #f8fafc;
+      --droid-muted: #b8dbe0;
+      --droid-accent: #14b8a6;
+      --droid-danger: #dc2626;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: var(--droid-bg);
+      color: var(--droid-text);
+      font-family: "Montserrat", Arial, sans-serif;
+    }
+    button, input, label, select, textarea {
+      font-family: "Montserrat", Arial, sans-serif;
+    }
+    i,
+    i::before,
+    i::after,
+    .fa,
+    .fas,
+    .fa-solid,
+    .fa::before,
+    .fas::before,
+    .fa-solid::before {
+      font-family: "Font Awesome 6 Free" !important;
+      font-weight: 900 !important;
+    }
+    .potree_container,
+    #potree_render_area {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      background: radial-gradient(circle at 35% 25%, #143f48 0%, #06171b 46%, #020708 100%);
+    }
+    #potree_sidebar_container,
+    #potree_branding,
+    #potree_map_toggle,
+    #potree_map,
+    #potree_languages,
+    #menu_about,
+    #menu_about + div,
+    #logo_br,
+    .potree-branding,
+    .potree_logo,
+    .potree-logo,
+    [class*="potree-brand"],
+    [class*="potree-logo"],
+    [id*="potree-brand"],
+    [id*="potree-logo"] {
+      display: none !important;
+      visibility: hidden !important;
+      opacity: 0 !important;
+      pointer-events: none !important;
+    }
+    .droid-toolbar {
+      position: fixed;
+      top: 14px;
+      left: 14px;
+      right: 14px;
+      z-index: 100020;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      border: 1px solid var(--droid-line);
+      border-radius: 10px;
+      background: linear-gradient(135deg, rgba(14, 62, 73, 0.96), rgba(4, 19, 24, 0.88));
+      box-shadow: 0 16px 36px rgba(0, 0, 0, 0.34);
+      backdrop-filter: blur(12px);
+    }
+    .droid-title {
+      min-width: 180px;
+    }
+    .droid-title span {
+      display: block;
+      color: var(--droid-muted);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .droid-title strong {
+      display: block;
+      max-width: 34vw;
+      overflow: hidden;
+      color: var(--droid-text);
+      font-size: 14px;
+      font-weight: 900;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .droid-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .droid-button {
+      min-height: 34px;
+      border: 1px solid rgba(203, 251, 241, 0.26);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--droid-text);
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.02em;
+      padding: 0 11px;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+    .droid-button:hover,
+    .droid-button.is-active {
+      border-color: rgba(20, 184, 166, 0.68);
+      background: var(--droid-accent);
+      color: #05272d;
+    }
+    .droid-button--danger:hover {
+      border-color: rgba(248, 113, 113, 0.8);
+      background: var(--droid-danger);
+      color: white;
+    }
+    .droid-budget {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 100020;
+      width: min(320px, calc(100vw - 36px));
+      padding: 12px;
+      border: 1px solid var(--droid-line);
+      border-radius: 10px;
+      background: rgba(14, 62, 73, 0.9);
+      box-shadow: 0 16px 32px rgba(0, 0, 0, 0.3);
+    }
+    .droid-budget label {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      color: var(--droid-muted);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .droid-budget input { width: 100%; accent-color: var(--droid-accent); }
+    .droid-notice {
+      position: fixed;
+      left: 18px;
+      bottom: 18px;
+      z-index: 100030;
+      display: none;
+      width: min(440px, calc(100vw - 36px));
+      padding: 14px;
+      border: 1px solid rgba(248, 113, 113, 0.44);
+      border-radius: 10px;
+      background: rgba(14, 62, 73, 0.96);
+      box-shadow: 0 18px 38px rgba(0, 0, 0, 0.38);
+    }
+    .droid-notice.is-visible { display: block; }
+    .droid-notice strong {
+      display: block;
+      margin-bottom: 6px;
+      color: #fecaca;
+      font-size: 12px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+    .droid-notice span {
+      color: var(--droid-text);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .droid-section-panel {
+      position: fixed;
+      top: 76px;
+      right: 14px;
+      z-index: 100018;
+      display: flex;
+      width: min(330px, calc(100vw - 28px));
+      max-height: calc(100vh - 168px);
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid var(--droid-line);
+      border-radius: 10px;
+      background: rgba(4, 19, 24, 0.82);
+      box-shadow: 0 14px 32px rgba(0, 0, 0, 0.28);
+      backdrop-filter: blur(12px);
+    }
+    .droid-section-panel h2 {
+      margin: 0;
+      color: var(--droid-text);
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .section-list {
+      display: grid;
+      gap: 7px;
+      overflow: auto;
+      padding-right: 2px;
+    }
+    .section-row {
+      display: grid;
+      gap: 4px;
+      padding: 9px;
+      border: 1px solid rgba(203, 251, 241, 0.16);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.055);
+    }
+    .section-row strong {
+      overflow: hidden;
+      font-size: 12px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .section-row span {
+      color: var(--droid-muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .section-row div {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .section-row button {
+      min-height: 27px;
+      border-radius: 7px;
+      font-size: 10px;
+    }
+    .alignment-dialog {
+      position: fixed;
+      inset: auto 50% 92px auto;
+      z-index: 100040;
+      display: none;
+      width: min(420px, calc(100vw - 28px));
+      transform: translateX(50%);
+      padding: 14px;
+      border: 1px solid var(--droid-line);
+      border-radius: 10px;
+      background: rgba(14, 62, 73, 0.98);
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.4);
+    }
+    .alignment-dialog.is-visible { display: block; }
+    .alignment-dialog h2 {
+      margin: 0 0 7px;
+      font-size: 14px;
+      font-weight: 900;
+    }
+    .alignment-dialog p {
+      margin: 0 0 10px;
+      color: var(--droid-muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .alignment-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .alignment-field label {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--droid-muted);
+      font-size: 10px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+    .alignment-field input {
+      width: 100%;
+      min-height: 34px;
+      border: 1px solid rgba(203, 251, 241, 0.22);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--droid-text);
+      padding: 0 9px;
+      font-weight: 800;
+    }
+    .alignment-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    #profile_window {
+      z-index: 100050 !important;
+      border: 1px solid var(--droid-line) !important;
+      border-radius: 10px !important;
+      overflow: hidden !important;
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.44) !important;
+    }
+    @media (max-width: 980px) {
+      .droid-toolbar {
+        align-items: stretch;
+        flex-direction: column;
+      }
+      .droid-title strong { max-width: 100%; }
+      .droid-actions { justify-content: flex-start; }
+      .droid-section-panel {
+        top: auto;
+        right: 14px;
+        bottom: 86px;
+        max-height: 34vh;
+      }
+    }
+  </style>
+</head>
+<body>
+  <script src="./libs/jquery/jquery-3.1.1.min.js"></script>
+  <script src="./libs/spectrum/spectrum.js"></script>
+  <script src="./libs/jquery-ui/jquery-ui.min.js"></script>
+  <script src="./libs/other/BinaryHeap.js"></script>
+  <script src="./libs/tween/tween.min.js"></script>
+  <script src="./libs/d3/d3.js"></script>
+  <script src="./libs/proj4/proj4.js"></script>
+  <script src="./libs/openlayers3/ol.js"></script>
+  <script src="./libs/i18next/i18next.js"></script>
+  <script src="./libs/jstree/jstree.js"></script>
+  <script src="./build/potree/potree.js"></script>
+  <script src="./libs/plasio/js/laslaz.js"></script>
+
+  <div class="potree_container">
+    <div id="potree_render_area"></div>
+    <div id="potree_sidebar_container"></div>
+  </div>
+
+  <header class="droid-toolbar" aria-label="Droid EPT viewer tools">
+    <div class="droid-title">
+      <span>3D Point Cloud</span>
+      <strong id="datasetName">Loading point cloud...</strong>
+    </div>
+    <div class="droid-actions">
+      <button class="droid-button" id="resetViewButton" type="button">Reset View</button>
+      <button class="droid-button" id="distanceButton" type="button">Distance</button>
+      <button class="droid-button" id="areaButton" type="button">Area</button>
+      <button class="droid-button" id="heightButton" type="button">Height</button>
+      <button class="droid-button" id="sectionButton" type="button">Cross Section</button>
+      <button class="droid-button" id="alignmentButton" type="button">L/C Sections</button>
+      <button class="droid-button droid-button--danger" id="clearButton" type="button">Clear</button>
+    </div>
+  </header>
+
+  <aside class="droid-section-panel" aria-label="Cross section list">
+    <h2>Cross Sections</h2>
+    <div class="section-list" id="sectionList"></div>
+  </aside>
+
+  <section class="droid-budget" aria-label="Point budget">
+    <label for="pointBudgetSlider">
+      <span>Point Budget</span>
+      <strong id="pointBudgetValue">9,000,000</strong>
+    </label>
+    <input id="pointBudgetSlider" type="range" min="1000000" max="50000000" value="9000000" step="1000000">
+  </section>
+
+  <div class="alignment-dialog" id="alignmentDialog" role="dialog" aria-modal="true">
+    <h2>L Section and Chainage Cross Sections</h2>
+    <p>Set interval and offsets. Draw the alignment from start to end, right-click to finish, then generate sections.</p>
+    <div class="alignment-grid">
+      <div class="alignment-field">
+        <label for="sectionIntervalInput">Interval</label>
+        <input id="sectionIntervalInput" type="number" min="1" step="1" value="20">
+      </div>
+      <div class="alignment-field">
+        <label for="sectionLeftInput">Left m</label>
+        <input id="sectionLeftInput" type="number" min="1" step="1" value="150">
+      </div>
+      <div class="alignment-field">
+        <label for="sectionRightInput">Right m</label>
+        <input id="sectionRightInput" type="number" min="1" step="1" value="150">
+      </div>
+    </div>
+    <div class="alignment-actions">
+      <button class="droid-button" id="alignmentCancelButton" type="button">Cancel</button>
+      <button class="droid-button" id="alignmentDrawButton" type="button">Draw Alignment</button>
+      <button class="droid-button" id="alignmentGenerateButton" type="button">Generate</button>
+    </div>
+  </div>
+
+  <div class="droid-notice" id="noticeBox" role="alert">
+    <strong id="noticeTitle">Viewer Notice</strong>
+    <span id="noticeMessage"></span>
+  </div>
+
+  <script type="module">
+    import * as THREE from "./libs/three.js/build/three.module.js";
+
+    const params = new URLSearchParams(window.location.search);
+    const eptUrl = params.get("ept") || "";
+    const projectId = params.get("project") || "";
+    const datasetId = params.get("dataset") || "";
+    const displayName = params.get("name") || datasetId || "Point Cloud";
+
+    const datasetName = document.getElementById("datasetName");
+    const noticeBox = document.getElementById("noticeBox");
+    const noticeTitle = document.getElementById("noticeTitle");
+    const noticeMessage = document.getElementById("noticeMessage");
+    const sectionList = document.getElementById("sectionList");
+    const budgetSlider = document.getElementById("pointBudgetSlider");
+    const budgetValue = document.getElementById("pointBudgetValue");
+    const alignmentDialog = document.getElementById("alignmentDialog");
+
+    let activePointCloud = null;
+    let crossSections = [];
+    let activeAlignmentProfile = null;
+    let activeSectionProfile = null;
+
+    datasetName.textContent = displayName;
+
+    function showNotice(title, message) {
+      noticeTitle.textContent = title;
+      noticeMessage.textContent = message;
+      noticeBox.classList.add("is-visible");
+    }
+
+    function hideNotice() {
+      noticeBox.classList.remove("is-visible");
+    }
+
+    function logViewerError(message, stack = "") {
+      if (!message) return;
+      fetch("/api/client-error-log", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          area: "ept_viewer",
+          message: String(message).slice(0, 8000),
+          stack: String(stack).slice(0, 6000),
+          url: window.location.href,
+          project_id: projectId,
+          dataset_id: datasetId,
+        }),
+      }).catch(() => {});
+    }
+
+    window.addEventListener("error", (event) => {
+      logViewerError(event.message || "EPT viewer runtime error", event.error && event.error.stack || "");
+      if (/dataview|offset is outside|decoder|hierarchy|ept|laszip/i.test(event.message || "")) {
+        showNotice("Point Cloud Viewer Issue", "This EPT point cloud could not be decoded fully. Reprocess the point cloud if the view stays blank.");
+      }
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event.reason;
+      logViewerError(reason instanceof Error ? reason.message : String(reason || "Promise rejection"), reason instanceof Error ? reason.stack || "" : "");
+    });
+
+    if (!eptUrl) {
+      showNotice("Missing Point Cloud", "No EPT URL was provided for this viewer.");
+      throw new Error("Missing ept query parameter");
+    }
+
+    window.viewer = new Potree.Viewer(document.getElementById("potree_render_area"));
+    viewer.setEDLEnabled(true);
+    viewer.setFOV(60);
+    viewer.setPointBudget(Number(budgetSlider.value));
+    viewer.loadSettingsFromURL();
+    viewer.loadGUI(() => {
+      viewer.setLanguage("en");
+      const sidebar = document.getElementById("potree_sidebar_container");
+      if (sidebar) sidebar.style.display = "none";
+    });
+
+    function formatNumber(value) {
+      return Number(value).toLocaleString("en-IN");
+    }
+
+    function formatDistance(value) {
+      if (!Number.isFinite(value)) return "0.00 m";
+      return `${value.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} m`;
+    }
+
+    function formatArea(value) {
+      if (!Number.isFinite(value)) return "0.00 sq m";
+      return `${value.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} sq m`;
+    }
+
+    function formatChainage(value) {
+      const rounded = Math.max(0, Math.round(value));
+      const km = Math.floor(rounded / 1000);
+      const meters = String(rounded % 1000).padStart(3, "0");
+      return `${km}+${meters}`;
+    }
+
+    function getProfileLength(profile) {
+      if (!profile || !Array.isArray(profile.points) || profile.points.length < 2) return 0;
+      let length = 0;
+      for (let index = 0; index < profile.points.length - 1; index += 1) {
+        const start = profile.points[index].clone().setZ(0);
+        const end = profile.points[index + 1].clone().setZ(0);
+        length += start.distanceTo(end);
+      }
+      return length;
+    }
+
+    function getProfileArea(profile) {
+      return getProfileLength(profile) * (profile && Number.isFinite(profile.width) ? profile.width : 0);
+    }
+
+    function openProfileGraph(profile) {
+      if (!profile) return;
+      const showProfileWindow = () => {
+        if (!viewer.profileWindow || !viewer.profileWindowController) {
+          window.setTimeout(showProfileWindow, 150);
+          return;
+        }
+        viewer.profileWindow.show();
+        viewer.profileWindowController.setProfile(profile);
+        $("#profile_window").css({
+          display: "block",
+          left: "14px",
+          right: "14px",
+          top: window.innerWidth < 1000 ? "50%" : "55%",
+          width: "calc(100% - 28px)",
+          height: window.innerWidth < 1000 ? "47%" : "42%",
+          "z-index": 100050,
+        });
+      };
+      showProfileWindow();
+    }
+
+    function renderSections() {
+      sectionList.innerHTML = "";
+      if (crossSections.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "section-row";
+        empty.innerHTML = "<span>No cross sections yet.</span>";
+        sectionList.appendChild(empty);
+        return;
+      }
+      crossSections.forEach((profile, index) => {
+        const row = document.createElement("div");
+        row.className = "section-row";
+        const title = document.createElement("strong");
+        title.textContent = profile.name || `Section ${index + 1}`;
+        const stats = document.createElement("span");
+        const sectionType = profile.userData && profile.userData.sectionType;
+        stats.textContent = sectionType === "chainage"
+          ? `Chainage ${formatChainage(profile.userData.chainage || 0)} | L ${formatDistance(getProfileLength(profile))}`
+          : `L ${formatDistance(getProfileLength(profile))} | W ${formatDistance(profile.width || 0)} | A ${formatArea(getProfileArea(profile))}`;
+        const actions = document.createElement("div");
+        const graph = document.createElement("button");
+        graph.className = "droid-button";
+        graph.type = "button";
+        graph.textContent = "Graph";
+        graph.addEventListener("click", () => openProfileGraph(profile));
+        const remove = document.createElement("button");
+        remove.className = "droid-button droid-button--danger";
+        remove.type = "button";
+        remove.textContent = "Delete";
+        remove.addEventListener("click", () => viewer.scene.removeProfile(profile));
+        actions.append(graph, remove);
+        row.append(title, stats, actions);
+        sectionList.appendChild(row);
+      });
+    }
+
+    function watchProfile(profile) {
+      if (!profile || profile.userData && profile.userData.watched) return;
+      profile.userData = { ...(profile.userData || {}), watched: true };
+      const update = () => renderSections();
+      profile.addEventListener("marker_added", update);
+      profile.addEventListener("marker_removed", update);
+      profile.addEventListener("marker_moved", update);
+      profile.addEventListener("width_changed", update);
+    }
+
+    function startMeasurement(mode) {
+      if (!viewer.measuringTool) return;
+      if (mode === "distance") viewer.measuringTool.startInsertion({ showDistances: true, showArea: false, closed: false, maxMarkers: 2 });
+      if (mode === "area") viewer.measuringTool.startInsertion({ showDistances: true, showArea: true, closed: true });
+      if (mode === "height") viewer.measuringTool.startInsertion({ showDistances: false, showHeight: true, closed: false, maxMarkers: 2 });
+    }
+
+    function startCrossSection() {
+      if (!viewer.profileTool) {
+        showNotice("Tool Loading", "Cross section tool is still loading. Try again in a moment.");
+        return;
+      }
+      const profile = viewer.profileTool.startInsertion({ name: `Section ${crossSections.length + 1}` });
+      profile.name = `Section ${crossSections.length + 1}`;
+      activeSectionProfile = profile;
+      if (!crossSections.includes(profile)) crossSections.push(profile);
+      watchProfile(profile);
+      renderSections();
+      openProfileGraph(profile);
+    }
+
+    function getAlignmentSegments(points) {
+      const segments = [];
+      let total = 0;
+      for (let index = 0; index < points.length - 1; index += 1) {
+        const start = points[index];
+        const end = points[index + 1];
+        const length = start.clone().setZ(0).distanceTo(end.clone().setZ(0));
+        if (length <= 0) continue;
+        segments.push({ start, end, length, chainageStart: total });
+        total += length;
+      }
+      return { segments, total };
+    }
+
+    function sampleAlignmentAt(points, target) {
+      const { segments } = getAlignmentSegments(points);
+      for (const segment of segments) {
+        if (target <= segment.chainageStart + segment.length + 0.001) {
+          const t = Math.max(0, Math.min(1, (target - segment.chainageStart) / segment.length));
+          const point = segment.start.clone().lerp(segment.end, t);
+          const direction = segment.end.clone().sub(segment.start).setZ(0).normalize();
+          return { point, direction, chainage: target };
+        }
+      }
+      return null;
+    }
+
+    function createStaticProfile(name, points, width, metadata) {
+      const profile = new Potree.Profile();
+      profile.name = name;
+      profile.userData = { ...(profile.userData || {}), ...metadata };
+      profile.setWidth(width);
+      points.forEach((point) => profile.addMarker(point.clone()));
+      profile.modifiable = true;
+      viewer.scene.addProfile(profile);
+      return profile;
+    }
+
+    function startAlignmentDrawing() {
+      alignmentDialog.classList.remove("is-visible");
+      if (!viewer.profileTool) return;
+      const profile = viewer.profileTool.startInsertion({ name: "L Section Alignment" });
+      profile.name = "L Section Alignment";
+      profile.userData = { ...(profile.userData || {}), sectionType: "longitudinal", chainage: 0 };
+      activeAlignmentProfile = profile;
+      activeSectionProfile = profile;
+      watchProfile(profile);
+      renderSections();
+    }
+
+    function generateSectionsFromAlignment() {
+      alignmentDialog.classList.remove("is-visible");
+      if (!activeAlignmentProfile || activeAlignmentProfile.points.length < 2) {
+        showNotice("Draw Alignment First", "Draw an L-section alignment before generating chainage cross sections.");
+        return;
+      }
+      const interval = Math.max(1, Number(document.getElementById("sectionIntervalInput").value) || 20);
+      const left = Math.max(1, Number(document.getElementById("sectionLeftInput").value) || 150);
+      const right = Math.max(1, Number(document.getElementById("sectionRightInput").value) || 150);
+      const { total } = getAlignmentSegments(activeAlignmentProfile.points);
+      activeAlignmentProfile.setWidth(5);
+      activeAlignmentProfile.userData = { ...(activeAlignmentProfile.userData || {}), sectionType: "longitudinal", chainage: 0 };
+      for (let chainage = 0; chainage <= total + 0.001; chainage += interval) {
+        const sample = sampleAlignmentAt(activeAlignmentProfile.points, chainage);
+        if (!sample) continue;
+        const normal = new THREE.Vector3(-sample.direction.y, sample.direction.x, 0).normalize();
+        const leftPoint = sample.point.clone().add(normal.clone().multiplyScalar(left));
+        const rightPoint = sample.point.clone().add(normal.clone().multiplyScalar(-right));
+        createStaticProfile(`CS ${formatChainage(sample.chainage)}`, [leftPoint, rightPoint], 5, {
+          sectionType: "chainage",
+          chainage: sample.chainage,
+          interval,
+          leftOffset: left,
+          rightOffset: right,
+          centerOffset: left,
+        });
+      }
+      renderSections();
+    }
+
+    function clearTools() {
+      viewer.scene.removeAllMeasurements();
+      for (const profile of [...crossSections]) viewer.scene.removeProfile(profile);
+      crossSections = [];
+      activeAlignmentProfile = null;
+      activeSectionProfile = null;
+      hideNotice();
+      renderSections();
+    }
+
+    viewer.scene.addEventListener("profile_added", (event) => {
+      if (!crossSections.includes(event.profile)) crossSections.push(event.profile);
+      watchProfile(event.profile);
+      activeSectionProfile = event.profile;
+      renderSections();
+    });
+    viewer.scene.addEventListener("profile_removed", (event) => {
+      crossSections = crossSections.filter((profile) => profile !== event.profile);
+      if (activeAlignmentProfile === event.profile) activeAlignmentProfile = null;
+      if (activeSectionProfile === event.profile) activeSectionProfile = crossSections[crossSections.length - 1] || null;
+      renderSections();
+    });
+
+    document.getElementById("resetViewButton").addEventListener("click", () => viewer.fitToScreen(0.5));
+    document.getElementById("distanceButton").addEventListener("click", () => startMeasurement("distance"));
+    document.getElementById("areaButton").addEventListener("click", () => startMeasurement("area"));
+    document.getElementById("heightButton").addEventListener("click", () => startMeasurement("height"));
+    document.getElementById("sectionButton").addEventListener("click", startCrossSection);
+    document.getElementById("alignmentButton").addEventListener("click", () => alignmentDialog.classList.add("is-visible"));
+    document.getElementById("alignmentCancelButton").addEventListener("click", () => alignmentDialog.classList.remove("is-visible"));
+    document.getElementById("alignmentDrawButton").addEventListener("click", startAlignmentDrawing);
+    document.getElementById("alignmentGenerateButton").addEventListener("click", generateSectionsFromAlignment);
+    document.getElementById("clearButton").addEventListener("click", clearTools);
+    budgetSlider.addEventListener("input", (event) => {
+      const value = Number(event.target.value);
+      viewer.setPointBudget(value);
+      budgetValue.textContent = formatNumber(value);
+    });
+    budgetValue.textContent = formatNumber(budgetSlider.value);
+    renderSections();
+
+    async function loadPointCloud() {
+      try {
+        datasetName.textContent = `Loading ${displayName}...`;
+        const metadataResponse = await fetch(eptUrl, { cache: "no-store", credentials: "same-origin" });
+        if (!metadataResponse.ok) throw new Error(`EPT metadata not available (${metadataResponse.status})`);
+        await metadataResponse.json();
+        const event = await Potree.loadPointCloud(eptUrl, displayName);
+        activePointCloud = event.pointcloud;
+        viewer.scene.addPointCloud(activePointCloud);
+        const material = activePointCloud.material;
+        material.size = 1;
+        material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
+        if (material.activeAttributeName !== undefined) material.activeAttributeName = "rgba";
+        viewer.fitToScreen(0.5);
+        datasetName.textContent = displayName;
+        hideNotice();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        datasetName.textContent = displayName;
+        showNotice("Point Cloud Not Loaded", message);
+        logViewerError(message, error instanceof Error ? error.stack || "" : "");
+      }
+    }
+
+    loadPointCloud();
+  </script>
+</body>
+</html>

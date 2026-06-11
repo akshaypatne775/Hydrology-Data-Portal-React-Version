@@ -8,6 +8,7 @@ set "ROOT=%~dp0"
 set "BACKEND_DIR=%ROOT%backend"
 set "FRONTEND_DIR=%ROOT%frontend"
 set "PROJECT_DATA_DIR=%ROOT%Project_Data"
+set "EPT_TOOLS_DIR=%ROOT%Tools\EPT"
 set "PUBLIC_PORTAL_URL=https://portal.droidminingsolutions.com"
 
 echo.
@@ -35,6 +36,8 @@ call :setup_frontend
 if errorlevel 1 goto fail
 
 call :check_gdal
+
+call :check_ept_converter
 
 echo.
 echo  ================================================================
@@ -74,6 +77,8 @@ if not exist "%PROJECT_DATA_DIR%\projects" mkdir "%PROJECT_DATA_DIR%\projects"
 if not exist "%PROJECT_DATA_DIR%\uploads" mkdir "%PROJECT_DATA_DIR%\uploads"
 if not exist "%PROJECT_DATA_DIR%\uploads\chunks" mkdir "%PROJECT_DATA_DIR%\uploads\chunks"
 if not exist "%PROJECT_DATA_DIR%\pointclouds" mkdir "%PROJECT_DATA_DIR%\pointclouds"
+if not exist "%ROOT%Tools" mkdir "%ROOT%Tools"
+if not exist "%EPT_TOOLS_DIR%" mkdir "%EPT_TOOLS_DIR%"
 exit /b 0
 
 :find_python
@@ -248,6 +253,39 @@ if exist "%DEFAULT_OSGEO4W%" (
   echo        %DEFAULT_OSGEO4W%
   echo        TIFF to XYZ tile conversion needs QGIS/GDAL installed.
   echo        Install QGIS or set OSGEO4W_BAT in backend\.env if your path is different.
+)
+exit /b 0
+
+:check_ept_converter
+echo.
+echo [STEP] Checking EPT point cloud converter...
+set "EPT_FOUND=0"
+if exist "%ROOT%Droid_Environment_Manager\_Setup_EPT_Environment.bat" (
+  call "%ROOT%Droid_Environment_Manager\_Setup_EPT_Environment.bat"
+)
+if defined UNTWINE_EXE set "EPT_FOUND=1"
+if defined ENTWINE_EXE set "EPT_FOUND=1"
+if defined PDAL_EXE set "EPT_FOUND=1"
+if "%EPT_FOUND%"=="0" (
+  where untwine >nul 2>&1
+  if not errorlevel 1 set "EPT_FOUND=1"
+)
+if "%EPT_FOUND%"=="0" (
+  where entwine >nul 2>&1
+  if not errorlevel 1 set "EPT_FOUND=1"
+)
+if "%EPT_FOUND%"=="0" (
+  where pdal >nul 2>&1
+  if not errorlevel 1 set "EPT_FOUND=1"
+)
+if "%EPT_FOUND%"=="0" (
+  echo [WARN] No EPT converter found yet.
+  echo        Best option: put untwine.exe and its DLL files inside:
+  echo        "%EPT_TOOLS_DIR%"
+  echo        Alternative: install Entwine or PDAL and keep it available on PATH.
+  echo        Uploads will work, but LAS/LAZ point cloud conversion needs one converter.
+) else (
+  echo [OK] EPT converter is available.
 )
 exit /b 0
 

@@ -15,16 +15,63 @@ build/
 
 # Frontend build
 frontend/dist/
+frontend/dist_live/
 
 # Local runtime data and generated geospatial outputs
+backup/
+backup/**
+reference/
+reference/**
+refrence/
+refrence/**
+Project_Data/**
+!Project_Data/.gitkeep
 Project_Data/.session_signing_secret
 Project_Data/uploads/
+Project_Data/uploads/**
 Project_Data/pointclouds/
+Project_Data/pointclouds/**
 Project_Data/projects/*/raw/
+Project_Data/projects/*/raw/**
 Project_Data/projects/*/processed/
+Project_Data/projects/*/processed/**
 Project_Data/projects/*/_dataset_jobs/
+Project_Data/projects/*/_dataset_jobs/**
+Project_Data/projects/*/_analysis_cache/
+Project_Data/projects/*/_analysis_cache/**
+Project_Data/projects/*/exports/
+Project_Data/projects/*/exports/**
 Project_Data/processing_jobs.json
 Project_Data/*.db
+Project_Data/*.db-*
+Project_Data/*.sqlite
+Project_Data/*.sqlite-*
+Project_Data/*.wal
+Project_Data/*.shm
+
+# Heavy geospatial/runtime files should never go to GitHub
+reference/**/pointclouds/
+reference/**/pointclouds/**
+reference/**/ept-data/
+reference/**/ept-data/**
+reference/**/ept-hierarchy/
+reference/**/ept-hierarchy/**
+*.las
+*.laz
+*.tif
+*.tiff
+*.copc.laz
+*.e57
+*.ply
+*.obj
+*.fbx
+*.glb
+*.b3dm
+*.pnts
+*.zip
+*.7z
+*.rar
+*.part
 
 # Environment & IDE
 .env

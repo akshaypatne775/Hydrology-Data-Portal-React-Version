@@ -5,9 +5,11 @@ import './PointCloudViewer.css'
 type PointCloudViewerProps = {
   url: string
   name?: string
+  projectId?: string
+  datasetId?: string
 }
 
-export default function PointCloudViewer({ url, name = 'Point Cloud' }: PointCloudViewerProps) {
+export default function PointCloudViewer({ url, name = 'Point Cloud', projectId = '', datasetId = '' }: PointCloudViewerProps) {
   const rootRef = useRef<HTMLElement>(null)
 
   useEffect(() => {
@@ -74,7 +76,7 @@ export default function PointCloudViewer({ url, name = 'Point Cloud' }: PointClo
 
   return (
     <section ref={rootRef} className="point-cloud-viewer" aria-label={`${name} 3D data viewer`}>
-      <PotreeViewer key={url} url={url} />
+      <PotreeViewer key={url} url={url} projectId={projectId} datasetId={datasetId} />
     </section>
   )
 }

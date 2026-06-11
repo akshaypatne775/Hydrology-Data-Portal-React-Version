@@ -33,6 +33,7 @@ if not exist "%LIVE_BACKEND_DIR%\app\main.py" (
 )
 
 pushd "%LIVE_BACKEND_DIR%"
+call "%~dp0_Setup_EPT_Environment.bat"
 set DEV_MODE=False
 set LOCAL_DATA_PATH=%PROJECT_DATA_DIR%
 set PORTAL_VERSION=live-%RANDOM%

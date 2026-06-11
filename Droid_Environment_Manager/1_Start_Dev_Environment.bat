@@ -67,7 +67,7 @@ if errorlevel 1 (
 )
 
 echo [INFO] Starting Dev FastAPI backend on http://127.0.0.1:8001
-start "Droid Dev Backend 8001" /D "%BACKEND_DIR%" "%ComSpec%" /k "set DEV_MODE=True&&set PORTAL_VERSION=dev-%RANDOM%&&venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8001"
+start "Droid Dev Backend 8001" "%ComSpec%" /k call "%~dp0_Run_Dev_Backend_8001.bat"
 
 echo [INFO] Starting Dev React frontend on http://localhost:5173
 start "Droid Dev Frontend 5173" /D "%FRONTEND_DIR%" "%ComSpec%" /k "set VITE_BACKEND_PORT=8001&&call npm run dev"

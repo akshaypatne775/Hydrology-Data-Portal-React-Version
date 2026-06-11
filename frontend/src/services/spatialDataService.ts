@@ -66,7 +66,16 @@ export async function deleteSpatialFeature(projectId: string, featureId: string)
     `/api/projects/${encodeURIComponent(projectId)}/spatial-features/${encodeURIComponent(featureId)}`,
     { method: 'DELETE' },
   )
-  if (!response.ok) throw new Error(`Delete failed (${response.status})`)
+  if (!response.ok) {
+    let detail = `Delete failed (${response.status})`
+    try {
+      const data = (await response.json()) as { detail?: string }
+      if (data.detail) detail = data.detail
+    } catch {
+      // keep default detail
+    }
+    throw new Error(detail)
+  }
 }
 
 export async function deleteSpatialLayer(projectId: string, layerId: string): Promise<void> {
@@ -74,7 +83,16 @@ export async function deleteSpatialLayer(projectId: string, layerId: string): Pr
     `/api/projects/${encodeURIComponent(projectId)}/spatial-layers/${encodeURIComponent(layerId)}`,
     { method: 'DELETE' },
   )
-  if (!response.ok) throw new Error(`Layer delete failed (${response.status})`)
+  if (!response.ok) {
+    let detail = `Layer delete failed (${response.status})`
+    try {
+      const data = (await response.json()) as { detail?: string }
+      if (data.detail) detail = data.detail
+    } catch {
+      // keep default detail
+    }
+    throw new Error(detail)
+  }
 }
 
 export async function importSpatialLayer(projectId: string, file: File): Promise<SpatialLayer> {

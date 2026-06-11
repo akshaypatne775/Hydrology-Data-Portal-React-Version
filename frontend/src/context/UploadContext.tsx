@@ -15,6 +15,7 @@ import {
   uploadDatasetChunk,
   type ProcessDatasetResponse,
 } from '../services/datasetService'
+import { logClientError } from '../services/errorLogService'
 import { completeUpload, getPointCloudStatus, uploadChunk } from '../services/pointCloudService'
 import { saveWebReadyCogLayer } from '../utils/datasetLayerStorage'
 import { readUploadedTilesets, writeUploadedTilesets } from '../utils/pointCloudStorage'
@@ -72,6 +73,43 @@ function estimateEtaFromProgress(startedAt: number | undefined, progressPercent:
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+function compactUploadError(message: string, maxLength = 560): string {
+  const compact = message
+    .replace(/\r/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  if (compact.length <= maxLength) return compact
+  return `${compact.slice(0, maxLength).trim()}...`
+}
+
+function formatUploadTaskError(error: unknown): string {
+  const formatted = formatApiNetworkError(API_BASE, error)
+  const raw = error instanceof Error ? error.message : formatted
+  const lowered = raw.toLowerCase()
+
+  if (
+    lowered.includes('automatic las bounding-box repair') ||
+    lowered.includes('outside bounding box') ||
+    lowered.includes('valid bounding box') ||
+    lowered.includes('repair the bounding box') ||
+    lowered.includes('chunker_countsort_laszip')
+  ) {
+    if (lowered.includes('automatic las bounding-box repair')) {
+      return (
+        'Point cloud conversion failed after automatic LAS bounding-box repair. ' +
+        'Please verify/repair the source LAS file and upload it again.'
+      )
+    }
+    return (
+      'Point cloud conversion failed because this LAS file has an invalid bounding box header. ' +
+      'Droid Cloud now auto-repairs this issue on new uploads, so please upload the file again.'
+    )
+  }
+
+  return compactUploadError(formatted)
 }
 
 export function UploadProvider({ children }: PropsWithChildren) {
@@ -176,6 +214,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
           project_id?: string
           target_tileset_url?: string
           tileset_url?: string
+          ept_url?: string
           tileset_id?: string
         }
         const resolvedProjectId = completeData.project_id || projectId
@@ -183,7 +222,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
           completeData.target_tileset_url ||
           (completeData.tileset_url && completeData.tileset_url !== 'PENDING'
             ? completeData.tileset_url
-            : `${API_BASE}/data/pointclouds/${encodeURIComponent(resolvedProjectId)}/tileset.json`)
+            : `${API_BASE}/droid-ept-viewer/index.html?project=${encodeURIComponent(resolvedProjectId)}`)
 
         upsertTask(id, {
           state: 'processing',
@@ -211,17 +250,24 @@ export function UploadProvider({ children }: PropsWithChildren) {
           }
           upsertTask(id, {
             state: 'processing',
-            statusText: `Converting ${file.name} to Potree viewer...`,
-            stage: 'Potree conversion running',
+            statusText: `Converting ${file.name} to EPT point cloud viewer...`,
+            stage: 'EPT conversion running',
             etaText: 'Large point clouds can take several hours',
           })
           await new Promise((resolve) => window.setTimeout(resolve, 2000))
         }
         throw new Error('Timed out waiting for point cloud conversion after 24 hours.')
       } catch (error) {
+        logClientError({
+          area: 'pointcloud_upload',
+          message: error instanceof Error ? error.message : String(error || 'Point cloud upload failed'),
+          project_id: projectId,
+          dataset_id: file.name,
+          extra: { fileName: file.name, fileSize: file.size },
+        })
         upsertTask(id, {
           state: 'error',
-          statusText: formatApiNetworkError(API_BASE, error),
+          statusText: formatUploadTaskError(error),
         })
       }
     },
@@ -427,9 +473,16 @@ export function UploadProvider({ children }: PropsWithChildren) {
         }
         throw new Error('Timed out waiting for COG conversion.')
       } catch (error) {
+        logClientError({
+          area: 'dataset_upload',
+          message: error instanceof Error ? error.message : String(error || 'Dataset upload failed'),
+          project_id: projectId,
+          dataset_id: file.name,
+          extra: { fileName: file.name, fileSize: file.size, datasetType: metadata?.datasetType || '' },
+        })
         upsertTask(id, {
           state: 'error',
-          statusText: formatApiNetworkError(API_BASE, error),
+          statusText: formatUploadTaskError(error),
         })
       }
     },

@@ -67,7 +67,8 @@ export function toSameOriginBackendUrl(url: string | undefined): string | undefi
     if (
       parsed.pathname.startsWith('/api/') ||
       parsed.pathname.startsWith('/data/') ||
-      parsed.pathname.startsWith('/tiles/')
+      parsed.pathname.startsWith('/tiles/') ||
+      parsed.pathname.startsWith('/droid-ept-viewer/')
     ) {
       return `${parsed.pathname}${parsed.search}${parsed.hash}`
         .replace(/%7B/gi, '{')

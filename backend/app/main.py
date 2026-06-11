@@ -114,6 +114,7 @@ def _local_data_path_from_user_value(value: str) -> Path:
 # Map tiles, ortho, DEM, terrain quantized-mesh, videos, etc. are served only
 # through authenticated routes below. Do not mount Project_Data as StaticFiles.
 DATABASE_DIR = Path(LOCAL_DATA_PATH)
+ERROR_LOG_DIR = Path(LOCAL_DATA_PATH) / "logs"
 
 Path(LOCAL_DATA_PATH).mkdir(parents=True, exist_ok=True)
 configure_database(DATABASE_DIR)
@@ -123,14 +124,15 @@ DISK_HEADROOM_BYTES = int(os.getenv("UPLOAD_DISK_HEADROOM_MB", "512")) * 1024 * 
 MERGE_COPY_BUFFER_BYTES = 8 * 1024 * 1024  # streaming merge, avoid loading whole file in RAM
 POINTCLOUD_SRS_IN = os.getenv("POINTCLOUD_SRS_IN", "").strip()
 POINTCLOUD_SRS_OUT = os.getenv("POINTCLOUD_SRS_OUT", "4978").strip()
+POINTCLOUD_EPT_PROJECT_GEOGRAPHIC = os.getenv("POINTCLOUD_EPT_PROJECT_GEOGRAPHIC", "true").strip().lower() not in {"0", "false", "no", "off"}
+POINTCLOUD_EPT_TARGET_EPSG = os.getenv("POINTCLOUD_EPT_TARGET_EPSG", "").strip()
 OSGEO4W_BAT = os.getenv(
     "OSGEO4W_BAT",
     r"C:\Program Files\QGIS 3.44.8\OSGeo4W.bat",
 ).strip()
-POTREE_CONVERTER_EXE = os.getenv(
-    "POTREE_CONVERTER_EXE",
-    r"C:\PotreeConverter\PotreeConverter.exe",
-).strip()
+UNTWINE_EXE = os.getenv("UNTWINE_EXE", "untwine").strip()
+ENTWINE_EXE = os.getenv("ENTWINE_EXE", "entwine").strip()
+PDAL_EXE = os.getenv("PDAL_EXE", "pdal").strip()
 PROJECT_FILES_CACHE_TTL_SECONDS = float(os.getenv("PROJECT_FILES_CACHE_TTL_SECONDS", "4"))
 TIFF_TILE_BUDGET_MB = float(os.getenv("TIFF_TILE_BUDGET_MB", "100"))
 TIFF_TILE_MIN_ZOOM_LIMIT = int(os.getenv("TIFF_TILE_MIN_ZOOM_LIMIT", "14"))
@@ -315,11 +317,11 @@ class ProtectedDataPathMiddleware(BaseHTTPMiddleware):
             or path.startswith("/api/complete-upload")
             or path.startswith("/api/complete-dataset-upload")
             or path == "/api/process-dataset"
+            or path == "/api/process-pointcloud"
+            or path == "/api/dataset-metadata"
         )
         admin_only_upload = (
-            path == "/api/process-pointcloud"
-            or path == "/api/dataset-metadata"
-            or "metadata-probe" in path
+            "metadata-probe" in path
             or re.match(r"^/api/datasets/[^/]+/(sync|open-manual-folder)$", path) is not None
             or ("manual" in path and ("folder" in path or "sync" in path))
         )
@@ -420,6 +422,16 @@ class SpatialFeaturePatchPayload(BaseModel):
 class PointCloudProcessPayload(BaseModel):
     filename: str
     project_id: str = "default-project"
+
+
+class ClientErrorLogPayload(BaseModel):
+    area: str = "frontend"
+    message: str
+    url: str = ""
+    stack: str = ""
+    project_id: str = ""
+    dataset_id: str = ""
+    extra: dict[str, object] | None = None
 
 
 class CompleteUploadPayload(BaseModel):
@@ -1071,44 +1083,6 @@ def _ensure_disk_space_for_bytes(path_on_volume: Path, required_extra: int) -> N
         )
 
 
-def _normalize_tileset_into_output_root(output_dir: Path) -> None:
-    """
-    Ensure tileset.json lives at output_dir root so static URL
-    /data/pointclouds/<project_id>/<tileset_id>/tileset.json resolves correctly.
-    py3dtiles sometimes writes a nested folder under --out.
-    """
-    root_tileset = output_dir / "tileset.json"
-    if root_tileset.is_file():
-        return
-
-    candidates = sorted(
-        output_dir.rglob("tileset.json"),
-        key=lambda p: (len(p.parts), str(p)),
-    )
-    if not candidates:
-        return
-
-    inner_tileset = candidates[0]
-    if inner_tileset.parent.resolve() == output_dir.resolve():
-        return
-
-    parent = inner_tileset.parent
-    for child in list(parent.iterdir()):
-        dest = output_dir / child.name
-        if dest.exists():
-            if dest.is_dir():
-                shutil.rmtree(dest, ignore_errors=True)
-            else:
-                dest.unlink(missing_ok=True)
-        shutil.move(str(child), str(dest))
-
-    try:
-        if parent.is_dir() and parent.resolve() != output_dir.resolve():
-            shutil.rmtree(parent, ignore_errors=True)
-    except OSError:
-        pass
-
-
 async def process_pointcloud_background(
     final_path: Path,
     output_dir: Path,
@@ -1117,8 +1091,7 @@ async def process_pointcloud_background(
     file_name: str | None = None,
 ) -> None:
     """
-    Background conversion worker:
-    py3dtiles convert <final_path> --out <output_dir>
+    Background conversion worker for EPT point clouds.
     """
     if output_dir.is_dir():
         shutil.rmtree(output_dir, ignore_errors=True)
@@ -1127,28 +1100,8 @@ async def process_pointcloud_background(
     if err_path.exists():
         err_path.unlink(missing_ok=True)
 
-    cmd = [
-        "py3dtiles",
-        "convert",
-        str(final_path),
-        "--out",
-        str(output_dir),
-    ]
-    # Optional CRS reprojection for local/projected LAS sources.
-    srs_in = POINTCLOUD_SRS_IN or _detect_input_srs(final_path) or ""
-    if srs_in:
-        cmd.extend(["--srs_in", srs_in])
-    if POINTCLOUD_SRS_OUT:
-        cmd.extend(["--srs_out", POINTCLOUD_SRS_OUT])
-
     try:
-        subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        _normalize_tileset_into_output_root(output_dir)
+        converter_label = await run_in_threadpool(process_pointcloud, str(final_path), str(output_dir), output_dir.name)
         if project_id and job_id:
             _upsert_processing_job(
                 project_id,
@@ -1158,13 +1111,14 @@ async def process_pointcloud_background(
                     "file_name": file_name or final_path.name,
                     "status": "Completed",
                     "updated_at": _now_iso(),
-                    "result_url": f"/data/pointclouds/{project_id}/{output_dir.name}/tileset.json",
+                    "result_url": _ept_viewer_url("", project_id, output_dir.name, file_name or final_path.name),
+                    "converter": converter_label,
                 },
             )
             _invalidate_project_files_cache(project_id)
-    except subprocess.CalledProcessError as exc:
-        msg = exc.stderr or exc.stdout or str(exc)
-        print("py3dtiles conversion failed:", msg)
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        print("EPT conversion failed:", msg)
         try:
             err_path.write_text(msg, encoding="utf-8")
         except OSError:
@@ -1182,60 +1136,331 @@ async def process_pointcloud_background(
                 },
             )
             _invalidate_project_files_cache(project_id)
-    except FileNotFoundError:
-        msg = (
-            "py3dtiles executable not found on PATH. "
-            "Install py3dtiles in the backend environment and restart the API."
+
+
+def _resolve_converter_executable(executable: str) -> str | None:
+    executable = (executable or "").strip()
+    if not executable:
+        return None
+    candidate = Path(executable)
+    if candidate.is_file():
+        return str(candidate)
+    resolved = shutil.which(executable)
+    return resolved or None
+
+
+def _pdal_has_driver(pdal_exe: str, driver_name: str) -> bool:
+    try:
+        result = subprocess.run([pdal_exe, "--drivers"], capture_output=True, text=True, timeout=30)
+    except Exception:
+        return False
+    if result.returncode != 0:
+        return False
+    output = f"{result.stdout}\n{result.stderr}".lower()
+    return driver_name.lower() in output
+
+
+def _ept_error_needs_las_bbox_repair(message: str) -> bool:
+    lowered = (message or "").lower()
+    return any(
+        needle in lowered
+        for needle in (
+            "outside bounding box",
+            "valid bounding box",
+            "repair the bounding box",
+            "chunker_countsort_laszip",
         )
-        print(msg)
-        try:
-            err_path.write_text(msg, encoding="utf-8")
-        except OSError:
-            pass
-        if project_id and job_id:
-            _upsert_processing_job(
-                project_id,
-                {
-                    "job_id": job_id,
-                    "kind": "pointcloud",
-                    "file_name": file_name or final_path.name,
-                    "status": "Failed",
-                    "error": msg[:8000],
-                    "updated_at": _now_iso(),
-                },
+    )
+
+
+def _repair_las_bounding_box(input_las: Path, repaired_las: Path) -> None:
+    """
+    Rewrite LAS/LAZ with header min/max recalculated from actual point coordinates.
+    This fixes converter failures caused by stale LAS bounding boxes.
+    """
+    input_size = input_las.stat().st_size
+    repaired_las.parent.mkdir(parents=True, exist_ok=True)
+    usage = shutil.disk_usage(repaired_las.parent)
+    required_space = input_size + DISK_HEADROOM_BYTES
+    if usage.free < required_space:
+        raise RuntimeError(
+            "Not enough free disk space to repair this point cloud before conversion. "
+            f"Need at least {required_space} bytes free including safety headroom."
+        )
+
+    mins = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
+    maxs = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
+    point_count = 0
+    with laspy.open(str(input_las)) as reader:
+        header = reader.header.copy()
+        for points in reader.chunk_iterator(2_000_000):
+            if len(points) == 0:
+                continue
+            xyz_min = np.array(
+                [
+                    float(np.nanmin(points.x)),
+                    float(np.nanmin(points.y)),
+                    float(np.nanmin(points.z)),
+                ],
+                dtype=np.float64,
             )
-            _invalidate_project_files_cache(project_id)
+            xyz_max = np.array(
+                [
+                    float(np.nanmax(points.x)),
+                    float(np.nanmax(points.y)),
+                    float(np.nanmax(points.z)),
+                ],
+                dtype=np.float64,
+            )
+            mins = np.minimum(mins, xyz_min)
+            maxs = np.maximum(maxs, xyz_max)
+            point_count += len(points)
+
+    if point_count <= 0 or not np.all(np.isfinite(mins)) or not np.all(np.isfinite(maxs)):
+        raise RuntimeError("LAS bounding box repair failed because no valid points were found.")
+
+    header.mins = mins
+    header.maxs = maxs
+    if repaired_las.exists():
+        repaired_las.unlink(missing_ok=True)
+    with laspy.open(str(input_las)) as reader, laspy.open(str(repaired_las), mode="w", header=header) as writer:
+        for points in reader.chunk_iterator(1_000_000):
+            writer.write_points(points)
 
 
-def process_pointcloud(input_las: str, output_dir: str, dataset_name: str) -> None:
+def _looks_like_lon_lat_bounds(mins: np.ndarray, maxs: np.ndarray) -> bool:
+    return (
+        -180 <= float(mins[0]) <= 180
+        and -180 <= float(maxs[0]) <= 180
+        and -90 <= float(mins[1]) <= 90
+        and -90 <= float(maxs[1]) <= 90
+        and float(maxs[0] - mins[0]) <= 10
+        and float(maxs[1] - mins[1]) <= 10
+    )
+
+
+def _utm_epsg_for_lon_lat(lon: float, lat: float) -> int:
+    zone = int(math.floor((lon + 180.0) / 6.0) + 1)
+    zone = max(1, min(60, zone))
+    return (32600 if lat >= 0 else 32700) + zone
+
+
+def _prepare_las_for_ept(input_las: Path, prepared_dir: Path, dataset_name: str) -> tuple[Path | None, str]:
     """
-    Convert LAS/LAZ to a Potree web viewer.
-    PotreeConverter.exe is expected at C:\\PotreeConverter\\ unless POTREE_CONVERTER_EXE is set.
+    Potree's bundled EPT loader is most reliable with projected meter
+    coordinates. The working QGIS reference EPT uses UTM, while many drone
+    LAS files arrive as EPSG:4326 lon/lat degrees. Reproject geographic LAS
+    inputs to local UTM before Entwine builds the EPT hierarchy.
     """
-    safe_dataset_name = _potree_dataset_name(dataset_name)
+    if not POINTCLOUD_EPT_PROJECT_GEOGRAPHIC or input_las.suffix.lower() not in {".las", ".laz"}:
+        return None, ""
+
+    try:
+        from pyproj import CRS, Transformer
+    except Exception as exc:
+        raise RuntimeError(
+            "Point cloud CRS normalization needs pyproj. Install backend dependency pyproj or set "
+            "POINTCLOUD_EPT_PROJECT_GEOGRAPHIC=false to disable geographic-to-UTM preprocessing."
+        ) from exc
+
+    try:
+        with laspy.open(str(input_las)) as reader:
+            header = reader.header.copy()
+            source_crs = CRS.from_user_input(POINTCLOUD_SRS_IN) if POINTCLOUD_SRS_IN else header.parse_crs()
+            header_mins = np.array(header.mins, dtype=np.float64)
+            header_maxs = np.array(header.maxs, dtype=np.float64)
+            if source_crs is None and _looks_like_lon_lat_bounds(header_mins, header_maxs):
+                source_crs = CRS.from_epsg(4326)
+            if source_crs is None or not source_crs.is_geographic:
+                return None, ""
+
+            lon_center = float((header_mins[0] + header_maxs[0]) / 2.0)
+            lat_center = float((header_mins[1] + header_maxs[1]) / 2.0)
+            target_epsg = int(POINTCLOUD_EPT_TARGET_EPSG) if POINTCLOUD_EPT_TARGET_EPSG else _utm_epsg_for_lon_lat(lon_center, lat_center)
+            target_crs = CRS.from_epsg(target_epsg)
+            transformer = Transformer.from_crs(source_crs, target_crs, always_xy=True)
+
+            mins = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
+            maxs = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
+            point_count = 0
+            for points in reader.chunk_iterator(1_000_000):
+                if len(points) == 0:
+                    continue
+                px = np.asarray(points.x, dtype=np.float64).copy()
+                py = np.asarray(points.y, dtype=np.float64).copy()
+                pz = np.asarray(points.z, dtype=np.float64).copy()
+                tx, ty = transformer.transform(px, py)
+                tz = pz
+                xyz_min = np.array([float(np.nanmin(tx)), float(np.nanmin(ty)), float(np.nanmin(tz))], dtype=np.float64)
+                xyz_max = np.array([float(np.nanmax(tx)), float(np.nanmax(ty)), float(np.nanmax(tz))], dtype=np.float64)
+                mins = np.minimum(mins, xyz_min)
+                maxs = np.maximum(maxs, xyz_max)
+                point_count += len(points)
+
+        if point_count <= 0 or not np.all(np.isfinite(mins)) or not np.all(np.isfinite(maxs)):
+            raise RuntimeError("Point cloud UTM preparation failed because no valid points were found.")
+
+        prepared_dir.mkdir(parents=True, exist_ok=True)
+        prepared_las = prepared_dir / f"{_ept_dataset_name(dataset_name)}.utm-epsg-{target_epsg}.las"
+        if prepared_las.exists():
+            prepared_las.unlink(missing_ok=True)
+
+        with laspy.open(str(input_las)) as reader:
+            header = reader.header.copy()
+            header.scales = np.array([0.001, 0.001, 0.001], dtype=np.float64)
+            header.offsets = np.floor(mins).astype(np.float64)
+            header.mins = mins
+            header.maxs = maxs
+            header.add_crs(target_crs)
+            with laspy.open(str(prepared_las), mode="w", header=header) as writer:
+                for points in reader.chunk_iterator(1_000_000):
+                    if len(points) == 0:
+                        continue
+                    px = np.asarray(points.x, dtype=np.float64).copy()
+                    py = np.asarray(points.y, dtype=np.float64).copy()
+                    pz = np.asarray(points.z, dtype=np.float64).copy()
+                    tx, ty = transformer.transform(px, py)
+                    tz = pz
+                    out_points = points.copy()
+                    out_points.array["X"] = np.rint((tx - header.offsets[0]) / header.scales[0]).astype(np.int32)
+                    out_points.array["Y"] = np.rint((ty - header.offsets[1]) / header.scales[1]).astype(np.int32)
+                    out_points.array["Z"] = np.rint((tz - header.offsets[2]) / header.scales[2]).astype(np.int32)
+                    writer.write_points(out_points)
+
+        note = f"Input geographic CRS was reprojected to EPSG:{target_epsg} before EPT conversion."
+        return prepared_las, note
+    except laspy.errors.LaspyException as exc:
+        raise RuntimeError(f"Point cloud CRS preparation failed: {exc}") from exc
+
+
+def _run_ept_converter_once(input_las: str, output_path: Path) -> str:
+    """
+    Convert LAS/LAZ to Entwine Point Tile (EPT).
+    Entwine is preferred because it produces browser-ready EPT folders
+    (ept.json, ept-data, and ept-hierarchy). Some Untwine builds create a
+    single binary output instead of an EPT directory, so it is only a fallback.
+    """
+    attempts: list[tuple[str, list[str]]] = []
+    entwine = _resolve_converter_executable(ENTWINE_EXE)
+    if entwine:
+        attempts.append(("Entwine", [entwine, "build", "-i", input_las, "-o", str(output_path)]))
+    untwine = _resolve_converter_executable(UNTWINE_EXE)
+    if untwine:
+        attempts.append(("Untwine", [untwine, str(output_path), "-i", input_las]))
+    pdal = _resolve_converter_executable(PDAL_EXE)
+    if pdal and _pdal_has_driver(pdal, "writers.ept"):
+        attempts.append(("PDAL writers.ept", [pdal, "translate", input_las, str(output_path / "ept.json"), "writers.ept"]))
+
+    if not attempts:
+        raise RuntimeError(
+            "No EPT converter found. Install Untwine (recommended), Entwine, or PDAL and make it available on PATH, "
+            "or set UNTWINE_EXE / ENTWINE_EXE / PDAL_EXE to the executable path."
+        )
+
+    errors: list[str] = []
+    for label, command in attempts:
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode == 0 and (output_path / "ept.json").is_file():
+            return label
+        if result.returncode == 0 and output_path.is_file():
+            output_path.unlink(missing_ok=True)
+            output_path.mkdir(parents=True, exist_ok=True)
+            errors.append(
+                f"{label}: converter completed but produced a single file instead of an EPT folder. "
+                "Install/use Entwine for Droid EPT output."
+            )
+            continue
+        message = result.stderr or result.stdout or f"{label} exited with code {result.returncode}"
+        errors.append(f"{label}: {message.strip()}")
+        if output_path.is_file():
+            output_path.unlink(missing_ok=True)
+            output_path.mkdir(parents=True, exist_ok=True)
+        if output_path.is_dir() and not (output_path / "ept.json").is_file():
+            shutil.rmtree(output_path, ignore_errors=True)
+            output_path.mkdir(parents=True, exist_ok=True)
+
+    raise RuntimeError("EPT conversion failed.\n\n" + "\n\n".join(errors))
+
+
+def process_pointcloud(input_las: str, output_dir: str, dataset_name: str) -> str:
+    """
+    Convert LAS/LAZ to Entwine Point Tile (EPT) output.
+    Old generated viewer HTML is intentionally not produced anymore.
+    """
+    safe_dataset_name = _ept_dataset_name(dataset_name)
     output_path = Path(output_dir)
     if output_path.is_dir():
         shutil.rmtree(output_path, ignore_errors=True)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    command = (
-        f'"{POTREE_CONVERTER_EXE}" "{input_las}" '
-        f'-o "{output_path}" --generate-page {safe_dataset_name}'
-    )
-    result = subprocess.run(command, capture_output=True, text=True, shell=True)
-    if result.returncode != 0:
-        message = result.stderr or result.stdout or f"PotreeConverter exited with code {result.returncode}"
-        raise RuntimeError(message)
+    prepared_input: Path | None = None
+    prepared_note = ""
+    repaired_input: Path | None = None
+    converter_label = ""
+    try:
+        input_path = Path(input_las)
+        prepared_input, prepared_note = _prepare_las_for_ept(
+            input_path,
+            output_path.parent / "_prepared_inputs",
+            safe_dataset_name,
+        )
+        converter_input = str(prepared_input or input_path)
+        try:
+            converter_label = _run_ept_converter_once(converter_input, output_path)
+            if prepared_note:
+                (output_path / ".crs_note.txt").write_text(prepared_note, encoding="utf-8")
+        except RuntimeError as exc:
+            original_error = str(exc)
+            repair_source = Path(converter_input)
+            can_repair = repair_source.suffix.lower() in {".las", ".laz"}
+            if not can_repair or not _ept_error_needs_las_bbox_repair(original_error):
+                raise
 
-    html_path = output_path / f"{safe_dataset_name}.html"
-    if not html_path.is_file():
-        found_html = sorted(output_path.glob("*.html"), key=lambda p: p.name.lower())
-        if found_html:
-            shutil.copyfile(found_html[0], html_path)
-    _brand_potree_viewer(output_path, safe_dataset_name)
+            repair_dir = output_path.parent / "_repaired_inputs"
+            repaired_input = repair_dir / f"{safe_dataset_name}.bbox-repaired.las"
+            _repair_las_bounding_box(repair_source, repaired_input)
+
+            if output_path.is_dir():
+                shutil.rmtree(output_path, ignore_errors=True)
+            output_path.mkdir(parents=True, exist_ok=True)
+            try:
+                converter_label = _run_ept_converter_once(str(repaired_input), output_path)
+                if prepared_note:
+                    (output_path / ".crs_note.txt").write_text(prepared_note, encoding="utf-8")
+                (output_path / ".repair_note.txt").write_text(
+                    "LAS bounding box header was repaired automatically before EPT conversion.",
+                    encoding="utf-8",
+                )
+            except RuntimeError as retry_exc:
+                raise RuntimeError(
+                    "Automatic LAS bounding-box repair was attempted, but EPT conversion still failed. "
+                    "Please verify or repair the source LAS file and upload it again.\n\n"
+                    f"Original converter error:\n{original_error}\n\nRetry converter error:\n{retry_exc}"
+                ) from retry_exc
+    finally:
+        if repaired_input is not None:
+            try:
+                repaired_input.unlink(missing_ok=True)
+                if repaired_input.parent.is_dir() and not any(repaired_input.parent.iterdir()):
+                    repaired_input.parent.rmdir()
+            except OSError:
+                pass
+        if prepared_input is not None:
+            try:
+                prepared_input.unlink(missing_ok=True)
+                if prepared_input.parent.is_dir() and not any(prepared_input.parent.iterdir()):
+                    prepared_input.parent.rmdir()
+            except OSError:
+                pass
+
+    if not (output_path / "ept.json").is_file():
+        raise RuntimeError("EPT conversion finished but ept.json was not created.")
+    (output_path / ".viewer_type.txt").write_text("ept", encoding="utf-8")
+    (output_path / ".converter.txt").write_text(converter_label or "EPT", encoding="utf-8")
+    return converter_label or "EPT"
 
 
-def process_pointcloud_potree_job(
+def process_pointcloud_ept_job(
     input_las: str,
     output_dir: str,
     dataset_name: str,
@@ -1247,7 +1472,7 @@ def process_pointcloud_potree_job(
     output_path = Path(output_dir)
     err_path = output_path / ".conversion_error.txt"
     try:
-        process_pointcloud(input_las, output_dir, dataset_name)
+        converter_label = process_pointcloud(input_las, output_dir, dataset_name)
         (output_path / ".source_name.txt").write_text(file_name, encoding="utf-8")
         if source_hash:
             (output_path / ".source_hash.txt").write_text(source_hash, encoding="utf-8")
@@ -1259,7 +1484,8 @@ def process_pointcloud_potree_job(
                 "file_name": file_name,
                 "status": "Completed",
                 "updated_at": _now_iso(),
-                "result_url": f"/data/projects/{project_id}/processed/{dataset_name}/{dataset_name}.html",
+                    "result_url": _ept_viewer_url("", project_id, dataset_name, file_name),
+                "converter": converter_label,
             },
         )
     except Exception as exc:
@@ -1269,6 +1495,14 @@ def process_pointcloud_potree_job(
             err_path.write_text(msg, encoding="utf-8")
         except OSError:
             pass
+        _write_portal_error_log(
+            "pointcloud_conversion",
+            msg,
+            project_id=project_id,
+            dataset_id=job_id,
+            file_name=file_name,
+            output_dir=str(output_path),
+        )
         _upsert_processing_job(
             project_id,
             {
@@ -2069,220 +2303,76 @@ def _safe_tileset_id(tileset_id: str) -> str:
     return tileset_id
 
 
-def _potree_dataset_name(name: str) -> str:
+def _ept_dataset_name(name: str) -> str:
     stem = Path(name).stem if Path(name).suffix else name
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-")
     return _safe_tileset_id(cleaned[:120] or "pointcloud")
 
 
-def _potree_html_url(base_url: str, project_id: str, dataset_name: str) -> str:
+def _safe_ept_folder_name(name: str) -> str:
+    cleaned = (name or "").strip()
+    if (
+        not cleaned
+        or cleaned in {".", ".."}
+        or "/" in cleaned
+        or "\\" in cleaned
+        or not re.fullmatch(r"[A-Za-z0-9._ -]{1,240}", cleaned)
+    ):
+        raise HTTPException(status_code=400, detail="Invalid EPT folder")
+    return cleaned
+
+
+def _project_processed_root(project_id: str) -> Path:
+    return Path(LOCAL_DATA_PATH) / "projects" / _safe_project_id(project_id) / "processed"
+
+
+def _project_pointcloud_root(project_id: str) -> Path:
+    return _project_processed_root(project_id) / "pointclouds"
+
+
+def _ept_dataset_dir(project_id: str, dataset_name: str) -> Path:
+    return _project_pointcloud_root(project_id) / _safe_ept_folder_name(dataset_name)
+
+
+def _legacy_ept_dataset_dir(project_id: str, dataset_name: str) -> Path:
+    return _project_processed_root(project_id) / _safe_ept_folder_name(dataset_name)
+
+
+def _ept_json_url(base_url: str, project_id: str, dataset_name: str) -> str:
     safe_project = _safe_project_id(project_id)
-    safe_dataset = _safe_tileset_id(dataset_name)
+    safe_dataset = _safe_ept_folder_name(dataset_name)
+    new_ept = _ept_dataset_dir(safe_project, safe_dataset) / "ept.json"
+    legacy_ept = _legacy_ept_dataset_dir(safe_project, safe_dataset) / "ept.json"
+    rel_path = (
+        f"processed/pointclouds/{safe_dataset}/ept.json"
+        if new_ept.is_file() or not legacy_ept.is_file()
+        else f"processed/{safe_dataset}/ept.json"
+    )
     return (
-        f"{base_url.rstrip('/')}/data/projects/{safe_project}/processed/"
-        f"{safe_dataset}/{safe_dataset}.html"
+        f"{base_url.rstrip('/')}/api/data/projects/{safe_project}/{quote(rel_path, safe='/')}"
     )
 
 
-def _brand_potree_viewer(output_path: Path, dataset_name: str) -> None:
-    """Apply Droid workspace branding and quick tools to a generated point-cloud viewer."""
-    safe_dataset_name = _potree_dataset_name(dataset_name)
-    html_path = output_path / f"{safe_dataset_name}.html"
-    if not html_path.is_file():
-        html_files = sorted(output_path.glob("*.html"), key=lambda p: p.name.lower())
-        if not html_files:
-            return
-        html_path = html_files[0]
-
-    droid_style = """
-<style id="droid-pointcloud-theme">
-  :root { color-scheme: dark; }
-  body { margin: 0; background: #06171b; font-family: Montserrat, Arial, sans-serif; }
-  #potree_render_area { background: radial-gradient(circle at 20% 10%, #123f49 0%, #06171b 48%, #020708 100%) !important; }
-  #potree_sidebar_container {
-    background: linear-gradient(180deg, rgba(14,62,73,0.96), rgba(4,19,24,0.96)) !important;
-    border-right: 1px solid rgba(148, 206, 214, 0.28) !important;
-    box-shadow: 14px 0 34px rgba(0,0,0,0.34);
-  }
-  #sidebar_header { min-height: 56px; padding: 14px 18px 8px; box-sizing: border-box; }
-  #sidebar_header::before {
-    content: "Droid 3D Point Cloud System";
-    display: block;
-    color: #f8fafc;
-    font-size: 13px;
-    font-weight: 800;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-  #potree_branding, #potree_languages, #menu_about, #menu_about + div {
-    display: none !important;
-  }
-  #potree_menu h3, .accordion > h3 {
-    background: rgba(255,255,255,0.08) !important;
-    border: 1px solid rgba(148,206,214,0.18) !important;
-    color: #e6fbff !important;
-    border-radius: 8px !important;
-    margin: 8px 10px 0 !important;
-    font-family: Montserrat, Arial, sans-serif !important;
-    letter-spacing: 0.04em;
-  }
-  #potree_menu h3 + div, .pv-menu-list {
-    background: rgba(3,16,20,0.42) !important;
-    color: #d7eef2 !important;
-    font-family: Montserrat, Arial, sans-serif !important;
-  }
-  .divider > span {
-    color: #8bd6df !important;
-    background: rgba(14,62,73,0.95) !important;
-  }
-  .ui-slider .ui-slider-range { background: #14b8a6 !important; }
-  .ui-slider .ui-slider-handle {
-    background: #ccfbf1 !important;
-    border: 2px solid #0e3e49 !important;
-    border-radius: 999px !important;
-  }
-  .droid-pointcloud-toolbar {
-    position: fixed;
-    top: 16px;
-    right: 16px;
-    z-index: 100000;
-    min-width: 270px;
-    padding: 14px;
-    border: 1px solid rgba(203,251,241,0.26);
-    border-radius: 14px;
-    background: linear-gradient(145deg, rgba(14,62,73,0.82), rgba(3,16,20,0.72));
-    box-shadow: 0 14px 34px rgba(0,0,0,0.38);
-    backdrop-filter: blur(12px);
-    color: #f8fafc;
-    font-family: Montserrat, Arial, sans-serif;
-  }
-  .droid-pointcloud-toolbar__title {
-    margin: 0 0 10px;
-    font-size: 13px;
-    font-weight: 800;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-  .droid-pointcloud-toolbar__actions {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
-  }
-  .droid-pointcloud-toolbar button {
-    min-height: 34px;
-    border: 1px solid rgba(203,251,241,0.3);
-    border-radius: 9px;
-    background: #0e3e49;
-    color: #f8fafc;
-    font: 800 12px Montserrat, Arial, sans-serif;
-    cursor: pointer;
-  }
-  .droid-pointcloud-toolbar button:hover {
-    background: #14b8a6;
-    color: #06272d;
-  }
-  .droid-pointcloud-toolbar__hint {
-    margin: 10px 0 0;
-    color: #b8dbe0;
-    font-size: 11px;
-    line-height: 1.35;
-  }
-</style>
-"""
-    droid_toolbar = """
-<div class="droid-pointcloud-toolbar" aria-label="Droid point cloud tools">
-  <p class="droid-pointcloud-toolbar__title">Droid 3D Point Cloud System</p>
-  <div class="droid-pointcloud-toolbar__actions">
-    <button type="button" onclick="window.droidStartCrossSection && window.droidStartCrossSection()">Cross Section</button>
-    <button type="button" onclick="window.droidStartClipBox && window.droidStartClipBox()">Clip Box</button>
-    <button type="button" onclick="window.droidClearSections && window.droidClearSections()">Clear Tools</button>
-    <button type="button" onclick="window.viewer && window.viewer.fitToScreen()">Fit View</button>
-  </div>
-  <p class="droid-pointcloud-toolbar__hint">Use Cross Section, then click across the cloud to draw a profile line.</p>
-</div>
-"""
-    droid_script = """
-<script id="droid-pointcloud-tools">
-  window.droidStartCrossSection = function () {
-    if (!window.viewer || !viewer.profileTool) return;
-    viewer.profileTool.startInsertion();
-  };
-  window.droidStartClipBox = function () {
-    if (!window.viewer || !viewer.volumeTool) return;
-    const volume = viewer.volumeTool.startInsertion({ clip: true });
-    if (window.Potree && Potree.ClipTask) {
-      viewer.setClipTask(Potree.ClipTask.SHOW_INSIDE);
-    }
-    return volume;
-  };
-  window.droidClearSections = function () {
-    if (!window.viewer || !viewer.scene) return;
-    const profiles = Array.from(viewer.scene.profiles || []);
-    profiles.forEach(profile => viewer.scene.removeProfile(profile));
-    const volumes = Array.from(viewer.scene.volumes || []).filter(volume => volume.clip);
-    volumes.forEach(volume => viewer.scene.removeVolume(volume));
-  };
-</script>
-"""
-
-    try:
-        html = html_path.read_text(encoding="utf-8", errors="replace")
-        html = re.sub(r"<title>.*?</title>", "<title>Droid 3D Point Cloud System</title>", html, flags=re.I | re.S)
-        if "droid-pointcloud-theme" not in html:
-            html = html.replace("</head>", f"{droid_style}\n</head>")
-        if "droid-pointcloud-toolbar" not in html:
-            html = html.replace("<body>", f"<body>\n{droid_toolbar}", 1)
-        if "droid-pointcloud-tools" not in html:
-            html = html.replace("</body>", f"{droid_script}\n</body>")
-        html = html.replace('viewer.setDescription("");', 'viewer.setDescription("Droid 3D Point Cloud System");')
-        html_path.write_text(html, encoding="utf-8")
-    except OSError:
-        pass
-
-    sidebar_path = output_path / "libs" / "potree" / "sidebar.html"
-    if sidebar_path.is_file():
-        try:
-            sidebar = sidebar_path.read_text(encoding="utf-8", errors="replace")
-            sidebar = re.sub(
-                r'<span id="potree_branding" class="potree_sidebar_brand">.*?</span>\s*<div id="potree_languages"[^>]*></div>',
-                '<span id="potree_branding" class="potree_sidebar_brand">Droid 3D Point Cloud System</span>',
-                sidebar,
-                flags=re.I | re.S,
-            )
-            sidebar = re.sub(
-                r'<h3 id="menu_about">.*?</h3>\s*<div>.*?</div>\s*(?=</div>\s*</div>)',
-                "",
-                sidebar,
-                flags=re.I | re.S,
-            )
-            sidebar_path.write_text(sidebar, encoding="utf-8")
-        except OSError:
-            pass
-
-    css_path = output_path / "libs" / "potree" / "potree.css"
-    if css_path.is_file():
-        try:
-            css = css_path.read_text(encoding="utf-8", errors="replace")
-            if "droid-pointcloud-css-overrides" not in css:
-                css += "\n\n/* droid-pointcloud-css-overrides */\n" + """
-:root {
-  --color-0: rgba(6, 23, 27, 1);
-  --color-1: rgba(102, 151, 160, 1);
-  --color-2: rgba(14, 62, 73, 1);
-  --color-3: rgba(20, 184, 166, 1);
-  --color-4: rgba(204, 251, 241, 1);
-  --bg-color: rgba(6, 23, 27, 1);
-  --bg-color-2: rgba(14, 62, 73, 1);
-  --bg-light-color: rgba(14, 62, 73, 0.86);
-  --bg-dark-color: rgba(3, 16, 20, 1);
-  --bg-hover-color: rgba(20, 184, 166, 0.25);
-  --font-color: #d7eef2;
-  --font-color-2: #f8fafc;
-}
-"""
-                css_path.write_text(css, encoding="utf-8")
-        except OSError:
-            pass
+def _ept_viewer_url(base_url: str, project_id: str, dataset_name: str, display_name: str = "") -> str:
+    safe_project = _safe_project_id(project_id)
+    safe_dataset = _safe_ept_folder_name(dataset_name)
+    new_ept = _ept_dataset_dir(safe_project, safe_dataset) / "ept.json"
+    legacy_ept = _legacy_ept_dataset_dir(safe_project, safe_dataset) / "ept.json"
+    rel_path = (
+        f"processed/pointclouds/{safe_dataset}/ept.json"
+        if new_ept.is_file() or not legacy_ept.is_file()
+        else f"processed/{safe_dataset}/ept.json"
+    )
+    ept_path = f"/api/data/projects/{safe_project}/{rel_path}"
+    query = urlencode(
+        {
+            "ept": ept_path,
+            "project": safe_project,
+            "dataset": safe_dataset,
+            "name": display_name or safe_dataset,
+        }
+    )
+    return f"/droid-ept-viewer/index.html?{query}"
 
 
 def _safe_dataset_id(dataset_id: str) -> str:
@@ -2706,15 +2796,22 @@ def _normalize_spatial_feature_geojson(raw: dict[str, object]) -> tuple[dict[str
     return feature, geometry_type
 
 
-def _spatial_row_to_dict(row: sqlite3.Row) -> dict[str, object]:
+def _can_manage_spatial_feature(user: dict[str, object], feature_owner_user_id: int) -> bool:
+    return str(user.get("role", "")).lower() == "admin" or int(user["id"]) == int(feature_owner_user_id)
+
+
+def _spatial_row_to_dict(row: sqlite3.Row, user: dict[str, object] | None = None) -> dict[str, object]:
     try:
         geojson_data = json.loads(str(row["geojson"]))
     except (TypeError, json.JSONDecodeError):
         geojson_data = {"type": "Feature", "properties": {}, "geometry": None}
+    owner_user_id = int(row["owner_user_id"])
+    can_manage = _can_manage_spatial_feature(user, owner_user_id) if user else True
     return {
         "id": str(row["id"]),
         "project_id": str(row["project_id"]),
         "layer_id": str(row["layer_id"]),
+        "owner_user_id": owner_user_id,
         "geometry_type": str(row["geometry_type"]),
         "geojson": geojson_data,
         "plot_id": str(row["plot_id"] or ""),
@@ -2723,6 +2820,8 @@ def _spatial_row_to_dict(row: sqlite3.Row) -> dict[str, object]:
         "fill_color": str(row["fill_color"] or "#f59e0b"),
         "stroke_color": str(row["stroke_color"] or "#f59e0b"),
         "source_type": str(row["source_type"] or ""),
+        "can_edit": can_manage,
+        "can_delete": can_manage,
         "created_at": str(row["created_at"] or ""),
         "updated_at": str(row["updated_at"] or ""),
     }
@@ -2783,6 +2882,7 @@ def _insert_spatial_feature(
     owner_name: str,
     structure_type: str,
     source_type: str,
+    user_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
     feature, geometry_type = _normalize_spatial_feature_geojson(geojson_data)
     clean_structure = normalize_structure_type(structure_type)
@@ -2830,7 +2930,7 @@ def _insert_spatial_feature(
         "SELECT * FROM spatial_features WHERE id = ?",
         (feature_id,),
     ).fetchone()
-    return _spatial_row_to_dict(row)
+    return _spatial_row_to_dict(row, user_context)
 
 
 def _is_valid_tile_dataset(folder: Path) -> bool:
@@ -2916,6 +3016,27 @@ def _read_raster_manual_metadata(file_path: Path, dataset_type: str = "") -> dic
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _write_portal_error_log(area: str, message: str, **extra: object) -> None:
+    try:
+        ERROR_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        clean_extra = {
+            key: value
+            for key, value in extra.items()
+            if value is not None and value != ""
+        }
+        record = {
+            "timestamp": _now_iso(),
+            "area": str(area or "portal")[:120],
+            "message": str(message or "Unknown error")[:12000],
+            **clean_extra,
+        }
+        log_path = ERROR_LOG_DIR / f"portal_errors_{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.log"
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except OSError:
+        pass
 
 
 HIDEABLE_USER_TABS = {"datasets", "map", "globe", "compare", "downloads"}
@@ -3180,6 +3301,14 @@ def verify_admin(request: Request) -> dict[str, object]:
     return _require_admin(request)
 
 
+def _require_upload_user(request: Request) -> dict[str, object]:
+    user = _require_user(request)
+    is_admin = str(user.get("role", "")).lower() == "admin"
+    if not is_admin and not bool(user.get("can_upload_data", False)):
+        raise HTTPException(status_code=403, detail="Upload access required")
+    return user
+
+
 def _client_ip_for_limit(request: Request) -> str:
     forwarded_for = request.headers.get("x-forwarded-for", "")
     forwarded_ip = forwarded_for.split(",", 1)[0].strip()
@@ -3252,89 +3381,118 @@ def pointcloud_status(
     project_id: str, request: Request, tileset_id: str | None = None
 ) -> dict[str, bool | str]:
     """
-    Poll conversion progress: Potree HTML appears when PotreeConverter finishes.
-    Older py3dtiles tileset.json outputs are still recognized for compatibility.
+    Poll conversion progress: ept.json appears when EPT conversion finishes.
     If conversion fails, .conversion_error.txt is written under the output folder.
     """
     user = _require_user(request)
     safe_id = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_id)
     base_url = str(request.base_url).rstrip("/")
-    potree_root = Path(LOCAL_DATA_PATH) / "projects" / safe_id / "processed"
-    legacy_root = Path(LOCAL_DATA_PATH) / "pointclouds" / safe_id
+    processed_root = _project_processed_root(safe_id)
+    ept_root = _project_pointcloud_root(safe_id)
+
+    def ept_search_roots() -> list[Path]:
+        roots = [ept_root, processed_root]
+        return [root for index, root in enumerate(roots) if root not in roots[:index]]
+
+    def source_name_for(folder: Path) -> str:
+        marker = folder / ".source_name.txt"
+        if marker.is_file():
+            try:
+                return marker.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                return ""
+        return ""
+
+    def add_candidate(folder: Path, bucket: list[Path]) -> None:
+        if folder not in bucket:
+            bucket.append(folder)
+
+    def job_match_candidates(lookup: str) -> list[str]:
+        normalized_lookup = lookup.strip().lower()
+        if not normalized_lookup:
+            return []
+        matches: list[str] = []
+        for job in _read_processing_jobs().get(safe_id, []):
+            job_id = str(job.get("job_id") or "").strip()
+            file_name = str(job.get("file_name") or "").strip()
+            if not job_id:
+                continue
+            if normalized_lookup in {job_id.lower(), file_name.lower(), Path(file_name).stem.lower()}:
+                matches.append(job_id)
+        return matches
 
     candidates: list[Path] = []
     if tileset_id:
-        safe_tileset_id = _safe_tileset_id(tileset_id)
-        candidates.append(potree_root / safe_tileset_id)
-        candidates.append(legacy_root / safe_tileset_id)
+        safe_tileset_id = _safe_ept_folder_name(tileset_id)
+        add_candidate(_ept_dataset_dir(safe_id, safe_tileset_id), candidates)
+        add_candidate(_legacy_ept_dataset_dir(safe_id, safe_tileset_id), candidates)
+        for job_id in job_match_candidates(tileset_id):
+            safe_job_id = _safe_ept_folder_name(job_id)
+            add_candidate(_ept_dataset_dir(safe_id, safe_job_id), candidates)
+            add_candidate(_legacy_ept_dataset_dir(safe_id, safe_job_id), candidates)
+        lookup = tileset_id.strip().lower()
+        lookup_stem = Path(lookup).stem
+        for root in ept_search_roots():
+            if root.is_dir():
+                for child in sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True):
+                    if child.name in {"ortho", "dtm", "dsm", "pointclouds"}:
+                        continue
+                    source_name = source_name_for(child).lower()
+                    if source_name and lookup in {source_name, Path(source_name).stem}:
+                        add_candidate(child, candidates)
+                    elif lookup_stem and child.name.lower().startswith(f"{lookup_stem}-"):
+                        add_candidate(child, candidates)
     else:
-        if potree_root.is_dir():
-            children = sorted(
-                [p for p in potree_root.iterdir() if p.is_dir()],
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            candidates.extend(children)
-        if (legacy_root / "tileset.json").is_file():
-            candidates.append(legacy_root)
-        if legacy_root.is_dir():
-            children = sorted(
-                [p for p in legacy_root.iterdir() if p.is_dir()],
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            candidates.extend(children)
+        for root in ept_search_roots():
+            if root.is_dir():
+                children = sorted(
+                    [p for p in root.iterdir() if p.is_dir() and p.name not in {"ortho", "dtm", "dsm", "pointclouds"}],
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                for child in children:
+                    add_candidate(child, candidates)
 
     for candidate in candidates:
-        potree_html = candidate / f"{candidate.name}.html"
-        if not potree_html.is_file():
-            html_candidates = sorted(candidate.glob("*.html"), key=lambda p: p.name.lower())
-            potree_html = html_candidates[0] if html_candidates else potree_html
-        tileset = candidate / "tileset.json"
+        ept_json = candidate / "ept.json"
+        if ept_json.is_file():
+            source_name = source_name_for(candidate)
+            return {
+                "ready": True,
+                "failed": False,
+                "tileset_url": _ept_viewer_url(base_url, safe_id, candidate.name, source_name),
+                "ept_url": _ept_json_url(base_url, safe_id, candidate.name),
+                "viewer_type": "ept",
+            }
+
+    for candidate in candidates:
+        ept_json = candidate / "ept.json"
         err_file = candidate / ".conversion_error.txt"
         if err_file.is_file():
             try:
                 msg = err_file.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 msg = "Unknown conversion error"
-            if potree_root in candidate.parents or candidate == potree_root:
-                url = _potree_html_url(base_url, safe_id, candidate.name)
-            else:
-                suffix = f"/{candidate.name}" if candidate.resolve() != legacy_root.resolve() else ""
-                url = f"{base_url}/data/pointclouds/{safe_id}{suffix}/tileset.json"
             return {
                 "ready": False,
                 "failed": True,
                 "error": msg[:8000],
-                "tileset_url": url,
-            }
-        if potree_html.is_file():
-            rel = potree_html.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
-            return {
-                "ready": True,
-                "failed": False,
-                "tileset_url": f"{base_url}/data/{rel}",
-            }
-        if tileset.is_file():
-            suffix = (
-                f"/{candidate.name}" if candidate.resolve() != legacy_root.resolve() else ""
-            )
-            return {
-                "ready": True,
-                "failed": False,
-                "tileset_url": f"{base_url}/data/pointclouds/{safe_id}{suffix}/tileset.json",
+                "tileset_url": _ept_viewer_url(base_url, safe_id, candidate.name),
+                "ept_url": _ept_json_url(base_url, safe_id, candidate.name),
+                "viewer_type": "ept",
             }
 
-    pending_suffix = f"/{_safe_tileset_id(tileset_id)}" if tileset_id else ""
+    pending_suffix = f"/{quote(_safe_ept_folder_name(tileset_id), safe='')}" if tileset_id else ""
     return {
         "ready": False,
         "failed": False,
         "tileset_url": (
-            _potree_html_url(base_url, safe_id, _safe_tileset_id(tileset_id))
+            _ept_viewer_url(base_url, safe_id, _safe_ept_folder_name(tileset_id))
             if tileset_id
             else f"{base_url}/data/projects/{safe_id}/processed{pending_suffix}/"
         ),
+        "viewer_type": "ept",
     }
 
 
@@ -4347,7 +4505,7 @@ def get_spatial_layers(project_id: str, request: Request) -> dict[str, list[dict
 
     features_by_layer: dict[str, list[dict[str, object]]] = {}
     for row in feature_rows:
-        feature = _spatial_row_to_dict(row)
+        feature = _spatial_row_to_dict(row, user)
         features_by_layer.setdefault(str(feature["layer_id"]), []).append(feature)
 
     layers: list[dict[str, object]] = []
@@ -4396,6 +4554,7 @@ def create_spatial_feature(
             (payload.owner_name or "").strip(),
             payload.structure_type,
             source_type,
+            user,
         )
         connection.execute(
             "UPDATE spatial_layers SET updated_at = ? WHERE id = ?",
@@ -4423,8 +4582,10 @@ def update_spatial_feature(
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Spatial feature not found")
+        if not _can_manage_spatial_feature(user, int(row["owner_user_id"])):
+            raise HTTPException(status_code=403, detail="Only the creator or an admin can edit this spatial feature")
 
-        current = _spatial_row_to_dict(row)
+        current = _spatial_row_to_dict(row, user)
         geojson_data = payload.geojson if payload.geojson is not None else current["geojson"]
         feature, geometry_type = _normalize_spatial_feature_geojson(geojson_data)
         plot_id = (payload.plot_id if payload.plot_id is not None else str(current["plot_id"])).strip()
@@ -4474,7 +4635,7 @@ def update_spatial_feature(
             "SELECT * FROM spatial_features WHERE id = ?",
             (safe_feature_id,),
         ).fetchone()
-    return {"feature": _spatial_row_to_dict(updated)}
+    return {"feature": _spatial_row_to_dict(updated, user)}
 
 
 @app.delete("/api/projects/{project_id}/spatial-features/{feature_id}")
@@ -4485,11 +4646,13 @@ def delete_spatial_feature(project_id: str, feature_id: str, request: Request) -
     _ensure_project_owner(int(user["id"]), safe_project_id)
     with get_db_connection() as connection:
         row = connection.execute(
-            "SELECT layer_id FROM spatial_features WHERE id = ? AND project_id = ?",
+            "SELECT layer_id, owner_user_id FROM spatial_features WHERE id = ? AND project_id = ?",
             (safe_feature_id, safe_project_id),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Spatial feature not found")
+        if not _can_manage_spatial_feature(user, int(row["owner_user_id"])):
+            raise HTTPException(status_code=403, detail="Only the creator or an admin can delete this spatial feature")
         connection.execute(
             "DELETE FROM spatial_features WHERE id = ? AND project_id = ?",
             (safe_feature_id, safe_project_id),
@@ -4510,11 +4673,13 @@ def delete_spatial_layer(project_id: str, layer_id: str, request: Request) -> di
     _ensure_project_owner(int(user["id"]), safe_project_id)
     with get_db_connection() as connection:
         row = connection.execute(
-            "SELECT id FROM spatial_layers WHERE id = ? AND project_id = ?",
+            "SELECT id, owner_user_id FROM spatial_layers WHERE id = ? AND project_id = ?",
             (safe_layer_id, safe_project_id),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Spatial layer not found")
+        if not _can_manage_spatial_feature(user, int(row["owner_user_id"])):
+            raise HTTPException(status_code=403, detail="Only the creator or an admin can delete this spatial layer")
         connection.execute(
             "DELETE FROM spatial_features WHERE layer_id = ? AND project_id = ?",
             (safe_layer_id, safe_project_id),
@@ -4580,6 +4745,7 @@ async def import_spatial_layer(
                 "",
                 "Unassigned",
                 source_type,
+                user,
             )
             for feature in features
         ]
@@ -4624,30 +4790,13 @@ async def run_flood_engine() -> dict[str, str]:
 
 @app.post("/api/process-pointcloud")
 async def process_pointcloud_request(payload: PointCloudProcessPayload, request: Request) -> dict[str, str]:
-    user = verify_admin(request)
-    _ensure_project_owner(int(user["id"]), _safe_project_id(payload.project_id))
-    # Simulate running py3dtiles conversion:
-    # input .las/.laz -> output directory containing tileset.json and .pnts files.
-    await asyncio.sleep(5)
-
-    output_dir = Path(LOCAL_DATA_PATH) / "pointclouds" / payload.project_id
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Mock output so frontend gets a resolvable tileset URL in development.
-    tileset_path = output_dir / "tileset.json"
-    if not tileset_path.exists():
-        tileset_path.write_text('{"asset":{"version":"1.0"}}', encoding="utf-8")
-
-    tileset_url = (
-        f"{str(request.base_url).rstrip('/')}/data/pointclouds/"
-        f"{payload.project_id}/tileset.json"
+    user = _require_upload_user(request)
+    safe_project_id = _safe_project_id(payload.project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    raise HTTPException(
+        status_code=410,
+        detail="This legacy point cloud processing endpoint has been replaced by chunk upload + EPT conversion.",
     )
-
-    return {
-        "status": "success",
-        "message": f"Point cloud processed for {payload.filename}.",
-        "tileset_url": tileset_url,
-    }
 
 
 @app.post("/api/upload-chunk")
@@ -4663,7 +4812,7 @@ async def upload_chunk(
     Accept one binary chunk of a larger LAS/LAZ upload.
     Chunks are written to a temp folder under LOCAL_DATA_PATH/uploads/chunks/.
     """
-    user = verify_admin(request)
+    user = _require_upload_user(request)
     _enforce_rate_limit(request, "upload")
     safe_project = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project)
@@ -4712,7 +4861,7 @@ async def complete_upload(
     Merge chunk files in order into a single LAS/LAZ under projects/<id>/raw/.
     Uses streaming copy + per-chunk delete to limit peak disk and avoid RAM spikes.
     """
-    user = verify_admin(request)
+    user = _require_upload_user(request)
     _enforce_rate_limit(request, "upload")
     safe_project_id = _safe_project_id(payload.project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
@@ -4777,8 +4926,8 @@ async def complete_upload(
     else:
         stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(safe_name).stem).strip("-") or "cloud"
         reused_tileset_id = f"{stem[:40]}-{content_hash[:12]}"
-    potree_dataset_name = _potree_dataset_name(reused_tileset_id)
-    output_dir = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "processed" / potree_dataset_name
+    ept_dataset_name = _ept_dataset_name(reused_tileset_id)
+    output_dir = _ept_dataset_dir(safe_project_id, ept_dataset_name)
     final_path = out_path
     hash_marker = output_dir / ".source_hash.txt"
     existing_hash = None
@@ -4788,29 +4937,30 @@ async def complete_upload(
     except OSError:
         existing_hash = None
 
-    potree_html = output_dir / f"{potree_dataset_name}.html"
-    if potree_html.is_file() and existing_hash == content_hash:
+    ept_json = output_dir / "ept.json"
+    if ept_json.is_file() and existing_hash == content_hash:
         _upsert_processing_job(
             safe_project_id,
             {
-                "job_id": potree_dataset_name,
+                "job_id": ept_dataset_name,
                 "kind": "pointcloud",
                 "file_name": safe_name,
                 "status": "Completed",
                 "updated_at": _now_iso(),
-                "result_url": f"/data/projects/{safe_project_id}/processed/{potree_dataset_name}/{potree_dataset_name}.html",
+                "result_url": _ept_viewer_url("", safe_project_id, ept_dataset_name, safe_name),
             },
         )
         return {
             "status": "success",
             "message": (
                 f"Merged {total} chunks into {safe_name}. "
-                "Found existing Droid point cloud viewer for same file content; reusing project viewer."
+                "Found existing Droid EPT point cloud viewer for same file content; reusing project viewer."
             ),
             "tileset_url": "PENDING",
             "project_id": safe_project_id,
-            "target_tileset_url": _potree_html_url(str(request.base_url), safe_project_id, potree_dataset_name),
-            "tileset_id": potree_dataset_name,
+            "target_tileset_url": _ept_viewer_url(str(request.base_url), safe_project_id, ept_dataset_name, safe_name),
+            "ept_url": _ept_json_url(str(request.base_url), safe_project_id, ept_dataset_name),
+            "tileset_id": ept_dataset_name,
         }
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -4823,7 +4973,7 @@ async def complete_upload(
     _upsert_processing_job(
         safe_project_id,
             {
-                "job_id": potree_dataset_name,
+                "job_id": ept_dataset_name,
                 "kind": "pointcloud",
                 "file_name": safe_name,
                 "status": "Processing",
@@ -4832,23 +4982,24 @@ async def complete_upload(
     )
     _invalidate_project_files_cache(safe_project_id)
     background_tasks.add_task(
-        process_pointcloud_potree_job,
+        process_pointcloud_ept_job,
         str(final_path),
         str(output_dir),
-        potree_dataset_name,
+        ept_dataset_name,
         safe_project_id,
-        potree_dataset_name,
+        ept_dataset_name,
         safe_name,
         content_hash,
     )
 
     return {
         "status": "success",
-        "message": "File merged. Droid 3D point cloud processing started in background.",
+        "message": "File merged. Droid EPT point cloud processing started in background.",
         "tileset_url": "PENDING",
         "project_id": safe_project_id,
-        "target_tileset_url": _potree_html_url(str(request.base_url), safe_project_id, potree_dataset_name),
-        "tileset_id": potree_dataset_name,
+        "target_tileset_url": _ept_viewer_url(str(request.base_url), safe_project_id, ept_dataset_name, safe_name),
+        "ept_url": _ept_json_url(str(request.base_url), safe_project_id, ept_dataset_name),
+        "tileset_id": ept_dataset_name,
     }
 
 
@@ -4861,7 +5012,7 @@ async def upload_dataset_chunk(
     chunkIndex: int = Form(...),
     totalChunks: int = Form(...),
 ) -> dict[str, str]:
-    user = verify_admin(request)
+    user = _require_upload_user(request)
     safe_project = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project)
     safe_name = _safe_dataset_upload_basename(filename)
@@ -4894,7 +5045,7 @@ async def complete_dataset_upload(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> ProcessDatasetOut:
-    user = verify_admin(request)
+    user = _require_upload_user(request)
     _enforce_rate_limit(request, "upload")
     safe_project_id = _safe_project_id(payload.project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
@@ -5038,7 +5189,7 @@ async def process_dataset(
     created_at: str = Form(""),
     epsg: str = Form(""),
 ) -> ProcessDatasetOut:
-    user = verify_admin(request)
+    user = _require_upload_user(request)
     _enforce_rate_limit(request, "upload")
     safe_project_id = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
@@ -5445,7 +5596,7 @@ async def upload_dataset(
     file: UploadFile = File(...),
     project_id: str = Form(...),
 ) -> dict[str, str]:
-    verify_admin(request)
+    _require_upload_user(request)
     await process_dataset(request, background_tasks, file, project_id)
     return {"status": "processing"}
 
@@ -5669,7 +5820,7 @@ async def dataset_metadata(
     file: UploadFile = File(...),
     project_id: str = Form(...),
 ) -> dict[str, str]:
-    user = verify_admin(request)
+    user = _require_upload_user(request)
     _enforce_rate_limit(request, "upload")
     safe_project_id = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
@@ -6736,9 +6887,28 @@ def admin_delete_dataset_by_name(
 ) -> dict[str, str | int]:
     safe_project_id = _safe_project_id(project_id)
     safe_dataset_name = os.path.basename(dataset_name.replace("\\", "/").strip().strip("/"))
-    dataset_id, st = _admin_dataset_status_by_key(safe_project_id, safe_dataset_name)
-    removed = _delete_dataset_artifacts(safe_project_id, dataset_id, st)
-    return {"status": "success", "dataset_id": dataset_id, "removed_paths": removed}
+    try:
+        dataset_id, st = _admin_dataset_status_by_key(safe_project_id, safe_dataset_name)
+        removed = _delete_dataset_artifacts(safe_project_id, dataset_id, st)
+        return {"status": "success", "dataset_id": dataset_id, "removed_paths": removed}
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+
+    local_root = Path(LOCAL_DATA_PATH).resolve()
+    removed = 0
+    for candidate in (
+        Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "processed" / safe_dataset_name,
+        Path(LOCAL_DATA_PATH) / "pointclouds" / safe_project_id / safe_dataset_name,
+    ):
+        resolved = candidate.resolve()
+        if resolved.exists() and local_root in resolved.parents:
+            removed += _safe_remove_dataset_path(resolved)
+    if removed == 0:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    _remove_processing_job(safe_project_id, safe_dataset_name)
+    _invalidate_project_files_cache(safe_project_id)
+    return {"status": "success", "dataset_id": safe_dataset_name, "removed_paths": removed}
 
 
 @app.get("/api/analysis/{project_id}/elevation")
@@ -7001,30 +7171,22 @@ def _serve_project_data_file(project_id: str, file_path: str, request: Request) 
     safe_project_id = _safe_project_id(project_id)
     _ensure_project_file_access(request, safe_project_id)
     target_path = _safe_project_file_response_path(safe_project_id, file_path)
+    cleaned_request_path = file_path.replace("\\", "/").lower().lstrip("/")
+    if cleaned_request_path.startswith("raw/") and target_path.suffix.lower() in {".las", ".laz"}:
+        raise HTTPException(status_code=404, detail="Raw point cloud download is not available")
     response = FileResponse(str(target_path))
-    cleaned_path = file_path.replace("\\", "/").lower()
-    if cleaned_path.startswith("processed/"):
+    if cleaned_request_path.startswith("processed/"):
         response.headers["Cache-Control"] = "private, max-age=86400"
     return response
 
 
 def _serve_pointcloud_data_file(project_id: str, file_path: str, request: Request) -> FileResponse:
-    safe_project_id = _safe_project_id(project_id)
-    _ensure_project_file_access(request, safe_project_id)
-    base_dir = (Path(LOCAL_DATA_PATH) / "pointclouds" / safe_project_id).resolve()
-    cleaned_path = file_path.replace("\\", "/").lstrip("/")
-    if "\x00" in cleaned_path:
-        raise HTTPException(status_code=400, detail="Invalid file path")
-    target_path = (base_dir / cleaned_path).resolve()
-    base_abs = os.path.abspath(str(base_dir))
-    target_abs = os.path.abspath(str(target_path))
-    if target_abs != base_abs and not target_abs.startswith(base_abs + os.sep):
-        raise HTTPException(status_code=400, detail="Invalid file path")
-    if not target_path.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
-    response = FileResponse(str(target_path))
-    response.headers["Cache-Control"] = "private, max-age=86400"
-    return response
+    _safe_project_id(project_id)
+    _require_user(request)
+    raise HTTPException(
+        status_code=410,
+        detail="Legacy point cloud file serving is disabled. Use the Droid EPT viewer endpoint.",
+    )
 
 
 @app.get("/api/data/projects/{project_id}/{file_path:path}")
@@ -7052,6 +7214,11 @@ def secure_legacy_tiles_file(file_path: str, request: Request) -> FileResponse:
     _require_user(request)
     cleaned_path = file_path.replace("\\", "/").lstrip("/")
     parts = [part for part in cleaned_path.split("/") if part]
+    if parts and parts[0] == "pointclouds":
+        raise HTTPException(
+            status_code=410,
+            detail="Legacy point cloud tiles are disabled. Use the Droid EPT viewer endpoint.",
+        )
     if len(parts) >= 2 and parts[0] in {"projects", "pointclouds"}:
         _ensure_project_file_access(request, _safe_project_id(parts[1]))
     if "\x00" in cleaned_path:
@@ -7082,6 +7249,8 @@ def _secure_dataset_file(project_id: str, dataset_id: str, report_only: bool = F
     rel = str(st.get("report_rel_path") or st.get("raw_rel_path") or "").strip()
     if not rel:
         raise HTTPException(status_code=404, detail="File not found")
+    if not report_only and str(st.get("dataset_type") or "").lower() == "pointcloud":
+        raise HTTPException(status_code=404, detail="Raw point cloud download is not available. Open the processed 3D viewer instead.")
     if report_only and str(st.get("dataset_type") or "").lower() != "reports":
         raise HTTPException(status_code=404, detail="Report not found")
     if ".." in rel or rel.startswith("/") or rel.startswith("\\"):
@@ -7152,6 +7321,30 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
     listed_rel_paths: set[str] = set()
 
     raw_dir_proj, processed_root = get_project_dirs(safe_project_id)
+    ready_pointcloud_names: set[str] = set()
+    if processed_root.is_dir():
+        def add_ready_pointcloud_name_keys(name: str) -> None:
+            stem = Path(str(name or "").strip()).stem.lower()
+            if not stem:
+                return
+            ready_pointcloud_names.add(stem)
+            base_without_hash = re.sub(r"-[a-f0-9]{8,}$", "", stem, flags=re.IGNORECASE)
+            if base_without_hash:
+                ready_pointcloud_names.add(base_without_hash)
+
+        for ready_ept in [*processed_root.glob("pointclouds/*/ept.json"), *processed_root.glob("*/ept.json")]:
+            if not ready_ept.is_file() or (ready_ept.parent / ".conversion_error.txt").is_file():
+                continue
+            marker = ready_ept.parent / ".source_name.txt"
+            source_name = ""
+            if marker.is_file():
+                try:
+                    source_name = marker.read_text(encoding="utf-8").strip()
+                except OSError:
+                    source_name = ""
+            add_ready_pointcloud_name_keys(source_name)
+            add_ready_pointcloud_name_keys(ready_ept.parent.name)
+
     jobs_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "_dataset_jobs"
     raw_meta_by_rel: dict[str, dict[str, str]] = {}
     if jobs_root.is_dir():
@@ -7180,10 +7373,17 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
             display_name = str(meta.get("dataset_name") or file_path.name.replace(f"{safe_project_id}__", "", 1))
             dataset_type = str(meta.get("dataset_type") or _infer_dataset_type(display_name))
             is_report = dataset_type == "reports" or file_path.suffix.lower() == ".pdf"
+            is_pointcloud_raw = dataset_type == "pointcloud" or file_path.suffix.lower() in {".las", ".laz"}
+            if is_pointcloud_raw and Path(display_name).stem.lower() in ready_pointcloud_names:
+                listed_rel_paths.add(rel_path)
+                continue
             dataset_id_for_file = str(meta.get("dataset_id") or "")
             if is_report and dataset_id_for_file:
                 file_url = f"{base_url}/api/projects/{safe_project_id}/reports/{dataset_id_for_file}/view"
                 download_url = f"{base_url}/api/projects/{safe_project_id}/reports/{dataset_id_for_file}/download"
+            elif is_pointcloud_raw:
+                file_url = ""
+                download_url = ""
             elif dataset_id_for_file:
                 file_url = f"{base_url}/api/projects/{safe_project_id}/datasets/{dataset_id_for_file}/raw/download"
                 download_url = file_url
@@ -7437,31 +7637,39 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
             )
             listed_rel_paths.add(rel)
 
-        for potree_html in sorted(processed_root.glob("*/*.html"), key=lambda p: p.parent.name.lower()):
-            rel = potree_html.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
-            rel_base = potree_html.parent.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+        ept_json_paths = list(processed_root.glob("pointclouds/*/ept.json")) + list(processed_root.glob("*/ept.json"))
+        for ept_json in sorted({p.resolve() for p in ept_json_paths}, key=lambda p: (p.parent.stat().st_mtime, p.parent.name.lower()), reverse=True):
+            rel = ept_json.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            rel_base = ept_json.parent.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
             if rel in listed_rel_paths or rel_base in listed_rel_paths:
                 continue
+            if (ept_json.parent / ".conversion_error.txt").is_file():
+                listed_rel_paths.add(rel)
+                listed_rel_paths.add(rel_base)
+                continue
             source_name = ""
-            source_marker = potree_html.parent / ".source_name.txt"
+            source_marker = ept_json.parent / ".source_name.txt"
             if source_marker.is_file():
                 try:
                     source_name = source_marker.read_text(encoding="utf-8").strip()
                 except OSError:
                     source_name = ""
-            display_name = source_name or f"{potree_html.parent.name}.las"
+            display_name = source_name or f"{ept_json.parent.name}.las"
+            viewer_url = _ept_viewer_url(base_url, safe_project_id, ept_json.parent.name, display_name)
             files.append(
                 {
                     "name": display_name,
-                    "kind": "Droid 3D Point Cloud",
+                    "kind": "Droid EPT Point Cloud",
                     "type": "PointCloud",
-                    "size_bytes": str(get_dir_size(potree_html.parent)),
+                    "size_bytes": str(get_dir_size(ept_json.parent)),
                     "status": jobs_by_file.get(display_name, {}).get("status", "WEB-READY"),
-                    "file_url": f"{base_url}/data/{rel}",
-                    "layer_url": f"{base_url}/data/{rel}",
-                    "file_path": str(potree_html.resolve()),
+                    "file_url": viewer_url,
+                    "layer_url": viewer_url,
+                    "ept_url": _ept_json_url(base_url, safe_project_id, ept_json.parent.name),
+                    "viewer_type": "ept",
+                    "file_path": str(ept_json.resolve()),
                     "rel_path": rel,
-                    "dataset_id": potree_html.parent.name,
+                    "dataset_id": ept_json.parent.name,
                     "dataset_type": "pointcloud",
                     "month": "",
                     "raw_rel_path": "",
@@ -7567,30 +7775,6 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                 },
             )
             listed_rel_paths.add(rel_base)
-
-    pointcloud_root = Path(LOCAL_DATA_PATH) / "pointclouds" / safe_project_id
-    if pointcloud_root.is_dir():
-        for tileset in sorted(pointcloud_root.rglob("tileset.json"), key=lambda p: p.parent.name.lower()):
-            rel = tileset.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
-            file_name = f"{tileset.parent.name}.las"
-            files.append(
-                {
-                    "name": file_name,
-                    "kind": "Web-Optimized Data",
-                    "type": "pointcloud",
-                    "size_bytes": str(get_dir_size(tileset.parent)),
-                    "status": jobs_by_file.get(file_name, {}).get("status", "Web-Ready"),
-                    "file_url": f"{base_url}/data/{rel}",
-                    "layer_url": f"{base_url}/data/{rel}",
-                    "file_path": str(tileset.resolve()),
-                    "rel_path": rel,
-                    "dataset_id": tileset.parent.name,
-                    "dataset_type": "pointcloud",
-                    "month": "",
-                    "raw_rel_path": "",
-                },
-            )
-            listed_rel_paths.add(rel)
 
     reports_dir = Path(LOCAL_DATA_PATH) / "reports" / safe_project_id
     if reports_dir.is_dir():
@@ -7728,3 +7912,44 @@ def api_version() -> dict[str, str]:
         "version": PORTAL_VERSION,
         "dev_mode": "true" if str(os.getenv("DEV_MODE", "")).strip().lower() in {"1", "true", "yes", "on"} else "false",
     }
+
+
+@app.post("/api/client-error-log")
+def client_error_log(payload: ClientErrorLogPayload, request: Request) -> dict[str, str]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(payload.project_id) if payload.project_id else ""
+    safe_dataset_id = re.sub(r"[^A-Za-z0-9._-]+", "-", payload.dataset_id).strip("-")[:240] if payload.dataset_id else ""
+    _write_portal_error_log(
+        payload.area,
+        payload.message,
+        url=payload.url[:1000],
+        stack=payload.stack[:6000],
+        project_id=safe_project_id,
+        dataset_id=safe_dataset_id,
+        user_id=int(user["id"]),
+        user_email=str(user.get("email") or ""),
+        extra=payload.extra or {},
+    )
+    if payload.area == "ept_viewer" and safe_project_id and safe_dataset_id:
+        output_path = (Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "processed" / safe_dataset_id).resolve()
+        local_root = Path(LOCAL_DATA_PATH).resolve()
+        if output_path.exists() and local_root in output_path.parents:
+            marker = output_path / ".conversion_error.txt"
+            marker.write_text(
+                "EPT viewer runtime error after conversion. "
+                f"{payload.message}\n{payload.stack[:6000]}",
+                encoding="utf-8",
+            )
+            _upsert_processing_job(
+                safe_project_id,
+                {
+                    "job_id": safe_dataset_id,
+                    "kind": "pointcloud",
+                    "file_name": safe_dataset_id,
+                    "status": "Failed",
+                    "error": payload.message[:8000],
+                    "updated_at": _now_iso(),
+                },
+            )
+            _invalidate_project_files_cache(safe_project_id)
+    return {"status": "logged"}

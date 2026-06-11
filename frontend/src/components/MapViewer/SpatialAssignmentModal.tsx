@@ -37,9 +37,12 @@ export function SpatialAssignmentModal({
   }, [feature])
 
   if (!feature) return null
+  const canEdit = feature.can_edit !== false
+  const canDelete = feature.can_delete !== false
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (!canEdit) return
     onSave({
       plot_id: plotId.trim(),
       owner_name: ownerName.trim(),
@@ -75,6 +78,7 @@ export function SpatialAssignmentModal({
               value={plotId}
               onChange={(event) => setPlotId(event.target.value)}
               placeholder="Enter plot ID"
+              disabled={!canEdit || saving}
             />
           </label>
           <label>
@@ -83,6 +87,7 @@ export function SpatialAssignmentModal({
               value={ownerName}
               onChange={(event) => setOwnerName(event.target.value)}
               placeholder="Enter owner name"
+              disabled={!canEdit || saving}
             />
           </label>
           <label>
@@ -90,6 +95,7 @@ export function SpatialAssignmentModal({
             <select
               value={structureType}
               onChange={(event) => setStructureType(normalizeStructureType(event.target.value))}
+              disabled={!canEdit || saving}
             >
               {STRUCTURE_TYPES.map((option) => (
                 <option key={option} value={option}>
@@ -101,22 +107,29 @@ export function SpatialAssignmentModal({
           <p className="spatial-modal__meta">
             Source: {feature.source_type.replace('-', ' ')} - Geometry: {feature.geometry_type}
           </p>
+          {!canEdit ? (
+            <p className="spatial-modal__permission">
+              This shape was created by an admin or another user. You can view it, but only the creator or an admin can edit/delete it.
+            </p>
+          ) : null}
         </div>
         <footer className="spatial-modal__actions">
-          <button
-            type="button"
-            className="spatial-modal__danger"
-            onClick={() => onDelete(feature)}
-            disabled={saving}
-          >
-            <i className="fa-solid fa-trash" aria-hidden />
-            Delete
-          </button>
+          {canDelete ? (
+            <button
+              type="button"
+              className="spatial-modal__danger"
+              onClick={() => onDelete(feature)}
+              disabled={saving}
+            >
+              <i className="fa-solid fa-trash" aria-hidden />
+              Delete
+            </button>
+          ) : null}
           <span className="spatial-modal__spacer" />
           <button type="button" className="spatial-modal__ghost" onClick={onClose} disabled={saving}>
             Cancel
           </button>
-          <button type="submit" className="spatial-modal__save" disabled={saving}>
+          <button type="submit" className="spatial-modal__save" disabled={saving || !canEdit}>
             {saving ? 'Saving...' : 'Save Assignment'}
           </button>
         </footer>

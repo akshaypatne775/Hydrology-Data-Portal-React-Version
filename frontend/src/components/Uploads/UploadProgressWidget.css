@@ -3,6 +3,7 @@
   right: 1rem;
   bottom: 1rem;
   width: min(340px, calc(100vw - 2rem));
+  max-height: min(420px, calc(100vh - 2rem));
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.96);
   border: 1px solid rgba(14, 62, 73, 0.22);
@@ -24,6 +25,9 @@
 .upw-list {
   display: grid;
   gap: 0.65rem;
+  max-height: min(340px, calc(100vh - 5.5rem));
+  overflow-y: auto;
+  padding-right: 0.15rem;
 }
 
 .upw-item {
@@ -41,6 +45,10 @@
 }
 
 .upw-item__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: #0f172a;
   font-size: 0.75rem;
   font-weight: 700;
@@ -72,8 +80,23 @@
   margin: 0.45rem 0 0;
   color: #475569;
   font-size: 0.7rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .upw-status--error {
   color: #b91c1c;
+  max-height: min(9rem, 32vh);
+  overflow-y: auto;
+  white-space: normal;
+  padding-right: 0.2rem;
+}
+
+@media (max-width: 640px) {
+  .upw-root {
+    right: 0.65rem;
+    bottom: 0.65rem;
+    width: calc(100vw - 1.3rem);
+    max-height: min(380px, calc(100vh - 1.3rem));
+  }
 }

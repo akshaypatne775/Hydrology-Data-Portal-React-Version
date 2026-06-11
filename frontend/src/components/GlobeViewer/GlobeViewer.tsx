@@ -138,7 +138,7 @@ async function waitForPointCloudTileset(tilesetUrl: string): Promise<void> {
   }
 
   throw new Error(
-    'Timed out waiting for tileset.json. Ensure py3dtiles is installed on the backend and conversion completed.',
+    'Timed out waiting for tileset.json. Ensure the 3D tiles conversion completed on the backend.',
   )
 }
 
@@ -187,6 +187,7 @@ async function fetchImageryTileMeta(tileUrl: string): Promise<{ zoom_max?: numbe
 
 function projectFileToViewerOption(file: ProjectFile): ViewerDataOption | null {
   if (!file.layer_url) return null
+  if (/\.(las|laz)(?:[?#].*)?$/i.test(file.layer_url.trim())) return null
   const fileType = String(file.type).toLowerCase()
   if (file.type === '3DModel') {
     return {
@@ -844,7 +845,7 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
           .map(projectFileToViewerOption)
           .filter((item): item is ViewerDataOption => Boolean(item))
         const storedPointClouds = uploadedTilesets
-          .filter((item) => !item.url.toLowerCase().endsWith('.html'))
+          .filter((item) => !item.url.toLowerCase().endsWith('.html') && !/\.(las|laz)(?:[?#].*)?$/i.test(item.url.trim()))
           .map((item) => ({
             id: `stored-pointcloud:${item.url}`,
             name: item.label,
@@ -857,7 +858,8 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
               layer.projectId === projectId &&
               (layer.layerType === '3DModel' || String(layer.layerType).toLowerCase() === 'pointcloud') &&
               layer.url &&
-              !layer.url.toLowerCase().endsWith('.html'),
+              !layer.url.toLowerCase().endsWith('.html') &&
+              !/\.(las|laz)(?:[?#].*)?$/i.test(layer.url.trim()),
           )
           .map((layer) => ({
             id: `active:${layer.id}`,
