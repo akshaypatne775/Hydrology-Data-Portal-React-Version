@@ -44,6 +44,29 @@ export default function PointCloudViewer({ url, name = 'Point Cloud', projectId 
             opacity: 0 !important;
             pointer-events: none !important;
           }
+          .potree_profile_graph,
+          .profile_window,
+          .measurement_label,
+          .potree_measurement,
+          .potree_volume,
+          .volume_tool,
+          .annotation,
+          .annotation-label,
+          .potree_menu_toggle {
+            z-index: 99999 !important;
+            position: absolute !important;
+          }
+          @keyframes slowPulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+          }
+          .droid-volume-active,
+          [title*="Volume"].active,
+          [title*="volume"].active,
+          .potree_volume_button.active {
+            animation: slowPulse 1.8s ease-in-out infinite !important;
+          }
         `
         doc.head?.appendChild(style)
       }
@@ -51,6 +74,13 @@ export default function PointCloudViewer({ url, name = 'Point Cloud', projectId 
         const text = element.children.length === 0 ? element.textContent?.trim().toLowerCase() : ''
         const imageSource = element instanceof HTMLImageElement ? element.src.toLowerCase() : ''
         if (text === 'potree' || imageSource.includes('potree')) {
+          element.style.setProperty('display', 'none', 'important')
+        }
+        if (
+          text &&
+          /(bounding box|position|scale|rotation|classification|attribute|intensity|return number|number of returns|point source|gps-time|rgb|octree|spacing|level)/i.test(text) &&
+          !/(cut volume|fill volume|area|perimeter)/i.test(text)
+        ) {
           element.style.setProperty('display', 'none', 'important')
         }
       })

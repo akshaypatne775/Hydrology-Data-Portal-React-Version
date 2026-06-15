@@ -78,6 +78,32 @@
   pointer-events: none !important;
 }
 
+.potree_profile_graph,
+.profile_window,
+.measurement_label,
+.potree_measurement,
+.potree_volume,
+.volume_tool,
+.annotation,
+.annotation-label,
+.potree_menu_toggle {
+  z-index: 99999 !important;
+  position: absolute !important;
+}
+
+@keyframes slowPulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.5; }
+  100% { opacity: 1; }
+}
+
+.droid-volume-active,
+[title*='Volume'].active,
+[title*='volume'].active,
+.potree_volume_button.active {
+  animation: slowPulse 1.8s ease-in-out infinite !important;
+}
+
 .point-cloud-viewer i,
 .point-cloud-viewer i::before,
 .point-cloud-viewer i::after,

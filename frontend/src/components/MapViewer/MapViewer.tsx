@@ -30,6 +30,15 @@ import {
   useMap,
   useMapEvents,
 } from 'react-leaflet'
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
 import { createIssue, listIssues, type SavedIssue } from '../../services/issuesService'
 import {
   createSpatialFeature,
@@ -50,8 +59,8 @@ import {
 } from '../../services/datasetService'
 import {
   getDtmVolume,
+  getCrossSection,
   getElevation,
-  getProfile,
   type DtmVolumeResponse,
   type ElevationResponse,
   type ProfileResponse,
@@ -815,8 +824,12 @@ interface MapPaneProps {
   issues: SavedIssue[]
   cropEnabled: boolean
   cropFootprint?: LatLng[] | null
-  cogBounds?: [[number, number], [number, number]] | null
-  cogTileUrl: string | null
+  cogLayers: Array<{
+    url: string
+    bounds?: [[number, number], [number, number]] | null
+    isPrimary: boolean
+    opacity: number
+  }>
   comparisonPrimaryClipPercent?: number | null
   layerRefreshKey?: string
   baseMap: BaseMapConfig
@@ -848,8 +861,7 @@ function MapPane({
   issues,
   cropEnabled,
   cropFootprint,
-  cogBounds,
-  cogTileUrl,
+  cogLayers,
   comparisonPrimaryClipPercent,
   layerRefreshKey,
   baseMap,
@@ -883,16 +895,19 @@ function MapPane({
         detectRetina={false}
         crossOrigin
       />
-      {cogTileUrl ? (
+      {cogLayers.map((layer, index) => (
         <OrthomosaicTileLayerWithOptions
-          tileUrl={cogTileUrl}
-          cropEnabled={cropEnabled}
-          cropFootprint={cropFootprint}
-          bounds={cogBounds ?? undefined}
+          key={`visible-cog-${layer.url}-${index}`}
+          tileUrl={layer.url}
+          cropEnabled={cropEnabled && layer.isPrimary}
+          cropFootprint={layer.isPrimary ? cropFootprint : null}
+          bounds={layer.bounds ?? undefined}
           comparisonPrimaryClipPercent={comparisonPrimaryClipPercent}
           layerRefreshKey={layerRefreshKey}
+          zIndex={220 + index * 8}
+          opacity={layer.opacity}
         />
-      ) : null}
+      ))}
       {cropFootprint && cropFootprint.length >= 3 ? (
         <Polygon
           positions={cropFootprint}
@@ -1035,6 +1050,8 @@ function OrthomosaicTileLayerWithOptions({
   cropFootprint,
   bounds,
   layerRefreshKey,
+  zIndex = 220,
+  opacity,
 }: {
   tileUrl: string
   cropEnabled: boolean
@@ -1042,6 +1059,8 @@ function OrthomosaicTileLayerWithOptions({
   bounds?: [[number, number], [number, number]]
   comparisonPrimaryClipPercent?: number | null
   layerRefreshKey?: string
+  zIndex?: number
+  opacity?: number
 }) {
   const map = useMap()
   const paneName = useMemo(() => `orthomosaic-crop-pane-${stableHash(tileUrl)}`, [tileUrl])
@@ -1053,7 +1072,7 @@ function OrthomosaicTileLayerWithOptions({
   const effectiveNativeMinZoom = isDynamicCogLayer ? 0 : nativeMinZoom
   const effectiveMaxZoom = isDynamicCogLayer ? 30 : 30
   const effectiveKeepBuffer = isDynamicCogLayer ? 4 : 6
-  const effectiveOpacity = isDynamicCogLayer ? 1 : 0.9
+  const effectiveOpacity = opacity ?? (isDynamicCogLayer ? 1 : 0.9)
   const boundsKey = bounds ? bounds.flat().map((value) => value.toFixed(7)).join(',') : 'unbounded'
   const tileBounds = isDynamicCogLayer ? undefined : bounds
 
@@ -1090,7 +1109,7 @@ function OrthomosaicTileLayerWithOptions({
   }, [cropEnabled, cropFootprint, map, paneName])
 
   return (
-    <Pane name={paneName} style={{ zIndex: 220 }}>
+    <Pane name={paneName} style={{ zIndex }}>
       <TileLayer
         key={`cog-${ORTHO_RENDERER_VERSION}-${tileUrl}-${boundsKey}-${layerRefreshKey ?? 'stable'}-${cropEnabled ? 'crop' : 'full'}`}
         url={tileUrl}
@@ -1190,6 +1209,68 @@ function ProfileChart({
   )
 }
 
+function InteractiveProfileChart({
+  result,
+  svgRef,
+}: {
+  result: ProfileResponse
+  svgRef: RefObject<SVGSVGElement | null>
+}) {
+  const values = result.points.filter((point) => point.elevation != null)
+  if (values.length === 0) {
+    return (
+      <div className="mv-profile-empty">
+        No valid DTM elevation samples found on this line.
+      </div>
+    )
+  }
+  const chartData = values.map((point) => ({
+    distance: Number(point.distance_m || 0),
+    elevation: Number(point.elevation),
+  }))
+  return (
+    <div className="mv-profile-chart mv-profile-chart--interactive" role="img" aria-label="Elevation profile graph">
+      <ResponsiveContainer width="100%" height={260}>
+        <LineChart data={chartData} margin={{ top: 18, right: 20, left: 0, bottom: 8 }}>
+          <CartesianGrid stroke="#dbe4ee" strokeDasharray="4 4" />
+          <XAxis
+            dataKey="distance"
+            tickFormatter={(value) => formatLengthM(Number(value))}
+            stroke="#64748b"
+            tick={{ fontSize: 11, fontFamily: 'Montserrat, sans-serif' }}
+          />
+          <YAxis
+            domain={['dataMin', 'dataMax']}
+            tickFormatter={(value) => formatProfileValue(Number(value))}
+            stroke="#64748b"
+            tick={{ fontSize: 11, fontFamily: 'Montserrat, sans-serif' }}
+            width={76}
+          />
+          <Tooltip
+            formatter={(value) => [formatProfileValue(Number(value)), 'Elevation']}
+            labelFormatter={(value) => `Distance ${formatLengthM(Number(value))}`}
+            contentStyle={{
+              borderRadius: 8,
+              border: '1px solid rgba(14, 62, 73, 0.22)',
+              fontFamily: 'Montserrat, sans-serif',
+            }}
+          />
+          <Line
+            type="monotone"
+            dataKey="elevation"
+            stroke="#0e3e49"
+            strokeWidth={3}
+            dot={false}
+            activeDot={{ r: 5, fill: '#ef4444', stroke: '#ffffff', strokeWidth: 2 }}
+            isAnimationActive={false}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+      <svg ref={svgRef} className="mv-profile-export-svg" viewBox="0 0 1 1" aria-hidden />
+    </div>
+  )
+}
+
 export type MapViewerProps = {
   projectId?: string
 }
@@ -1210,6 +1291,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const [cropEnabled, setCropEnabled] = useState(false)
   const [baseMapKey, setBaseMapKey] = useState<BaseMapKey>('esri-imagery')
   const [cogTileUrl, setCogTileUrl] = useState<string | null>(null)
+  const [selectedCogTileUrls, setSelectedCogTileUrls] = useState<string[]>([])
   const [zoomTrigger, setZoomTrigger] = useState(0)
   const [compareCogTileUrl, setCompareCogTileUrl] = useState<string | null>(null)
   const [compareSliderPercent, setCompareSliderPercent] = useState(50)
@@ -1837,8 +1919,8 @@ export function MapViewer({ projectId }: MapViewerProps) {
     setAnalysisBusy(true)
     setAnalysisError(null)
     try {
-      const payload = points.map((p) => [p.lat, p.lng] as [number, number])
-      const res = await getProfile(projectId, activeAnalysisLayer.datasetId, payload)
+      const payload = points.map((p) => [p.lng, p.lat] as [number, number])
+      const res = await getCrossSection(projectId, activeAnalysisLayer.datasetId, payload)
       setProfileResult(res)
     } catch (error) {
       setAnalysisError(error instanceof Error ? error.message : 'Profile generation failed')
@@ -2001,6 +2083,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const selectPrimaryLayer = useCallback(
     (url: string | null) => {
       setCogTileUrl(url)
+      setSelectedCogTileUrls(url ? [url] : [])
       setCogBounds(null)
       setCropMaskPoints(null)
       setCropEnabled(false)
@@ -2010,6 +2093,31 @@ export function MapViewer({ projectId }: MapViewerProps) {
     },
     [clearAnalysisResults],
   )
+
+  const toggleVisibleCogLayer = useCallback((layer: ViewerLayer) => {
+    setSelectedCogTileUrls((current) => {
+      const isSelected = current.includes(layer.url)
+      const next = isSelected
+        ? current.filter((url) => url !== layer.url)
+        : [...current, layer.url]
+      if (!isSelected && !cogTileUrl) {
+        setCogTileUrl(layer.url)
+        setCogBounds(null)
+        setZoomTrigger((prev) => prev + 1)
+      }
+      if (isSelected && cogTileUrl === layer.url) {
+        const replacement = next[0] ?? null
+        setCogTileUrl(replacement)
+        setCogBounds(null)
+        setCropMaskPoints(null)
+        setCropEnabled(false)
+        setZoomTrigger((prev) => prev + 1)
+      }
+      setComparisonRefreshTick((prev) => prev + 1)
+      clearAnalysisResults()
+      return next
+    })
+  }, [clearAnalysisResults, cogTileUrl])
 
   const selectCompareLayer = useCallback((url: string | null) => {
     setCompareCogTileUrl(url)
@@ -2044,6 +2152,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
   useEffect(() => {
     if (!projectId) {
       setCogTileUrl(null)
+      setSelectedCogTileUrls([])
       setCompareCogTileUrl(null)
       setCogBounds(null)
       setCompareCogBounds(null)
@@ -2055,9 +2164,11 @@ export function MapViewer({ projectId }: MapViewerProps) {
         projectCogLayers.find((layer) => rasterSourceKeyFromTileUrl(layer.url) === currentSource) ??
         projectCogLayers[0]
       setCogTileUrl(replacement?.url ?? null)
+      setSelectedCogTileUrls(replacement?.url ? [replacement.url] : [])
     }
     if (!cogTileUrl && projectCogLayers[0]?.url) {
       setCogTileUrl(projectCogLayers[0].url)
+      setSelectedCogTileUrls([projectCogLayers[0].url])
     }
     if (compareCogTileUrl && !projectCogLayers.some((layer) => layer.url === compareCogTileUrl)) {
       const currentSource = rasterSourceKeyFromTileUrl(compareCogTileUrl)
@@ -2072,11 +2183,21 @@ export function MapViewer({ projectId }: MapViewerProps) {
     }
     if (projectCogLayers.length === 0) {
       setCogTileUrl(null)
+      setSelectedCogTileUrls([])
       setCompareCogTileUrl(null)
       setCogBounds(null)
       setCompareCogBounds(null)
     }
   }, [cogTileUrl, compareCogTileUrl, projectCogLayers, projectId])
+
+  useEffect(() => {
+    const available = new Set(projectCogLayers.map((layer) => layer.url))
+    setSelectedCogTileUrls((current) => {
+      const filtered = current.filter((url) => available.has(url))
+      if (filtered.length > 0) return filtered
+      return cogTileUrl && available.has(cogTileUrl) ? [cogTileUrl] : []
+    })
+  }, [cogTileUrl, projectCogLayers])
 
   useEffect(() => {
     if (!projectId || !cogTileUrl) {
@@ -2225,6 +2346,36 @@ export function MapViewer({ projectId }: MapViewerProps) {
   }, [cogTileUrl, projectId])
 
   const activeCogLayers = projectCogLayers
+  const visibleCogLayerEntries = useMemo(() => {
+    const selected = new Set(selectedCogTileUrls)
+    const ordered = projectCogLayers
+      .filter((layer) => selected.has(layer.url))
+      .sort((left, right) => {
+        if (left.url === cogTileUrl) return -1
+        if (right.url === cogTileUrl) return 1
+        const rank = (layer: ViewerLayer) => {
+          const type = String(layer.datasetType || layer.layerType || '').toLowerCase()
+          if (type.includes('ortho')) return 0
+          if (type.includes('dtm') || type.includes('dsm') || type.includes('dem')) return 1
+          return 2
+        }
+        return rank(left) - rank(right)
+      })
+    return ordered.map((layer, index) => {
+      const bounds = layer.boundsWgs84
+        ? ([[layer.boundsWgs84[1], layer.boundsWgs84[0]], [layer.boundsWgs84[3], layer.boundsWgs84[2]]] as [[number, number], [number, number]])
+        : layer.url === cogTileUrl
+          ? cogBounds
+          : null
+      const isPrimary = layer.url === cogTileUrl || index === 0
+      return {
+        url: layer.url,
+        bounds,
+        isPrimary,
+        opacity: isPrimary ? 1 : 0.72,
+      }
+    })
+  }, [cogBounds, cogTileUrl, projectCogLayers, selectedCogTileUrls])
   const digitizationToolActive = digitization.mode !== 'idle'
 
   return (
@@ -2251,16 +2402,20 @@ export function MapViewer({ projectId }: MapViewerProps) {
             <legend className="mv-legend">Project 2D Layers</legend>
             {activeCogLayers.length > 0 ? (
               activeCogLayers.map((layer) => (
-                <button
+                <label
                   key={layer.id}
-                  type="button"
-                  className={layer.url === cogTileUrl ? 'mv-tool mv-tool--active' : 'mv-tool'}
-                  onClick={() => selectPrimaryLayer(layer.url)}
+                  className={selectedCogTileUrls.includes(layer.url) ? 'mv-layer-check mv-layer-check--active' : 'mv-layer-check'}
                   title={`${layer.datasetType?.toUpperCase() || 'LAYER'}${layer.month ? ` · ${layer.month}` : ''}`}
                 >
+                  <input
+                    type="checkbox"
+                    checked={selectedCogTileUrls.includes(layer.url)}
+                    onChange={() => toggleVisibleCogLayer(layer)}
+                  />
                   <span className="mv-layer-type">{layer.datasetType || 'layer'}</span>
-                  {layer.name}
-                </button>
+                  <span className="mv-layer-check__name">{layer.name}</span>
+                  {layer.url === cogTileUrl ? <small>Primary</small> : null}
+                </label>
               ))
             ) : projectLayersLoading ? (
               <p className="mv-hud__hint">Loading project layers...</p>
@@ -2317,7 +2472,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
             title="Draw a line on DTM/DSM to generate elevation profile."
           >
             <i className="fa-solid fa-chart-line" aria-hidden />
-            Profile
+            Draw Profile Line
           </button>
           <button
             type="button"
@@ -2605,7 +2760,10 @@ export function MapViewer({ projectId }: MapViewerProps) {
                   <strong>{formatProfileValue(profileResult.volume_above_min_m3, 'm3')}</strong>
                 </article>
               </div>
-              <ProfileChart result={profileResult} svgRef={profileChartRef} />
+              <div className="mv-profile-export-fallback" aria-hidden>
+                <ProfileChart result={profileResult} svgRef={profileChartRef} />
+              </div>
+              <InteractiveProfileChart result={profileResult} svgRef={profileChartRef} />
               <div className="mv-analysis-card__actions">
                 <button type="button" className="mv-tool" onClick={exportProfileCsv}>Export CSV</button>
                 <button type="button" className="mv-tool" onClick={exportProfilePng}>Export PNG</button>
@@ -2706,8 +2864,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
                 issues={issues}
                 cropEnabled={cropEnabled && !splitView}
                 cropFootprint={splitView ? null : cropMaskPoints}
-                cogBounds={cogBounds}
-                cogTileUrl={cogTileUrl}
+                cogLayers={visibleCogLayerEntries}
                 comparisonPrimaryClipPercent={splitView ? compareSliderPercent : null}
                 layerRefreshKey={`${cogTileUrl || 'none'}|${compareCogTileUrl || 'none'}|${comparisonRefreshTick}`}
                 baseMap={selectedBaseMap}

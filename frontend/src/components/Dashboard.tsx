@@ -343,6 +343,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
   const [project3DAssets, setProject3DAssets] = useState<Project3DAsset[]>([])
   const [selected3DAsset, setSelected3DAsset] = useState<Project3DAsset | null>(null)
+  const [active3DCanvasTab, setActive3DCanvasTab] = useState<'potree' | 'cesium'>('potree')
   const [dashboardMetrics, setDashboardMetrics] = useState<DashboardMetric[]>([
     { label: 'Projects', value: '0', meta: 'Available workspaces', icon: 'fa-solid fa-folder-tree' },
     { label: 'Datasets', value: '0', meta: 'In selected project', icon: 'fa-solid fa-database' },
@@ -399,9 +400,40 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     () => project3DAssets.filter((asset) => asset.viewer === 'cesium'),
     [project3DAssets],
   )
-  const selectedPointCloudUrl = selected3DAsset?.viewer === 'potree'
+
+  useEffect(() => {
+    if (selected3DAsset?.viewer) {
+      setActive3DCanvasTab(selected3DAsset.viewer)
+    }
+  }, [selected3DAsset?.viewer])
+
+  useEffect(() => {
+    if (!selected3DAsset) {
+      const fallback = active3DCanvasTab === 'potree'
+        ? projectPointClouds[0] ?? project3DModels[0]
+        : project3DModels[0] ?? projectPointClouds[0]
+      if (fallback) setSelected3DAsset(fallback)
+      return
+    }
+    if (active3DCanvasTab === 'potree' && projectPointClouds.length === 0 && project3DModels.length > 0) {
+      setActive3DCanvasTab('cesium')
+      setSelected3DAsset(project3DModels[0] ?? null)
+    }
+    if (active3DCanvasTab === 'cesium' && project3DModels.length === 0 && projectPointClouds.length > 0) {
+      setActive3DCanvasTab('potree')
+      setSelected3DAsset(projectPointClouds[0] ?? null)
+    }
+  }, [active3DCanvasTab, project3DModels, projectPointClouds, selected3DAsset])
+
+  const select3DCanvasTab = useCallback((tab: 'potree' | 'cesium') => {
+    setActive3DCanvasTab(tab)
+    const asset = tab === 'potree' ? projectPointClouds[0] : project3DModels[0]
+    if (asset) setSelected3DAsset(asset)
+  }, [project3DModels, projectPointClouds])
+
+  const selectedPointCloudUrl = active3DCanvasTab === 'potree' && selected3DAsset?.viewer === 'potree'
     ? selected3DAsset.url
-    : selected3DAsset?.viewer === 'cesium'
+    : active3DCanvasTab === 'cesium' || selected3DAsset?.viewer === 'cesium'
       ? ''
       : String(active3DLayer?.layerType || '').toLowerCase() === 'pointcloud'
         ? (active3DLayer?.url && !isRawPointCloudAssetUrl(active3DLayer.url) ? active3DLayer.url : '')
@@ -1029,6 +1061,28 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                   role="region"
                   aria-label="3D globe viewer"
                 >
+                  <div className="ds-3d-viewer-tabs" role="tablist" aria-label="3D viewer type">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={active3DCanvasTab === 'potree'}
+                      className={active3DCanvasTab === 'potree' ? 'ds-3d-viewer-tabs__tab ds-3d-viewer-tabs__tab--active' : 'ds-3d-viewer-tabs__tab'}
+                      onClick={() => select3DCanvasTab('potree')}
+                      disabled={projectPointClouds.length === 0}
+                    >
+                      Potree Viewer
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={active3DCanvasTab === 'cesium'}
+                      className={active3DCanvasTab === 'cesium' ? 'ds-3d-viewer-tabs__tab ds-3d-viewer-tabs__tab--active' : 'ds-3d-viewer-tabs__tab'}
+                      onClick={() => select3DCanvasTab('cesium')}
+                      disabled={project3DModels.length === 0}
+                    >
+                      3D Models
+                    </button>
+                  </div>
                   <Suspense fallback={<div className="ds-panel-loading">Loading 3D globe…</div>}>
                     <>
                       {selectedPointCloudUrl ? (
@@ -1040,7 +1094,12 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                         datasetId={selectedPointCloudDatasetId}
                       />
                     ) : (
-                      <GlobeViewer key={selected3DAsset?.url || selectedProject!.id} projectId={selectedProject!.id} />
+                      <GlobeViewer
+                        key={selectedProject!.id}
+                        projectId={selectedProject!.id}
+                        externalAssetUrl={active3DCanvasTab === 'cesium' ? selected3DAsset?.url || '' : ''}
+                        externalAssetKind={active3DCanvasTab === 'cesium' ? 'model' : undefined}
+                      />
                     )}
                     </>
                   </Suspense>

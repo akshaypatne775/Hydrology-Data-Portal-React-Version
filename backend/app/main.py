@@ -56,6 +56,7 @@ from app.utils.spatial_import import (
     style_for_structure,
 )
 from app.utils.raster_tiler import convert_tif_to_cog, run_rasterio_tiler
+from app.utils.analysis_utils import sample_cross_section
 
 # Project_Data lives beside backend/ and frontend/ (repo root).
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -507,6 +508,15 @@ class VolumePayload(BaseModel):
     circle_center: list[float] = []
     circle_radius_m: float = 0.0
     base_elevation: float | None = None
+
+
+class CrossSectionPayload(BaseModel):
+    project_id: str = ""
+    dataset_id: str = ""
+    dtm_file_path: str = ""
+    line: dict[str, object] | None = None
+    coordinates: list[list[float]] = []
+    samples: int = 180
 
 
 class CompareVolumePayload(BaseModel):
@@ -1335,57 +1345,129 @@ def _prepare_las_for_ept(input_las: Path, prepared_dir: Path, dataset_name: str)
 
 def _run_ept_converter_once(input_las: str, output_path: Path) -> str:
     """
-    Convert LAS/LAZ to Entwine Point Tile (EPT).
-    Entwine is preferred because it produces browser-ready EPT folders
-    (ept.json, ept-data, and ept-hierarchy). Some Untwine builds create a
-    single binary output instead of an EPT directory, so it is only a fallback.
+    Convert LAS/LAZ to Entwine Point Tile (EPT) with native PDAL bindings.
+    The writer filename is the output directory, so ept.json is created
+    directly inside output_path with no nested converter folders.
     """
-    attempts: list[tuple[str, list[str]]] = []
-    entwine = _resolve_converter_executable(ENTWINE_EXE)
-    if entwine:
-        attempts.append(("Entwine", [entwine, "build", "-i", input_las, "-o", str(output_path)]))
-    untwine = _resolve_converter_executable(UNTWINE_EXE)
-    if untwine:
-        attempts.append(("Untwine", [untwine, str(output_path), "-i", input_las]))
-    pdal = _resolve_converter_executable(PDAL_EXE)
-    if pdal and _pdal_has_driver(pdal, "writers.ept"):
-        attempts.append(("PDAL writers.ept", [pdal, "translate", input_las, str(output_path / "ept.json"), "writers.ept"]))
+    output_path.mkdir(parents=True, exist_ok=True)
+    writer_candidates = [
+        str(os.getenv("PDAL_EPT_WRITER") or "").strip(),
+        "writers.ept",
+        "writers.ept_addon",
+    ]
+    writer_candidates = [writer for index, writer in enumerate(writer_candidates) if writer and writer not in writer_candidates[:index]]
 
-    if not attempts:
-        raise RuntimeError(
-            "No EPT converter found. Install Untwine (recommended), Entwine, or PDAL and make it available on PATH, "
-            "or set UNTWINE_EXE / ENTWINE_EXE / PDAL_EXE to the executable path."
-        )
+    def pipeline_config_for(writer_type: str) -> dict[str, list[dict[str, str]]]:
+        return {
+            "pipeline": [
+                {
+                    "type": "readers.las",
+                    "filename": str(Path(input_las)),
+                },
+                {
+                    "type": writer_type,
+                    "filename": str(output_path),
+                },
+            ],
+        }
 
-    errors: list[str] = []
-    for label, command in attempts:
-        result = subprocess.run(command, capture_output=True, text=True)
-        if result.returncode == 0 and (output_path / "ept.json").is_file():
-            return label
-        if result.returncode == 0 and output_path.is_file():
-            output_path.unlink(missing_ok=True)
-            output_path.mkdir(parents=True, exist_ok=True)
-            errors.append(
-                f"{label}: converter completed but produced a single file instead of an EPT folder. "
-                "Install/use Entwine for Droid EPT output."
-            )
-            continue
-        message = result.stderr or result.stdout or f"{label} exited with code {result.returncode}"
-        errors.append(f"{label}: {message.strip()}")
+    def reset_output_dir() -> None:
         if output_path.is_file():
             output_path.unlink(missing_ok=True)
-            output_path.mkdir(parents=True, exist_ok=True)
         if output_path.is_dir() and not (output_path / "ept.json").is_file():
             shutil.rmtree(output_path, ignore_errors=True)
-            output_path.mkdir(parents=True, exist_ok=True)
+        output_path.mkdir(parents=True, exist_ok=True)
 
-    raise RuntimeError("EPT conversion failed.\n\n" + "\n\n".join(errors))
+    errors: list[str] = []
+    try:
+        import pdal  # type: ignore[import-not-found]
+    except Exception as exc:  # noqa: BLE001
+        errors.append(
+            "Python PDAL import failed in the active backend environment. "
+            f"{exc.__class__.__name__}: {exc}"
+        )
+    else:
+        for writer_type in writer_candidates:
+            try:
+                reset_output_dir()
+                pipeline = pdal.Pipeline(json.dumps(pipeline_config_for(writer_type)))
+                pipeline.execute()
+                if (output_path / "ept.json").is_file():
+                    return f"Python PDAL {writer_type}"
+                errors.append(f"Python PDAL {writer_type}: completed but ept.json was not created.")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Python PDAL {writer_type}: {exc}")
+
+    pdal_exe = _resolve_converter_executable(PDAL_EXE)
+    if pdal_exe:
+        for writer_type in writer_candidates:
+            if writer_type == "writers.ept_addon":
+                errors.append(
+                    "PDAL CLI writers.ept_addon: installed PDAL exposes only the EPT addon writer, "
+                    "which cannot create a full ept.json point cloud dataset."
+                )
+                continue
+            pipeline_config = pipeline_config_for(writer_type)
+            pipeline_file: Path | None = None
+            try:
+                reset_output_dir()
+                with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
+                    json.dump(pipeline_config, handle)
+                    pipeline_file = Path(handle.name)
+                result = subprocess.run(
+                    [pdal_exe, "pipeline", str(pipeline_file)],
+                    capture_output=True,
+                    text=True,
+                    timeout=None,
+                )
+                if result.returncode == 0 and (output_path / "ept.json").is_file():
+                    return f"PDAL CLI {writer_type}"
+                message = result.stderr or result.stdout or f"pdal pipeline exited with code {result.returncode}"
+                errors.append(f"PDAL CLI {writer_type}: {message.strip()}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"PDAL CLI {writer_type}: {exc}")
+            finally:
+                if pipeline_file is not None:
+                    try:
+                        pipeline_file.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+    else:
+        errors.append(
+            "No pdal.exe found. Install PDAL/Untwine tools or run Droid_Environment_Manager\\_Setup_EPT_Environment.bat "
+            "before starting the backend."
+        )
+
+    converter_attempts: list[tuple[str, list[str]]] = []
+    entwine = _resolve_converter_executable(ENTWINE_EXE)
+    if entwine:
+        converter_attempts.append(("Entwine", [entwine, "build", "-i", input_las, "-o", str(output_path)]))
+    untwine = _resolve_converter_executable(UNTWINE_EXE)
+    if untwine:
+        converter_attempts.append(("Untwine", [untwine, str(output_path), "-i", input_las]))
+
+    for label, command in converter_attempts:
+        try:
+            reset_output_dir()
+            result = subprocess.run(command, capture_output=True, text=True, timeout=None)
+            if result.returncode == 0 and (output_path / "ept.json").is_file():
+                return label
+            message = result.stderr or result.stdout or f"{label} exited with code {result.returncode}"
+            errors.append(f"{label}: {message.strip()}")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{label}: {exc}")
+
+    reset_output_dir()
+    message = "EPT conversion failed.\n\n" + "\n\n".join(errors)
+    print(f"PDAL EPT conversion failed for {input_las}: {message}")
+    raise RuntimeError(message)
 
 
 def process_pointcloud(input_las: str, output_dir: str, dataset_name: str) -> str:
     """
-    Convert LAS/LAZ to Entwine Point Tile (EPT) output.
-    Old generated viewer HTML is intentionally not produced anymore.
+    Convert LAS/LAZ to Entwine Point Tile (EPT) output with native PDAL.
+    The output directory contains ept.json, ept-data, and ept-hierarchy
+    directly, matching the React viewer URL for this dataset.
     """
     safe_dataset_name = _ept_dataset_name(dataset_name)
     output_path = Path(output_dir)
@@ -2326,7 +2408,15 @@ def _project_processed_root(project_id: str) -> Path:
     return Path(LOCAL_DATA_PATH) / "projects" / _safe_project_id(project_id) / "processed"
 
 
+def _project_exports_root(project_id: str) -> Path:
+    return Path(LOCAL_DATA_PATH) / "projects" / _safe_project_id(project_id) / "exports"
+
+
 def _project_pointcloud_root(project_id: str) -> Path:
+    return _project_exports_root(project_id) / "pointclouds"
+
+
+def _legacy_project_pointcloud_root(project_id: str) -> Path:
     return _project_processed_root(project_id) / "pointclouds"
 
 
@@ -2338,16 +2428,22 @@ def _legacy_ept_dataset_dir(project_id: str, dataset_name: str) -> Path:
     return _project_processed_root(project_id) / _safe_ept_folder_name(dataset_name)
 
 
+def _legacy_ept_pointcloud_dataset_dir(project_id: str, dataset_name: str) -> Path:
+    return _legacy_project_pointcloud_root(project_id) / _safe_ept_folder_name(dataset_name)
+
+
 def _ept_json_url(base_url: str, project_id: str, dataset_name: str) -> str:
     safe_project = _safe_project_id(project_id)
     safe_dataset = _safe_ept_folder_name(dataset_name)
     new_ept = _ept_dataset_dir(safe_project, safe_dataset) / "ept.json"
+    old_pointcloud_ept = _legacy_ept_pointcloud_dataset_dir(safe_project, safe_dataset) / "ept.json"
     legacy_ept = _legacy_ept_dataset_dir(safe_project, safe_dataset) / "ept.json"
-    rel_path = (
-        f"processed/pointclouds/{safe_dataset}/ept.json"
-        if new_ept.is_file() or not legacy_ept.is_file()
-        else f"processed/{safe_dataset}/ept.json"
-    )
+    if new_ept.is_file() or (not old_pointcloud_ept.is_file() and not legacy_ept.is_file()):
+        rel_path = f"exports/pointclouds/{safe_dataset}/ept.json"
+    elif old_pointcloud_ept.is_file():
+        rel_path = f"processed/pointclouds/{safe_dataset}/ept.json"
+    else:
+        rel_path = f"processed/{safe_dataset}/ept.json"
     return (
         f"{base_url.rstrip('/')}/api/data/projects/{safe_project}/{quote(rel_path, safe='/')}"
     )
@@ -2357,12 +2453,14 @@ def _ept_viewer_url(base_url: str, project_id: str, dataset_name: str, display_n
     safe_project = _safe_project_id(project_id)
     safe_dataset = _safe_ept_folder_name(dataset_name)
     new_ept = _ept_dataset_dir(safe_project, safe_dataset) / "ept.json"
+    old_pointcloud_ept = _legacy_ept_pointcloud_dataset_dir(safe_project, safe_dataset) / "ept.json"
     legacy_ept = _legacy_ept_dataset_dir(safe_project, safe_dataset) / "ept.json"
-    rel_path = (
-        f"processed/pointclouds/{safe_dataset}/ept.json"
-        if new_ept.is_file() or not legacy_ept.is_file()
-        else f"processed/{safe_dataset}/ept.json"
-    )
+    if new_ept.is_file() or (not old_pointcloud_ept.is_file() and not legacy_ept.is_file()):
+        rel_path = f"exports/pointclouds/{safe_dataset}/ept.json"
+    elif old_pointcloud_ept.is_file():
+        rel_path = f"processed/pointclouds/{safe_dataset}/ept.json"
+    else:
+        rel_path = f"processed/{safe_dataset}/ept.json"
     ept_path = f"/api/data/projects/{safe_project}/{rel_path}"
     query = urlencode(
         {
@@ -3390,9 +3488,10 @@ def pointcloud_status(
     base_url = str(request.base_url).rstrip("/")
     processed_root = _project_processed_root(safe_id)
     ept_root = _project_pointcloud_root(safe_id)
+    legacy_pointcloud_root = _legacy_project_pointcloud_root(safe_id)
 
     def ept_search_roots() -> list[Path]:
-        roots = [ept_root, processed_root]
+        roots = [ept_root, legacy_pointcloud_root, processed_root]
         return [root for index, root in enumerate(roots) if root not in roots[:index]]
 
     def source_name_for(folder: Path) -> str:
@@ -3426,10 +3525,12 @@ def pointcloud_status(
     if tileset_id:
         safe_tileset_id = _safe_ept_folder_name(tileset_id)
         add_candidate(_ept_dataset_dir(safe_id, safe_tileset_id), candidates)
+        add_candidate(_legacy_ept_pointcloud_dataset_dir(safe_id, safe_tileset_id), candidates)
         add_candidate(_legacy_ept_dataset_dir(safe_id, safe_tileset_id), candidates)
         for job_id in job_match_candidates(tileset_id):
             safe_job_id = _safe_ept_folder_name(job_id)
             add_candidate(_ept_dataset_dir(safe_id, safe_job_id), candidates)
+            add_candidate(_legacy_ept_pointcloud_dataset_dir(safe_id, safe_job_id), candidates)
             add_candidate(_legacy_ept_dataset_dir(safe_id, safe_job_id), candidates)
         lookup = tileset_id.strip().lower()
         lookup_stem = Path(lookup).stem
@@ -6987,6 +7088,76 @@ def analysis_profile(project_id: str, payload: ProfilePayload, request: Request)
     return result
 
 
+@app.post("/api/analysis/cross-section")
+def analysis_cross_section(payload: CrossSectionPayload, request: Request) -> dict[str, object]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(payload.project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+
+    if payload.dataset_id:
+        path = _dataset_source_path(safe_project_id, payload.dataset_id)
+        dataset_id = payload.dataset_id
+    else:
+        if not payload.dtm_file_path:
+            raise HTTPException(status_code=400, detail="dataset_id or dtm_file_path is required")
+        local_root = Path(LOCAL_DATA_PATH).resolve()
+        path = _local_data_path_from_user_value(payload.dtm_file_path).resolve()
+        try:
+            path.relative_to(local_root)
+        except ValueError as exc:
+            raise HTTPException(status_code=403, detail="DTM path must stay inside Project_Data") from exc
+        dataset_id = path.stem
+
+    if path.suffix.lower() not in (".tif", ".tiff"):
+        raise HTTPException(status_code=400, detail="Cross-section requires a DTM/DSM TIFF source")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="DTM/DSM file not found")
+
+    coordinates: list[object] = []
+    if payload.line and payload.line.get("type") == "LineString":
+        raw_coordinates = payload.line.get("coordinates")
+        if isinstance(raw_coordinates, list):
+            coordinates = raw_coordinates
+    elif payload.coordinates:
+        coordinates = payload.coordinates
+    if len(coordinates) < 2:
+        raise HTTPException(status_code=400, detail="LineString with at least two coordinates is required")
+
+    fp = _file_fingerprint(path)
+    samples = max(2, min(int(payload.samples or 180), 800))
+    cache_payload = {
+        "kind": "cross_section",
+        "source": fp,
+        "coordinates": coordinates,
+        "samples": samples,
+    }
+    cache = _cache_path(safe_project_id, "cross-section", cache_payload)
+    cached = _read_cache(cache)
+    if cached:
+        return cached
+
+    try:
+        sampled = sample_cross_section(path, coordinates, samples=samples)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        _write_portal_error_log("cross_section", str(exc), {"project_id": safe_project_id, "dataset_id": dataset_id})
+        raise HTTPException(status_code=500, detail="Cross-section sampling failed") from exc
+
+    result: dict[str, object] = {
+        "status": "success",
+        "project_id": safe_project_id,
+        "dataset_id": dataset_id,
+        "unit": "m",
+        **sampled,
+        "cached": False,
+    }
+    _write_cache(cache, result)
+    return result
+
+
 @app.post("/api/analysis/{project_id}/volume")
 def analysis_volume(project_id: str, payload: VolumePayload, request: Request) -> dict[str, object]:
     user = _require_user(request)
@@ -7322,28 +7493,33 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
 
     raw_dir_proj, processed_root = get_project_dirs(safe_project_id)
     ready_pointcloud_names: set[str] = set()
-    if processed_root.is_dir():
-        def add_ready_pointcloud_name_keys(name: str) -> None:
-            stem = Path(str(name or "").strip()).stem.lower()
-            if not stem:
-                return
-            ready_pointcloud_names.add(stem)
-            base_without_hash = re.sub(r"-[a-f0-9]{8,}$", "", stem, flags=re.IGNORECASE)
-            if base_without_hash:
-                ready_pointcloud_names.add(base_without_hash)
 
-        for ready_ept in [*processed_root.glob("pointclouds/*/ept.json"), *processed_root.glob("*/ept.json")]:
-            if not ready_ept.is_file() or (ready_ept.parent / ".conversion_error.txt").is_file():
-                continue
-            marker = ready_ept.parent / ".source_name.txt"
-            source_name = ""
-            if marker.is_file():
-                try:
-                    source_name = marker.read_text(encoding="utf-8").strip()
-                except OSError:
-                    source_name = ""
-            add_ready_pointcloud_name_keys(source_name)
-            add_ready_pointcloud_name_keys(ready_ept.parent.name)
+    def add_ready_pointcloud_name_keys(name: str) -> None:
+        stem = Path(str(name or "").strip()).stem.lower()
+        if not stem:
+            return
+        ready_pointcloud_names.add(stem)
+        base_without_hash = re.sub(r"-[a-f0-9]{8,}$", "", stem, flags=re.IGNORECASE)
+        if base_without_hash:
+            ready_pointcloud_names.add(base_without_hash)
+
+    ready_ept_paths = [
+        *_project_pointcloud_root(safe_project_id).glob("*/ept.json"),
+        *_legacy_project_pointcloud_root(safe_project_id).glob("*/ept.json"),
+        *processed_root.glob("*/ept.json"),
+    ]
+    for ready_ept in ready_ept_paths:
+        if not ready_ept.is_file() or (ready_ept.parent / ".conversion_error.txt").is_file():
+            continue
+        marker = ready_ept.parent / ".source_name.txt"
+        source_name = ""
+        if marker.is_file():
+            try:
+                source_name = marker.read_text(encoding="utf-8").strip()
+            except OSError:
+                source_name = ""
+        add_ready_pointcloud_name_keys(source_name)
+        add_ready_pointcloud_name_keys(ready_ept.parent.name)
 
     jobs_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "_dataset_jobs"
     raw_meta_by_rel: dict[str, dict[str, str]] = {}
@@ -7637,7 +7813,11 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
             )
             listed_rel_paths.add(rel)
 
-        ept_json_paths = list(processed_root.glob("pointclouds/*/ept.json")) + list(processed_root.glob("*/ept.json"))
+        ept_json_paths = [
+            *_project_pointcloud_root(safe_project_id).glob("*/ept.json"),
+            *_legacy_project_pointcloud_root(safe_project_id).glob("*/ept.json"),
+            *processed_root.glob("*/ept.json"),
+        ]
         for ept_json in sorted({p.resolve() for p in ept_json_paths}, key=lambda p: (p.parent.stat().st_mtime, p.parent.name.lower()), reverse=True):
             rel = ept_json.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
             rel_base = ept_json.parent.relative_to(Path(LOCAL_DATA_PATH)).as_posix()

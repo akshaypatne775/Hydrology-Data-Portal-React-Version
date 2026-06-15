@@ -52,10 +52,29 @@
 }
 
 .viewer-3d-sidebar__tabs {
-  display: grid;
+  display: none;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.35rem;
   padding-bottom: 0.75rem;
+}
+
+.viewer-3d-sidebar__section {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.viewer-3d-sidebar__section + .viewer-3d-sidebar__section {
+  margin-top: 0.75rem;
+}
+
+.viewer-3d-sidebar__section-title {
+  margin: 0.1rem 0 0;
+  color: rgba(255, 255, 255, 0.68);
+  font-family: 'Montserrat', sans-serif;
+  font-size: 0.62rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
 .viewer-3d-sidebar__tab {

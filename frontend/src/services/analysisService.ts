@@ -34,6 +34,10 @@ export type ProfileResponse = {
   corridor_width_m?: number | null
 }
 
+export type CrossSectionResponse = ProfileResponse & {
+  project_id: string
+}
+
 export type VolumeBin = {
   label: string
   volume: number
@@ -97,6 +101,26 @@ export async function getProfile(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ dataset_id: datasetId, points, samples: 160, corridor_width_m: 1 }),
+  })
+}
+
+export async function getCrossSection(
+  projectId: string,
+  datasetId: string,
+  lineCoordinates: Array<[number, number]>,
+): Promise<CrossSectionResponse> {
+  return apiRequestJson<CrossSectionResponse>('/api/analysis/cross-section', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      project_id: projectId,
+      dataset_id: datasetId,
+      line: {
+        type: 'LineString',
+        coordinates: lineCoordinates,
+      },
+      samples: 220,
+    }),
   })
 }
 

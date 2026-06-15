@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import './Viewer3DSidebar.css'
 
 export type Viewer3DAsset = {
@@ -25,18 +25,10 @@ export default function Viewer3DSidebar({
 }: Viewer3DSidebarProps) {
   const uniquePointClouds = useMemo(() => unique3DAssets(pointClouds), [pointClouds])
   const uniqueModels = useMemo(() => unique3DAssets(models), [models])
-  const [activeTab, setActiveTab] = useState<'pointclouds' | 'models'>(
-    uniquePointClouds.length > 0 ? 'pointclouds' : 'models',
-  )
-  const assets = activeTab === 'pointclouds' ? uniquePointClouds : uniqueModels
-
-  useEffect(() => {
-    if (activeTab === 'pointclouds' && uniquePointClouds.length === 0 && uniqueModels.length > 0) {
-      setActiveTab('models')
-    } else if (activeTab === 'models' && uniqueModels.length === 0 && uniquePointClouds.length > 0) {
-      setActiveTab('pointclouds')
-    }
-  }, [activeTab, uniqueModels.length, uniquePointClouds.length])
+  const sections = [
+    { id: 'pointclouds', label: 'Point Clouds', assets: uniquePointClouds },
+    { id: 'models', label: '3D Models', assets: uniqueModels },
+  ].filter((section) => section.assets.length > 0)
 
   return (
     <aside className="viewer-3d-sidebar" aria-label="3D viewer navigation">
@@ -49,42 +41,22 @@ export default function Viewer3DSidebar({
         <strong>Project Assets</strong>
       </header>
 
-      <div className="viewer-3d-sidebar__tabs" role="tablist" aria-label="3D asset types">
-        {uniquePointClouds.length > 0 ? (
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'pointclouds'}
-            className={activeTab === 'pointclouds' ? 'viewer-3d-sidebar__tab viewer-3d-sidebar__tab--active' : 'viewer-3d-sidebar__tab'}
-            onClick={() => setActiveTab('pointclouds')}
-          >
-            Point Clouds
-          </button>
-        ) : null}
-        {uniqueModels.length > 0 ? (
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'models'}
-            className={activeTab === 'models' ? 'viewer-3d-sidebar__tab viewer-3d-sidebar__tab--active' : 'viewer-3d-sidebar__tab'}
-            onClick={() => setActiveTab('models')}
-          >
-            3D Models
-          </button>
-        ) : null}
-      </div>
-
       <div className="viewer-3d-sidebar__list">
-        {assets.map((asset) => (
-          <button
-            key={asset.id}
-            type="button"
-            className={selectedAsset?.id === asset.id ? 'viewer-3d-sidebar__asset viewer-3d-sidebar__asset--active' : 'viewer-3d-sidebar__asset'}
-            onClick={() => onSelect(asset)}
-          >
-            <i className={asset.viewer === 'potree' ? 'fas fa-cloud' : 'fas fa-cube'} aria-hidden />
-            <span>{asset.name}</span>
-          </button>
+        {sections.map((section) => (
+          <section key={section.id} className="viewer-3d-sidebar__section">
+            <p className="viewer-3d-sidebar__section-title">{section.label}</p>
+            {section.assets.map((asset) => (
+              <button
+                key={asset.id}
+                type="button"
+                className={selectedAsset?.id === asset.id ? 'viewer-3d-sidebar__asset viewer-3d-sidebar__asset--active' : 'viewer-3d-sidebar__asset'}
+                onClick={() => onSelect(asset)}
+              >
+                <i className={asset.viewer === 'potree' ? 'fas fa-cloud' : 'fas fa-cube'} aria-hidden />
+                <span>{asset.name}</span>
+              </button>
+            ))}
+          </section>
         ))}
       </div>
     </aside>

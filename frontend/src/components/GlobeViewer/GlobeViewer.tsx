@@ -211,11 +211,25 @@ function projectFileToViewerOption(file: ProjectFile): ViewerDataOption | null {
   return null
 }
 
-type GlobeViewerProps = {
-  projectId: string
+function normalizeViewerUrl(value: string): string {
+  try {
+    return decodeURIComponent(value)
+      .replace(/\\/g, '/')
+      .replace(/^https?:\/\/[^/]+/i, '')
+      .replace(/[?#].*$/, '')
+      .toLowerCase()
+  } catch {
+    return value.replace(/\\/g, '/').replace(/[?#].*$/, '').toLowerCase()
+  }
 }
 
-export function GlobeViewer({ projectId }: GlobeViewerProps) {
+type GlobeViewerProps = {
+  projectId: string
+  externalAssetUrl?: string
+  externalAssetKind?: ViewerLayerKind
+}
+
+export function GlobeViewer({ projectId, externalAssetUrl = '', externalAssetKind }: GlobeViewerProps) {
   const modal = useModal()
   const { tasks } = useUploadContext()
   const { activeLayers } = useWorkspaceContext()
@@ -797,6 +811,18 @@ export function GlobeViewer({ projectId }: GlobeViewerProps) {
       height_offset: option.height_offset,
     })
   }, [clearLoadedModels, load3DModel, loadPointCloudWhenReady])
+
+  useEffect(() => {
+    if (!viewerReady || !externalAssetUrl) return
+    const normalizedExternal = normalizeViewerUrl(externalAssetUrl)
+    const option = viewerDataOptions.find((item) => (
+      normalizeViewerUrl(item.url) === normalizedExternal &&
+      (!externalAssetKind || item.kind === externalAssetKind)
+    ))
+    if (!option) return
+    setSelectedViewerDataId(option.id)
+    loadViewerDataOption(option)
+  }, [externalAssetKind, externalAssetUrl, loadViewerDataOption, viewerDataOptions, viewerReady])
 
   // Example TiTiler COG XYZ layer (reference):
   // const cogLayer = new Cesium.UrlTemplateImageryProvider({

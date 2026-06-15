@@ -213,6 +213,54 @@
   letter-spacing: 0.04em;
 }
 
+.mv-layer-check {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.38rem;
+  width: 100%;
+  min-height: 2.05rem;
+  margin-bottom: 0.32rem;
+  padding: 0.34rem 0.48rem;
+  border: 1px solid rgba(203, 213, 225, 0.8);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #0e3e49;
+  font-family: 'Montserrat', sans-serif;
+  font-size: 0.7rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.mv-layer-check:hover,
+.mv-layer-check--active {
+  border-color: #0e3e49;
+  background: #e7f2f4;
+}
+
+.mv-layer-check input {
+  width: 0.9rem;
+  height: 0.9rem;
+  margin: 0;
+  accent-color: #0e3e49;
+}
+
+.mv-layer-check__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mv-layer-check small {
+  border-radius: 999px;
+  background: #0e3e49;
+  color: #ffffff;
+  padding: 0.12rem 0.34rem;
+  font-size: 0.55rem;
+  text-transform: uppercase;
+}
+
 .mv-toolbar__context {
   display: flex;
   flex-direction: column;
@@ -272,7 +320,7 @@
   position: absolute;
   right: 0.85rem;
   bottom: 0.85rem;
-  z-index: 520;
+  z-index: 900;
   width: min(760px, calc(100% - 1.7rem));
   max-height: 360px;
   overflow: auto;
@@ -394,8 +442,39 @@
 .mv-profile-chart {
   display: block;
   width: 100%;
-  height: auto;
+  min-height: 260px;
+  height: 260px;
   margin-bottom: 0.45rem;
+}
+
+.mv-profile-chart--interactive {
+  border: 1px solid #dbe4ee;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 0.35rem;
+}
+
+.mv-profile-chart .recharts-wrapper,
+.mv-profile-chart .recharts-surface,
+.mv-profile-chart .recharts-tooltip-wrapper {
+  font-family: 'Montserrat', sans-serif !important;
+}
+
+.mv-profile-export-svg {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.mv-profile-export-fallback {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .mv-maps {
