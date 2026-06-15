@@ -50,6 +50,65 @@
   overflow-wrap: anywhere;
 }
 
+.potree-cross-section-toolbar {
+  position: absolute;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 100060;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.42rem;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(14, 62, 73, 0.92);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(12px);
+  font-family: 'Montserrat', sans-serif;
+}
+
+.potree-cross-section-toolbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.38rem;
+  min-height: 2rem;
+  padding: 0.42rem 0.65rem;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+  font-family: 'Montserrat', sans-serif;
+  font-size: 0.68rem;
+  font-weight: 900;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.potree-cross-section-toolbar button:hover {
+  border-color: rgba(255, 255, 255, 0.48);
+  background: #0e3e49;
+  transform: translateY(-1px);
+}
+
+.potree-tool-message {
+  position: absolute;
+  left: 0.75rem;
+  top: 4rem;
+  z-index: 100060;
+  max-width: min(460px, calc(100% - 1.5rem));
+  padding: 0.62rem 0.78rem;
+  border: 1px solid rgba(34, 197, 94, 0.36);
+  border-radius: 8px;
+  background: rgba(14, 62, 73, 0.94);
+  color: #e6fffb;
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.22);
+  font-family: 'Montserrat', sans-serif;
+  font-size: 0.72rem;
+  font-weight: 750;
+}
+
 #potree_render_area,
 .potree_render_area,
 .potree_container {
@@ -109,7 +168,25 @@
 .point-cloud-viewer i::after,
 .point-cloud-viewer .fa,
 .point-cloud-viewer .fas,
-.point-cloud-viewer .fa-solid {
+.point-cloud-viewer .fa-solid,
+.potree-cross-section-toolbar i,
+.potree-cross-section-toolbar i::before,
+.potree-cross-section-toolbar i::after {
   font-family: "Font Awesome 6 Free" !important;
   font-weight: 900 !important;
+}
+
+@media (max-width: 900px) {
+  .potree-cross-section-toolbar {
+    right: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .potree-cross-section-toolbar button {
+    flex: 1 1 auto;
+  }
+
+  .potree-tool-message {
+    top: 6.4rem;
+  }
 }

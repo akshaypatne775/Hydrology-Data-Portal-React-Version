@@ -83,7 +83,7 @@ import {
   type StructureType,
 } from './spatialTypes'
 
-type MeasureMode = 'none' | 'distance' | 'area' | 'profile' | 'volume-area' | 'volume-circle'
+type MeasureMode = 'none' | 'distance' | 'area' | 'profile' | 'cross-section' | 'volume-area' | 'volume-circle'
 type ViewerLayer = {
   id: string
   projectId: string
@@ -190,6 +190,135 @@ function totalPathLengthM(points: LatLng[]): number {
     sum += points[i - 1]!.distanceTo(points[i]!)
   }
   return sum
+}
+
+function latLngsFromSpatialFeature(feature: SpatialFeature | null): LatLng[] {
+  if (!feature) return []
+  const raw = feature as unknown as Record<string, any>
+  const source = raw.geojson ?? raw.feature ?? raw.geometry
+  const geometry = source && source.type === 'Feature' ? source.geometry : source
+  if (!geometry || !('type' in geometry)) return []
+
+  const toLatLng = (coord: unknown): LatLng | null => {
+    if (!Array.isArray(coord) || coord.length < 2) return null
+    const lng = Number(coord[0])
+    const lat = Number(coord[1])
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
+    return L.latLng(lat, lng)
+  }
+
+  const cleanRing = (coords: unknown[]): LatLng[] => {
+    const points = coords.map(toLatLng).filter((point): point is LatLng => Boolean(point))
+    if (points.length > 2) {
+      const first = points[0]!
+      const last = points[points.length - 1]!
+      if (Math.abs(first.lat - last.lat) < 1e-9 && Math.abs(first.lng - last.lng) < 1e-9) {
+        return points.slice(0, -1)
+      }
+    }
+    return points
+  }
+
+  const coords = geometry.coordinates as unknown
+  if (geometry.type === 'LineString' && Array.isArray(coords)) return cleanRing(coords)
+  if (geometry.type === 'MultiLineString' && Array.isArray(coords)) {
+    const longest = coords
+      .filter(Array.isArray)
+      .map((line) => cleanRing(line as unknown[]))
+      .sort((a, b) => b.length - a.length)[0]
+    return longest ?? []
+  }
+  if (geometry.type === 'Polygon' && Array.isArray(coords)) {
+    const outer = coords[0]
+    return Array.isArray(outer) ? cleanRing(outer) : []
+  }
+  if (geometry.type === 'MultiPolygon' && Array.isArray(coords)) {
+    const rings = coords
+      .map((poly) => (Array.isArray(poly) && Array.isArray(poly[0]) ? cleanRing(poly[0] as unknown[]) : []))
+      .sort((a, b) => b.length - a.length)
+    return rings[0] ?? []
+  }
+  return []
+}
+
+function latLngToLocalMeters(origin: LatLng, point: LatLng): { x: number; y: number } {
+  const earthRadiusM = 6378137
+  const latRad = (origin.lat * Math.PI) / 180
+  return {
+    x: ((point.lng - origin.lng) * Math.PI * earthRadiusM * Math.cos(latRad)) / 180,
+    y: ((point.lat - origin.lat) * Math.PI * earthRadiusM) / 180,
+  }
+}
+
+function localMetersToLatLng(origin: LatLng, x: number, y: number): LatLng {
+  const earthRadiusM = 6378137
+  const latRad = (origin.lat * Math.PI) / 180
+  return L.latLng(
+    origin.lat + (y * 180) / (Math.PI * earthRadiusM),
+    origin.lng + (x * 180) / (Math.PI * earthRadiusM * Math.cos(latRad)),
+  )
+}
+
+type GeneratedCrossSectionLine = {
+  id: string
+  name: string
+  chainageM: number
+  line: [LatLng, LatLng]
+  result?: ProfileResponse
+}
+
+function generateCrossSectionLines(
+  alignment: LatLng[],
+  intervalM: number,
+  leftM: number,
+  rightM: number,
+): GeneratedCrossSectionLine[] {
+  if (alignment.length < 2) return []
+  const origin = alignment[0]!
+  const local = alignment.map((point) => latLngToLocalMeters(origin, point))
+  const segments: Array<{ start: { x: number; y: number }; end: { x: number; y: number }; length: number; chainageStart: number }> = []
+  let total = 0
+  for (let index = 1; index < local.length; index += 1) {
+    const start = local[index - 1]!
+    const end = local[index]!
+    const dx = end.x - start.x
+    const dy = end.y - start.y
+    const length = Math.hypot(dx, dy)
+    if (length <= 0.01) continue
+    segments.push({ start, end, length, chainageStart: total })
+    total += length
+  }
+  if (segments.length === 0) return []
+
+  const safeInterval = Math.max(1, intervalM)
+  const chainages: number[] = []
+  for (let chainage = 0; chainage <= total + 0.001; chainage += safeInterval) {
+    chainages.push(chainage)
+    if (chainages.length >= 80) break
+  }
+  if (chainages[chainages.length - 1] !== total && chainages.length < 80) chainages.push(total)
+
+  return chainages.map((chainage, index) => {
+    const segment = segments.find((item) => chainage <= item.chainageStart + item.length + 0.001) ?? segments[segments.length - 1]!
+    const distanceInSegment = Math.max(0, Math.min(segment.length, chainage - segment.chainageStart))
+    const t = segment.length === 0 ? 0 : distanceInSegment / segment.length
+    const x = segment.start.x + (segment.end.x - segment.start.x) * t
+    const y = segment.start.y + (segment.end.y - segment.start.y) * t
+    const dx = (segment.end.x - segment.start.x) / segment.length
+    const dy = (segment.end.y - segment.start.y) / segment.length
+    const nx = -dy
+    const ny = dx
+    const left = localMetersToLatLng(origin, x + nx * leftM, y + ny * leftM)
+    const right = localMetersToLatLng(origin, x - nx * rightM, y - ny * rightM)
+    const km = Math.floor(Math.round(chainage) / 1000)
+    const meters = String(Math.round(chainage) % 1000).padStart(3, '0')
+    return {
+      id: `cs-${index}-${Math.round(chainage)}`,
+      name: `CS ${km}+${meters}`,
+      chainageM: chainage,
+      line: [left, right],
+    }
+  })
 }
 
 type SyncRefs = {
@@ -322,12 +451,12 @@ function MeasureInteraction({
       if (!enabled || mode === 'none') return
       if ((mode === 'area' || mode === 'volume-area') && areaFrozen) return
       if (mode === 'volume-circle' && points.length >= 2) return
-      if (mode === 'distance' || mode === 'area' || mode === 'profile' || mode === 'volume-area' || mode === 'volume-circle') onAddPoint(e.latlng)
+      if (mode === 'distance' || mode === 'area' || mode === 'profile' || mode === 'cross-section' || mode === 'volume-area' || mode === 'volume-circle') onAddPoint(e.latlng)
     },
     dblclick(e) {
-      if (!enabled || (mode !== 'area' && mode !== 'profile' && mode !== 'volume-area') || areaFrozen) return
+      if (!enabled || (mode !== 'area' && mode !== 'profile' && mode !== 'cross-section' && mode !== 'volume-area') || areaFrozen) return
       e.originalEvent.preventDefault()
-      if (((mode === 'area' || mode === 'volume-area') && points.length >= 3) || (mode === 'profile' && points.length >= 2)) onCloseRing()
+      if (((mode === 'area' || mode === 'volume-area') && points.length >= 3) || ((mode === 'profile' || mode === 'cross-section') && points.length >= 2)) onCloseRing()
     },
   })
   return null
@@ -824,6 +953,8 @@ interface MapPaneProps {
   issues: SavedIssue[]
   cropEnabled: boolean
   cropFootprint?: LatLng[] | null
+  crossSectionLines: GeneratedCrossSectionLine[]
+  selectedCrossSectionId: string | null
   cogLayers: Array<{
     url: string
     bounds?: [[number, number], [number, number]] | null
@@ -861,6 +992,8 @@ function MapPane({
   issues,
   cropEnabled,
   cropFootprint,
+  crossSectionLines,
+  selectedCrossSectionId,
   cogLayers,
   comparisonPrimaryClipPercent,
   layerRefreshKey,
@@ -974,10 +1107,10 @@ function MapPane({
             onAddPoint={onMeasureAdd}
             onCloseRing={onMeasureCloseRing}
           />
-          {(measureMode === 'distance' || measureMode === 'profile') && measurePoints.length > 0 ? (
+          {(measureMode === 'distance' || measureMode === 'profile' || measureMode === 'cross-section') && measurePoints.length > 0 ? (
             <Polyline
               positions={measurePoints}
-              pathOptions={{ color: measureMode === 'profile' ? '#be123c' : '#0e3e49', weight: 3, dashArray: '6 4' }}
+              pathOptions={{ color: measureMode === 'profile' ? '#be123c' : measureMode === 'cross-section' ? '#f97316' : '#0e3e49', weight: 3, dashArray: '6 4' }}
             />
           ) : null}
           {(measureMode === 'area' || measureMode === 'volume-area') && measurePoints.length > 0 ? (
@@ -1018,6 +1151,18 @@ function MapPane({
           ))}
         </>
       ) : null}
+      {crossSectionLines.map((section) => (
+        <Polyline
+          key={section.id}
+          positions={section.line}
+          pathOptions={{
+            color: section.id === selectedCrossSectionId ? '#ef4444' : '#f97316',
+            weight: section.id === selectedCrossSectionId ? 4 : 2,
+            opacity: section.result ? 0.95 : 0.55,
+            dashArray: section.result ? undefined : '5 5',
+          }}
+        />
+      ))}
       <IssueInteraction active={issueMode} onPickPoint={onIssuePick} />
       <ElevationInteraction active={elevationMode} onPickPoint={onElevationPick} />
       <UserLocationMarker position={userLocation} />
@@ -1211,10 +1356,8 @@ function ProfileChart({
 
 function InteractiveProfileChart({
   result,
-  svgRef,
 }: {
   result: ProfileResponse
-  svgRef: RefObject<SVGSVGElement | null>
 }) {
   const values = result.points.filter((point) => point.elevation != null)
   if (values.length === 0) {
@@ -1266,7 +1409,6 @@ function InteractiveProfileChart({
           />
         </LineChart>
       </ResponsiveContainer>
-      <svg ref={svgRef} className="mv-profile-export-svg" viewBox="0 0 1 1" aria-hidden />
     </div>
   )
 }
@@ -1312,6 +1454,11 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const [elevationResult, setElevationResult] = useState<ElevationResponse | null>(null)
   const [analysisError, setAnalysisError] = useState<string | null>(null)
   const [profileResult, setProfileResult] = useState<ProfileResponse | null>(null)
+  const [crossSectionLines, setCrossSectionLines] = useState<GeneratedCrossSectionLine[]>([])
+  const [selectedCrossSectionId, setSelectedCrossSectionId] = useState<string | null>(null)
+  const [crossSectionIntervalM, setCrossSectionIntervalM] = useState(20)
+  const [crossSectionLeftM, setCrossSectionLeftM] = useState(150)
+  const [crossSectionRightM, setCrossSectionRightM] = useState(150)
   const [volumeResult, setVolumeResult] = useState<DtmVolumeResponse | null>(null)
   const [analysisBusy, setAnalysisBusy] = useState(false)
   const [userLocation, setUserLocation] = useState<LatLng | null>(null)
@@ -1325,7 +1472,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const selectedBaseMap = useMemo(() => getBaseMap(baseMapKey), [baseMapKey])
 
   const distanceM = useMemo(
-    () => (measureMode === 'distance' || measureMode === 'profile' ? totalPathLengthM(points) : 0),
+    () => (measureMode === 'distance' || measureMode === 'profile' || measureMode === 'cross-section' ? totalPathLengthM(points) : 0),
     [measureMode, points],
   )
 
@@ -1354,8 +1501,28 @@ export function MapViewer({ projectId }: MapViewerProps) {
     setElevationResult(null)
     setProfileResult(null)
     setVolumeResult(null)
+    setCrossSectionLines([])
+    setSelectedCrossSectionId(null)
     setAnalysisError(null)
   }, [])
+
+  const useSelectedShapeAsAnalysisLine = useCallback(
+    async (mode: 'profile' | 'cross-section') => {
+      const shapePoints = latLngsFromSpatialFeature(selectedSpatialFeature)
+      if (shapePoints.length < 2) {
+        await modal.alert(
+          'No usable shape selected',
+          'Click an imported KML/SHP line or polygon boundary first, then use this button again.',
+        )
+        return
+      }
+      clearAnalysisResults()
+      setMeasureMode(mode)
+      setPoints(shapePoints)
+      setAreaFrozen(true)
+    },
+    [clearAnalysisResults, modal, selectedSpatialFeature],
+  )
 
   const downloadTextFile = useCallback((filename: string, content: string, type: string) => {
     const blob = new Blob([content], { type })
@@ -1929,6 +2096,47 @@ export function MapViewer({ projectId }: MapViewerProps) {
     }
   }, [activeAnalysisLayer?.datasetId, analysisBusy, points, projectId])
 
+  const runCrossSections = useCallback(async () => {
+    if (!projectId || !activeAnalysisLayer?.datasetId || points.length < 2 || analysisBusy) return
+    const generated = generateCrossSectionLines(points, crossSectionIntervalM, crossSectionLeftM, crossSectionRightM)
+    if (generated.length === 0) return
+
+    setAnalysisBusy(true)
+    setAnalysisError(null)
+    setProfileResult(null)
+    try {
+      const sampled: GeneratedCrossSectionLine[] = []
+      for (const section of generated) {
+        const payload = section.line.map((p) => [p.lng, p.lat] as [number, number])
+        const result = await getCrossSection(projectId, activeAnalysisLayer.datasetId, payload)
+        sampled.push({ ...section, result })
+      }
+      setCrossSectionLines(sampled)
+      const first = sampled[0] ?? null
+      setSelectedCrossSectionId(first?.id ?? null)
+      setProfileResult(first?.result ?? null)
+    } catch (error) {
+      setAnalysisError(error instanceof Error ? error.message : 'Cross section generation failed')
+      setCrossSectionLines(generated)
+      setSelectedCrossSectionId(generated[0]?.id ?? null)
+    } finally {
+      setAnalysisBusy(false)
+    }
+  }, [
+    activeAnalysisLayer?.datasetId,
+    analysisBusy,
+    crossSectionIntervalM,
+    crossSectionLeftM,
+    crossSectionRightM,
+    points,
+    projectId,
+  ])
+
+  const selectCrossSection = useCallback((section: GeneratedCrossSectionLine) => {
+    setSelectedCrossSectionId(section.id)
+    setProfileResult(section.result ?? null)
+  }, [])
+
   const runVolume = useCallback(
     async (scope: 'overall' | 'area' | 'circle') => {
       if (!projectId || !activeAnalysisLayer?.datasetId || analysisBusy) return
@@ -1953,14 +2161,6 @@ export function MapViewer({ projectId }: MapViewerProps) {
     },
     [activeAnalysisLayer?.datasetId, analysisBusy, circleRadiusM, points, projectId],
   )
-
-  useEffect(() => {
-    if (measureMode !== 'profile' || points.length < 2 || !activeAnalysisLayer?.datasetId) return
-    const timer = window.setTimeout(() => {
-      void runProfile()
-    }, 700)
-    return () => window.clearTimeout(timer)
-  }, [activeAnalysisLayer?.datasetId, measureMode, points, runProfile])
 
   const exportProfileCsv = useCallback(() => {
     if (!profileResult) return
@@ -2381,6 +2581,428 @@ export function MapViewer({ projectId }: MapViewerProps) {
   return (
     <div className="mv-root">
       <div className="mv-chrome">
+        <div className="mv-top-toolbar" role="toolbar" aria-label="2D map tools">
+          <div className="mv-top-menu">
+            <button type="button" className="mv-top-menu__trigger">
+              <i className="fas fa-pen-nib" aria-hidden />
+              Interaction & Drawing
+              <i className="fas fa-chevron-down" aria-hidden />
+            </button>
+            <div className="mv-top-menu__dropdown">
+              <button
+                type="button"
+                className={digitization.mode === 'edit' ? 'mv-menu-action mv-menu-action--active' : 'mv-menu-action'}
+                disabled={splitView}
+                onClick={() => handleDigitizationModeChange('edit')}
+              >
+                <i className="fas fa-hand-pointer" aria-hidden />
+                Select / Edit Feature
+              </button>
+              <button
+                type="button"
+                className={digitization.mode === 'polygon' ? 'mv-menu-action mv-menu-action--active' : 'mv-menu-action'}
+                disabled={splitView}
+                onClick={() => handleDigitizationModeChange('polygon')}
+              >
+                <i className="fas fa-draw-polygon" aria-hidden />
+                Draw Polygon
+              </button>
+              <button
+                type="button"
+                className={digitization.mode === 'polyline' ? 'mv-menu-action mv-menu-action--active' : 'mv-menu-action'}
+                disabled={splitView}
+                onClick={() => handleDigitizationModeChange('polyline')}
+              >
+                <i className="fas fa-project-diagram" aria-hidden />
+                Draw Polyline
+              </button>
+              <button
+                type="button"
+                className={digitization.mode === 'marker' ? 'mv-menu-action mv-menu-action--active' : 'mv-menu-action'}
+                disabled={splitView}
+                onClick={() => handleDigitizationModeChange('marker')}
+              >
+                <i className="fas fa-map-marker-alt" aria-hidden />
+                Place Point Marker
+              </button>
+              <div className="mv-menu-divider" />
+              <button
+                type="button"
+                className="mv-menu-action"
+                disabled={!digitization.canFinishDraft || splitView}
+                onClick={digitization.finishDraft}
+              >
+                <i className="fas fa-check" aria-hidden />
+                Finish Draft
+              </button>
+              <button
+                type="button"
+                className="mv-menu-action mv-menu-action--ghost"
+                disabled={!digitization.isDrawing || splitView}
+                onClick={digitization.clearDraft}
+              >
+                <i className="fas fa-eraser" aria-hidden />
+                Clear Draft
+              </button>
+            </div>
+          </div>
+
+          <div className="mv-top-menu">
+            <button type="button" className="mv-top-menu__trigger">
+              <i className="fas fa-ruler-combined" aria-hidden />
+              Measurements & Analysis
+              <i className="fas fa-chevron-down" aria-hidden />
+            </button>
+            <div className="mv-top-menu__dropdown mv-top-menu__dropdown--wide">
+              <button
+                type="button"
+                className={measureMode === 'distance' && !splitView ? 'mv-menu-action mv-menu-action--active' : 'mv-menu-action'}
+                disabled={splitView || digitizationToolActive}
+                onClick={() => setTool('distance')}
+              >
+                <i className="fas fa-ruler" aria-hidden />
+                Measure Length
+              </button>
+              <button
+                type="button"
+                className={measureMode === 'area' && !splitView ? 'mv-menu-action mv-menu-action--active' : 'mv-menu-action'}
+                disabled={splitView || digitizationToolActive}
+                onClick={() => setTool('area')}
+              >
+                <i className="fas fa-vector-square" aria-hidden />
+                Measure Area
+              </button>
+              <button
+                type="button"
+                className={measureMode === 'profile' && !splitView ? 'mv-menu-action mv-menu-action--active' : 'mv-menu-action'}
+                disabled={splitView || digitizationToolActive || !activeAnalysisLayer}
+                onClick={() => setTool('profile')}
+              >
+                <i className="fas fa-chart-area" aria-hidden />
+                Elevation Profile (L-Section)
+              </button>
+              <button
+                type="button"
+                className={measureMode === 'cross-section' && !splitView ? 'mv-menu-action mv-menu-action--active' : 'mv-menu-action'}
+                disabled={splitView || digitizationToolActive || !activeAnalysisLayer}
+                onClick={() => setTool('cross-section')}
+              >
+                <i className="fas fa-grip-lines" aria-hidden />
+                Cross Sections
+              </button>
+              <button
+                type="button"
+                className={elevationMode && !splitView ? 'mv-menu-action mv-menu-action--active' : 'mv-menu-action'}
+                disabled={splitView || digitizationToolActive || !activeAnalysisLayer}
+                onClick={toggleElevationMode}
+              >
+                <i className="fas fa-mountain" aria-hidden />
+                Elevation Point
+              </button>
+              <div className="mv-menu-divider" />
+              {analysisLayers.length > 0 ? (
+                <label className="mv-menu-field">
+                  <span>DTM/DSM analysis layer</span>
+                  <select
+                    className="mv-select"
+                    value={analysisDatasetId}
+                    onChange={(e) => setAnalysisDatasetId(e.target.value)}
+                    aria-label="DTM or DSM analysis layer"
+                  >
+                    {analysisLayers.map((layer) => (
+                      <option key={layer.id} value={layer.datasetId}>
+                        {layer.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <p className="mv-menu-empty">No DTM/DSM layer available.</p>
+              )}
+              <button
+                type="button"
+                className="mv-menu-action"
+                disabled={splitView || digitizationToolActive || !activeAnalysisLayer || analysisBusy}
+                onClick={() => void runVolume('overall')}
+              >
+                <i className="fas fa-cubes-stacked" aria-hidden />
+                Overall Volume
+              </button>
+              <button
+                type="button"
+                className={measureMode === 'volume-area' && !splitView ? 'mv-menu-action mv-menu-action--active' : 'mv-menu-action'}
+                disabled={splitView || digitizationToolActive || !activeAnalysisLayer}
+                onClick={() => setTool('volume-area')}
+              >
+                <i className="fas fa-vector-square" aria-hidden />
+                Area Volume
+              </button>
+              <button
+                type="button"
+                className={measureMode === 'volume-circle' && !splitView ? 'mv-menu-action mv-menu-action--active' : 'mv-menu-action'}
+                disabled={splitView || digitizationToolActive || !activeAnalysisLayer}
+                onClick={() => setTool('volume-circle')}
+              >
+                <i className="fas fa-circle" aria-hidden />
+                Circle Volume
+              </button>
+            </div>
+          </div>
+
+          <div className="mv-top-menu">
+            <button type="button" className="mv-top-menu__trigger">
+              <i className="fas fa-layer-group" aria-hidden />
+              Data Layers & Import
+              <i className="fas fa-chevron-down" aria-hidden />
+            </button>
+            <div className="mv-top-menu__dropdown mv-top-menu__dropdown--xl">
+              <label className="mv-menu-field">
+                <span>Base Map</span>
+                <select
+                  className="mv-select"
+                  value={baseMapKey}
+                  onChange={(event) => setBaseMapKey(event.target.value as BaseMapKey)}
+                  aria-label="Base map"
+                >
+                  {BASE_MAPS.map((map) => (
+                    <option key={map.key} value={map.key}>
+                      {map.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="mv-menu-section-title">
+                <i className="fas fa-sliders-h" aria-hidden />
+                Layer Opacity & Compare
+              </div>
+              <div className="mv-menu-layer-list" aria-label="Project 2D layers">
+                {activeCogLayers.length > 0 ? (
+                  activeCogLayers.map((layer) => (
+                    <label
+                      key={layer.id}
+                      className={selectedCogTileUrls.includes(layer.url) ? 'mv-layer-check mv-layer-check--active' : 'mv-layer-check'}
+                      title={`${layer.datasetType?.toUpperCase() || 'LAYER'}${layer.month ? ` - ${layer.month}` : ''}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedCogTileUrls.includes(layer.url)}
+                        onChange={() => toggleVisibleCogLayer(layer)}
+                      />
+                      <span className="mv-layer-type">{layer.datasetType || 'layer'}</span>
+                      <span className="mv-layer-check__name">{layer.name}</span>
+                      {layer.url === cogTileUrl ? <small>Primary</small> : null}
+                    </label>
+                  ))
+                ) : projectLayersLoading ? (
+                  <p className="mv-menu-empty">Loading project layers...</p>
+                ) : (
+                  <p className="mv-menu-empty">No Web-Ready Ortho/DTM/DSM layers found.</p>
+                )}
+              </div>
+              {splitView ? (
+                <div className="mv-menu-compare-grid">
+                  <label className="mv-menu-field">
+                    <span>Primary Layer</span>
+                    <select
+                      className="mv-select"
+                      value={cogTileUrl ?? ''}
+                      onChange={(e) => selectPrimaryLayer(e.target.value || null)}
+                    >
+                      <option value="">No overlay selected</option>
+                      {activeCogLayers.map((layer) => (
+                        <option key={layer.id} value={layer.url}>
+                          {layer.datasetType ? `${layer.datasetType.toUpperCase()} - ` : ''}{layer.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="mv-menu-field">
+                    <span>Compare Layer</span>
+                    <select
+                      className="mv-select"
+                      value={compareCogTileUrl ?? ''}
+                      onChange={(e) => selectCompareLayer(e.target.value || null)}
+                    >
+                      <option value="">No overlay selected</option>
+                      {activeCogLayers.map((layer) => (
+                        <option key={layer.id} value={layer.url}>
+                          {layer.datasetType ? `${layer.datasetType.toUpperCase()} - ` : ''}{layer.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              ) : null}
+              <button
+                type="button"
+                className={splitView ? 'mv-menu-action mv-menu-action--active' : 'mv-menu-action'}
+                onClick={() => {
+                  setSplitView((v) => !v)
+                  setMeasureMode('none')
+                  setPoints([])
+                  setIssueMode(false)
+                  setIssueDraft(null)
+                  setIssueError(null)
+                }}
+              >
+                <i className="fas fa-sliders-h" aria-hidden />
+                Compare Slider
+              </button>
+              <button
+                type="button"
+                className="mv-menu-action"
+                disabled={spatialBusy}
+                onClick={() => spatialImportInputRef.current?.click()}
+              >
+                <i className="fas fa-file-import" aria-hidden />
+                Import KML/SHP
+              </button>
+              <div className="mv-menu-divider" />
+              <button
+                type="button"
+                className={cropEnabled ? 'mv-menu-action mv-menu-action--active' : 'mv-menu-action'}
+                onClick={() => setCropEnabled((v) => !v)}
+                disabled={!cogTileUrl || !cropMaskPoints}
+              >
+                <i className="fas fa-crop-simple" aria-hidden />
+                {cropEnabled ? 'Crop ON' : 'Apply Crop'}
+              </button>
+              <label className="mv-menu-field">
+                <span>Crop Source</span>
+                <select
+                  className="mv-select"
+                  value={cropMode}
+                  onChange={(e) => {
+                    const mode = e.target.value as 'off' | 'kml' | 'draw'
+                    setCropMode(mode)
+                    if (mode === 'draw') {
+                      setTool('area')
+                    }
+                  }}
+                >
+                  <option value="off">Off</option>
+                  <option value="kml">KML Border Import</option>
+                  <option value="draw">Draw Border</option>
+                </select>
+              </label>
+              {cropMode === 'kml' ? (
+                <button
+                  type="button"
+                  className="mv-menu-action"
+                  disabled={!cogTileUrl || cropBusy}
+                  onClick={() => kmlInputRef.current?.click()}
+                >
+                  <i className="fas fa-file-import" aria-hidden />
+                  {cropBusy ? 'Saving KML...' : 'Import Crop KML'}
+                </button>
+              ) : null}
+              {cropMode === 'draw' ? (
+                <button
+                  type="button"
+                  className="mv-menu-action"
+                  disabled={!cogTileUrl || points.length < 3 || cropBusy}
+                  onClick={() => void saveDrawCrop()}
+                >
+                  <i className="fas fa-save" aria-hidden />
+                  {cropBusy ? 'Saving Shape...' : 'Save Drawn Shape'}
+                </button>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="mv-top-menu mv-top-menu--right">
+            <button type="button" className="mv-top-menu__trigger">
+              <i className="fas fa-cogs" aria-hidden />
+              System & Properties
+              <i className="fas fa-chevron-down" aria-hidden />
+            </button>
+            <div className="mv-top-menu__dropdown mv-top-menu__dropdown--wide">
+              <button
+                type="button"
+                className="mv-menu-action"
+                onClick={() => {
+                  if (selectedSpatialFeature) {
+                    setSelectedSpatialFeature(selectedSpatialFeature)
+                  } else {
+                    void modal.alert('No feature selected', 'Click a saved/imported spatial shape on the map to view its properties.')
+                  }
+                }}
+              >
+                <i className="fas fa-info-circle" aria-hidden />
+                Feature Properties
+              </button>
+              <button
+                type="button"
+                className={issueMode && !splitView ? 'mv-menu-action mv-menu-action--active' : 'mv-menu-action'}
+                disabled={splitView || digitizationToolActive}
+                onClick={toggleIssueMode}
+              >
+                <i className="fas fa-map-marker-alt" aria-hidden />
+                Report Issue
+              </button>
+              <button
+                type="button"
+                className="mv-menu-action"
+                disabled={splitView}
+                onClick={() => void findMyLocation()}
+              >
+                <i className="fas fa-crosshairs" aria-hidden />
+                Find My Location
+              </button>
+              <div className="mv-menu-divider" />
+              <button
+                type="button"
+                className="mv-menu-action"
+                onClick={() => void modal.alert('WAL Manager', 'SQLite WAL mode is active for smoother live and development database access.')}
+              >
+                <i className="fas fa-database" aria-hidden />
+                WAL Manager
+              </button>
+              <button
+                type="button"
+                className="mv-menu-action"
+                onClick={() => void modal.alert('Graceful Updates Center', 'Version checks are active. When a new update is available, the portal will ask before refreshing.')}
+              >
+                <i className="fas fa-sync-alt" aria-hidden />
+                Graceful Updates Center
+              </button>
+              <div className="mv-menu-divider" />
+              <button
+                type="button"
+                className="mv-menu-action mv-menu-action--ghost"
+                onClick={() => {
+                  clearMeasure()
+                  clearAnalysisResults()
+                }}
+                disabled={measureMode === 'none' || splitView}
+              >
+                <i className="fas fa-eraser" aria-hidden />
+                Clear Drawing
+              </button>
+              <div className="mv-menu-compare-grid">
+                <button
+                  type="button"
+                  className="mv-menu-action"
+                  onClick={() => void exportCurrentDrawingKml()}
+                  disabled={points.length === 0 || splitView}
+                >
+                  <i className="fas fa-file-export" aria-hidden />
+                  Export KML
+                </button>
+                <button
+                  type="button"
+                  className="mv-menu-action"
+                  onClick={() => void exportCurrentDrawingCsv()}
+                  disabled={points.length === 0 || splitView}
+                >
+                  <i className="fas fa-table" aria-hidden />
+                  Export CSV
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div className="mv-panel mv-panel--layers">
           <p className="mv-panel__title">Data Highlights</p>
           <fieldset className="mv-fieldset">
@@ -2685,13 +3307,203 @@ export function MapViewer({ projectId }: MapViewerProps) {
             </div>
           </div>
         </div>
+        <input
+          ref={spatialImportInputRef}
+          type="file"
+          accept=".kml,.shp,.zip"
+          style={{ display: 'none' }}
+          onChange={(event) => {
+            const f = event.target.files?.[0]
+            if (f) void handleSpatialImport(f)
+            event.currentTarget.value = ''
+          }}
+        />
+        <input
+          ref={kmlInputRef}
+          type="file"
+          accept=".kml,.xml"
+          style={{ display: 'none' }}
+          onChange={(event) => {
+            const f = event.target.files?.[0]
+            if (f) void importKmlCrop(f)
+            event.currentTarget.value = ''
+          }}
+        />
       </div>
+
+      {measureMode === 'profile' && !splitView ? (
+        <div className="mv-cross-section-toolbox" aria-live="polite">
+          <div>
+            <span className="mv-cross-section-toolbox__eyebrow">L-Section</span>
+            <strong>DTM Elevation Profile</strong>
+            <p>Draw a line on the 2D map, then generate the longitudinal elevation profile.</p>
+          </div>
+          <button
+            type="button"
+            className="mv-tool"
+            disabled={!selectedSpatialFeature}
+            onClick={() => void useSelectedShapeAsAnalysisLine('profile')}
+            title="Use the selected imported/digitized KML/SHP feature as the L-section line."
+          >
+            <i className="fas fa-file-import" aria-hidden />
+            Use Selected Shape
+          </button>
+          {analysisLayers.length > 0 ? (
+            <label className="mv-cross-section-toolbox__select">
+              <span>Surface layer</span>
+              <select
+                className="mv-select"
+                value={analysisDatasetId}
+                onChange={(e) => setAnalysisDatasetId(e.target.value)}
+              >
+                {analysisLayers.map((layer) => (
+                  <option key={layer.id} value={layer.datasetId}>
+                    {layer.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          <span className="mv-cross-section-toolbox__metric">
+            Length <strong>{formatLengthM(distanceM)}</strong>
+          </span>
+          <div className="mv-cross-section-toolbox__actions">
+            <button
+              type="button"
+              className="mv-tool"
+              disabled={!activeAnalysisLayer || points.length < 2 || analysisBusy}
+              onClick={() => void runProfile()}
+            >
+              <i className="fas fa-chart-area" aria-hidden />
+              {analysisBusy ? 'Generating...' : 'Generate Profile'}
+            </button>
+            <button
+              type="button"
+              className="mv-tool mv-tool--ghost"
+              onClick={() => {
+                clearMeasure()
+                clearAnalysisResults()
+              }}
+            >
+              Clear Line
+            </button>
+            <button
+              type="button"
+              className="mv-tool"
+              disabled={!profileResult}
+              onClick={exportProfileCsv}
+            >
+              Export CSV
+            </button>
+            <button
+              type="button"
+              className="mv-tool"
+              disabled={!profileResult}
+              onClick={exportProfilePng}
+            >
+              Export PNG
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {measureMode === 'cross-section' && !splitView ? (
+        <div className="mv-cross-section-toolbox mv-cross-section-toolbox--chainage" aria-live="polite">
+          <div>
+            <span className="mv-cross-section-toolbox__eyebrow">Cross Sections</span>
+            <strong>Chainage Section Generator</strong>
+            <p>Draw a center alignment, set interval and left/right offsets, then generate DTM/DSM cross sections.</p>
+          </div>
+          <button
+            type="button"
+            className="mv-tool"
+            disabled={!selectedSpatialFeature}
+            onClick={() => void useSelectedShapeAsAnalysisLine('cross-section')}
+            title="Use the selected imported/digitized KML/SHP feature as the center alignment."
+          >
+            <i className="fas fa-file-import" aria-hidden />
+            Use Selected Shape
+          </button>
+          <label className="mv-cross-section-toolbox__select">
+            <span>Interval (m)</span>
+            <input
+              className="mv-number-input"
+              type="number"
+              min={1}
+              step={1}
+              value={crossSectionIntervalM}
+              onChange={(e) => setCrossSectionIntervalM(Math.max(1, Number(e.target.value) || 1))}
+            />
+          </label>
+          <label className="mv-cross-section-toolbox__select">
+            <span>Left (m)</span>
+            <input
+              className="mv-number-input"
+              type="number"
+              min={1}
+              step={1}
+              value={crossSectionLeftM}
+              onChange={(e) => setCrossSectionLeftM(Math.max(1, Number(e.target.value) || 1))}
+            />
+          </label>
+          <label className="mv-cross-section-toolbox__select">
+            <span>Right (m)</span>
+            <input
+              className="mv-number-input"
+              type="number"
+              min={1}
+              step={1}
+              value={crossSectionRightM}
+              onChange={(e) => setCrossSectionRightM(Math.max(1, Number(e.target.value) || 1))}
+            />
+          </label>
+          <span className="mv-cross-section-toolbox__metric">
+            Alignment <strong>{formatLengthM(distanceM)}</strong>
+          </span>
+          <div className="mv-cross-section-toolbox__actions">
+            <button
+              type="button"
+              className="mv-tool"
+              disabled={!activeAnalysisLayer || points.length < 2 || analysisBusy}
+              onClick={() => void runCrossSections()}
+            >
+              <i className="fas fa-grip-lines" aria-hidden />
+              {analysisBusy ? 'Generating...' : 'Generate Sections'}
+            </button>
+            <button
+              type="button"
+              className="mv-tool mv-tool--ghost"
+              onClick={() => {
+                clearMeasure()
+                clearAnalysisResults()
+              }}
+            >
+              Clear Sections
+            </button>
+          </div>
+          {crossSectionLines.length > 0 ? (
+            <div className="mv-section-strip" aria-label="Generated cross sections">
+              {crossSectionLines.map((section) => (
+                <button
+                  key={section.id}
+                  type="button"
+                  className={section.id === selectedCrossSectionId ? 'mv-section-chip mv-section-chip--active' : 'mv-section-chip'}
+                  onClick={() => selectCrossSection(section)}
+                  title={`${section.name} - Chainage ${formatLengthM(section.chainageM)}`}
+                >
+                  {section.name}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {measureMode !== 'none' && !splitView ? (
         <div className="mv-hud" aria-live="polite">
-          {measureMode === 'distance' || measureMode === 'profile' ? (
+          {measureMode === 'distance' || measureMode === 'profile' || measureMode === 'cross-section' ? (
             <span>
-              {measureMode === 'profile' ? 'Profile length' : 'Distance'}: <strong>{formatLengthM(distanceM)}</strong>
+              {measureMode === 'profile' ? 'Profile length' : measureMode === 'cross-section' ? 'Alignment length' : 'Distance'}: <strong>{formatLengthM(distanceM)}</strong>
             </span>
           ) : measureMode === 'volume-circle' ? (
             <span>
@@ -2763,7 +3575,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
               <div className="mv-profile-export-fallback" aria-hidden>
                 <ProfileChart result={profileResult} svgRef={profileChartRef} />
               </div>
-              <InteractiveProfileChart result={profileResult} svgRef={profileChartRef} />
+              <InteractiveProfileChart result={profileResult} />
               <div className="mv-analysis-card__actions">
                 <button type="button" className="mv-tool" onClick={exportProfileCsv}>Export CSV</button>
                 <button type="button" className="mv-tool" onClick={exportProfilePng}>Export PNG</button>
@@ -2864,6 +3676,8 @@ export function MapViewer({ projectId }: MapViewerProps) {
                 issues={issues}
                 cropEnabled={cropEnabled && !splitView}
                 cropFootprint={splitView ? null : cropMaskPoints}
+                crossSectionLines={crossSectionLines}
+                selectedCrossSectionId={selectedCrossSectionId}
                 cogLayers={visibleCogLayerEntries}
                 comparisonPrimaryClipPercent={splitView ? compareSliderPercent : null}
                 layerRefreshKey={`${cogTileUrl || 'none'}|${compareCogTileUrl || 'none'}|${comparisonRefreshTick}`}
