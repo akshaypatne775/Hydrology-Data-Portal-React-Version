@@ -369,12 +369,13 @@ function datasetMergeKey(row: Pick<DatasetRow, 'datasetId' | 'fileName' | 'layer
 }
 
 function isRawPointCloudUrl(url: string): boolean {
-  return /\.(las|laz)(?:[?#].*)?$/i.test(url.trim())
+  const normalized = url.trim().toLowerCase().split(/[?#]/, 1)[0] || ''
+  return /\.(las|laz)$/i.test(normalized) && !normalized.endsWith('.copc.laz')
 }
 
 function isPointCloudViewerUrl(url: string): boolean {
   const normalized = url.trim().toLowerCase().split(/[?#]/, 1)[0] || ''
-  return normalized.includes('/droid-ept-viewer/') || normalized.endsWith('/ept.json')
+  return normalized.includes('/droid-ept-viewer/') || normalized.endsWith('/ept.json') || normalized.endsWith('.copc.laz')
 }
 
 function eptApiUrlToViewerUrl(eptUrl: string, projectId: string, datasetId: string, displayName: string): string {
@@ -388,9 +389,23 @@ function eptApiUrlToViewerUrl(eptUrl: string, projectId: string, datasetId: stri
   return `/droid-ept-viewer/index.html?${params.toString()}`
 }
 
+function copcApiUrlToViewerUrl(copcUrl: string, projectId: string, datasetId: string, displayName: string): string {
+  const normalizedCopcUrl = toSameOriginBackendUrl(copcUrl) || copcUrl
+  const params = new URLSearchParams({
+    copc: normalizedCopcUrl,
+    project: projectId,
+    dataset: datasetId || normalizedPointCloudName(displayName),
+    name: displayName,
+  })
+  return `/droid-ept-viewer/index.html?${params.toString()}`
+}
+
 function normalizePointCloudViewerUrl(url: string | undefined, projectId: string, datasetId: string, displayName: string): string {
   const sameOriginUrl = toSameOriginBackendUrl(url) || ''
   if (!sameOriginUrl || isRawPointCloudUrl(sameOriginUrl)) return ''
+  if (sameOriginUrl.toLowerCase().split(/[?#]/, 1)[0]?.endsWith('.copc.laz')) {
+    return copcApiUrlToViewerUrl(sameOriginUrl, projectId, datasetId, displayName)
+  }
   if (sameOriginUrl.toLowerCase().split(/[?#]/, 1)[0]?.endsWith('/ept.json')) {
     return eptApiUrlToViewerUrl(sameOriginUrl, projectId, datasetId, displayName)
   }
@@ -1121,10 +1136,10 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                                 })
                               } else {
                                 let status = await getPointCloudStatus(projectId, row.datasetId || row.fileName)
-                                if ((!status?.ready || (!status?.tileset_url && !status?.ept_url)) && row.datasetId && row.fileName) {
+                                if ((!status?.ready || (!status?.tileset_url && !status?.copc_url && !status?.ept_url)) && row.datasetId && row.fileName) {
                                   status = await getPointCloudStatus(projectId, row.fileName)
                                 }
-                                if (!status?.ready || (!status?.tileset_url && !status?.ept_url)) {
+                                if (!status?.ready || (!status?.tileset_url && !status?.copc_url && !status?.ept_url)) {
                                   status = await getPointCloudStatus(projectId)
                                 }
                                 const resolvedUrl = normalizePointCloudViewerUrl(
@@ -1142,11 +1157,20 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                                       row.fileName,
                                     )
                                     : ''
+                                const statusCopcViewerUrl =
+                                  status?.ready && status?.copc_url
+                                    ? normalizePointCloudViewerUrl(
+                                      status.copc_url,
+                                      projectId,
+                                      row.datasetId || row.fileName,
+                                      row.fileName,
+                                    )
+                                    : ''
                                 let readyUrl =
                                   status?.ready && resolvedUrl
                                     ? resolvedUrl
-                                    : statusEptViewerUrl
-                                      ? statusEptViewerUrl
+                                    : statusCopcViewerUrl || statusEptViewerUrl
+                                      ? statusCopcViewerUrl || statusEptViewerUrl
                                       : ''
                                 const sameNameReadyRow = datasets.find((candidate) => {
                                   const candidateUrl = candidate.layerUrl
@@ -1172,7 +1196,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                                     status?.failed ? 'Point cloud conversion failed' : 'Point cloud is still preparing',
                                     status?.failed
                                       ? 'This point cloud did not finish cleanly. Please reprocess/upload it again; the detailed error is saved in the portal error log.'
-                                      : 'This LAS/LAZ file is uploaded, but the EPT point cloud viewer is not ready yet. Keep it processing, then open it again from Data Catalog.',
+                                      : 'This LAS/LAZ file is uploaded, but the point cloud viewer asset is not ready yet. Keep it processing, then open it again from Data Catalog.',
                                   )
                                   return
                                 }

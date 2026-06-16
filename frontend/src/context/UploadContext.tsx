@@ -214,7 +214,9 @@ export function UploadProvider({ children }: PropsWithChildren) {
           project_id?: string
           target_tileset_url?: string
           tileset_url?: string
+          copc_url?: string
           ept_url?: string
+          viewer_type?: string
           tileset_id?: string
         }
         const resolvedProjectId = completeData.project_id || projectId
@@ -250,8 +252,8 @@ export function UploadProvider({ children }: PropsWithChildren) {
           }
           upsertTask(id, {
             state: 'processing',
-            statusText: `Converting ${file.name} to EPT point cloud viewer...`,
-            stage: 'EPT conversion running',
+            statusText: `Converting ${file.name} to point cloud viewer...`,
+            stage: 'Point cloud conversion running',
             etaText: 'Large point clouds can take several hours',
           })
           await new Promise((resolve) => window.setTimeout(resolve, 2000))

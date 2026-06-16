@@ -62,10 +62,12 @@ PORT SUMMARY
 POINT CLOUD EPT CONVERSION
 - The old PotreeConverter workflow is removed.
 - Droid Cloud now converts LAS/LAZ point clouds to EPT and opens them in the Droid EPT viewer.
-- Preferred converter is Untwine because it is the fastest EPT path.
-- Fallback converters are Entwine and PDAL writers.ept.
+- Strict converter is Untwine only because it creates the proper chunked EPT hierarchy needed by the viewer.
+- Entwine and PDAL writers.ept fallback are disabled for portal EPT generation.
+- Current QGIS Untwine path:
+  C:\Program Files\QGIS 3.22.8\apps\qgis-ltr\untwine.exe
 - Portable converter files can be placed in Tools\EPT.
-- Dev and Live backend startup scripts automatically check Tools\EPT and the system PATH.
+- Dev and Live backend startup scripts first check the QGIS Untwine path, then Tools\EPT and the system PATH.
 - This machine also checks the isolated Miniforge environment at:
   C:\Users\droid\miniforge3\envs\droid-ept\Library\bin
-- If no EPT converter is found, point cloud uploads can start but conversion cannot finish until Untwine, Entwine, or PDAL is installed.
+- If Untwine is not found, point cloud conversion fails explicitly instead of silently falling back.

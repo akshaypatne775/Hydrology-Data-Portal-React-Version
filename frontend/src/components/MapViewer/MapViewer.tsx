@@ -241,6 +241,22 @@ function latLngsFromSpatialFeature(feature: SpatialFeature | null): LatLng[] {
   return []
 }
 
+function spatialFeatureTitle(feature: SpatialFeature, fallback: string): string {
+  const properties = feature.geojson?.properties ?? {}
+  const propertyName = properties.name ?? properties.Name ?? properties.title ?? properties.Title
+  const candidate = feature.plot_id || feature.owner_name || (typeof propertyName === 'string' ? propertyName : '') || fallback
+  return candidate.trim() || fallback
+}
+
+function spatialFeatureMeta(feature: SpatialFeature): string {
+  const pieces = [
+    feature.structure_type || 'Unassigned',
+    feature.geometry_type || feature.geojson?.geometry?.type || 'Shape',
+    feature.owner_name ? `Owner: ${feature.owner_name}` : '',
+  ].filter(Boolean)
+  return pieces.join(' / ')
+}
+
 function latLngToLocalMeters(origin: LatLng, point: LatLng): { x: number; y: number } {
   const earthRadiusM = 6378137
   const latRad = (origin.lat * Math.PI) / 180
@@ -1465,11 +1481,29 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const [spatialLayers, setSpatialLayers] = useState<SpatialLayer[]>([])
   const [spatialBusy, setSpatialBusy] = useState(false)
   const [selectedSpatialFeature, setSelectedSpatialFeature] = useState<SpatialFeature | null>(null)
+  const [assignmentSpatialFeature, setAssignmentSpatialFeature] = useState<SpatialFeature | null>(null)
   const profileChartRef = useRef<SVGSVGElement | null>(null)
   const spatialImportInputRef = useRef<HTMLInputElement | null>(null)
   const mapCanvasRef = useRef<HTMLDivElement | null>(null)
 
   const selectedBaseMap = useMemo(() => getBaseMap(baseMapKey), [baseMapKey])
+  const spatialFeatureItems = useMemo(
+    () =>
+      spatialLayers.flatMap((layer) =>
+        layer.features.map((feature, index) => ({
+          layer,
+          feature,
+          title: spatialFeatureTitle(feature, `${layer.name} Shape ${index + 1}`),
+          meta: spatialFeatureMeta(feature),
+          canUseForAnalysis: latLngsFromSpatialFeature(feature).length >= 2,
+        })),
+      ),
+    [spatialLayers],
+  )
+  const selectedSpatialFeatureUsableForAnalysis = useMemo(
+    () => latLngsFromSpatialFeature(selectedSpatialFeature).length >= 2,
+    [selectedSpatialFeature],
+  )
 
   const distanceM = useMemo(
     () => (measureMode === 'distance' || measureMode === 'profile' || measureMode === 'cross-section' ? totalPathLengthM(points) : 0),
@@ -1512,7 +1546,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
       if (shapePoints.length < 2) {
         await modal.alert(
           'No usable shape selected',
-          'Click an imported KML/SHP line or polygon boundary first, then use this button again.',
+          'Select a saved/imported line or polygon boundary from Data Layers & Import first, then use this button again.',
         )
         return
       }
@@ -1683,6 +1717,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
         })
         appendSpatialFeatureToState(feature)
         setSelectedSpatialFeature(feature)
+        setAssignmentSpatialFeature(feature)
       } catch (error) {
         await modal.alert('Spatial save failed', error instanceof Error ? error.message : 'Could not save shape.')
       } finally {
@@ -1707,6 +1742,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
       setIssueError(null)
       setElevationMode(false)
       setSelectedSpatialFeature(null)
+      setAssignmentSpatialFeature(null)
       digitization.setMode(nextMode)
     },
     [digitization.setMode],
@@ -1723,6 +1759,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
         const layer = await importSpatialLayer(projectId, file)
         setSpatialLayers((prev) => [...prev.filter((item) => item.id !== layer.id), layer])
         setSelectedSpatialFeature(layer.features[0] ?? null)
+        setAssignmentSpatialFeature(null)
         await modal.alert('Spatial import complete', `${layer.features.length} shape(s) imported from ${file.name}.`)
       } catch (error) {
         await modal.alert('Spatial import failed', error instanceof Error ? error.message : 'Could not import file.')
@@ -1735,23 +1772,24 @@ export function MapViewer({ projectId }: MapViewerProps) {
 
   const handleSpatialAssignmentSave = useCallback(
     async (payload: { plot_id: string; owner_name: string; structure_type: StructureType }) => {
-      if (!projectId || !selectedSpatialFeature) return
-      if (selectedSpatialFeature.can_edit === false) {
+      if (!projectId || !assignmentSpatialFeature) return
+      if (assignmentSpatialFeature.can_edit === false) {
         await modal.alert('Read-only shape', 'Only the creator or an admin can edit this spatial shape.')
         return
       }
       setSpatialBusy(true)
       try {
-        const feature = await updateSpatialFeature(projectId, selectedSpatialFeature.id, payload)
+        const feature = await updateSpatialFeature(projectId, assignmentSpatialFeature.id, payload)
         replaceSpatialFeatureInState(feature)
-        setSelectedSpatialFeature(feature)
+        setAssignmentSpatialFeature(feature)
+        setSelectedSpatialFeature((prev) => (prev?.id === feature.id ? feature : prev))
       } catch (error) {
         await modal.alert('Assignment save failed', error instanceof Error ? error.message : 'Could not save assignment.')
       } finally {
         setSpatialBusy(false)
       }
     },
-    [modal, projectId, replaceSpatialFeatureInState, selectedSpatialFeature],
+    [assignmentSpatialFeature, modal, projectId, replaceSpatialFeatureInState],
   )
 
   const handleSpatialFeatureDelete = useCallback(
@@ -1767,7 +1805,8 @@ export function MapViewer({ projectId }: MapViewerProps) {
       try {
         await deleteSpatialFeature(projectId, feature.id)
         removeSpatialFeatureFromState(feature.id)
-        setSelectedSpatialFeature(null)
+        setSelectedSpatialFeature((prev) => (prev?.id === feature.id ? null : prev))
+        setAssignmentSpatialFeature((prev) => (prev?.id === feature.id ? null : prev))
       } catch (error) {
         await modal.alert('Delete failed', error instanceof Error ? error.message : 'Could not delete shape.')
       } finally {
@@ -1800,6 +1839,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
   const handleSpatialFeatureClick = useCallback(
     (feature: SpatialFeature) => {
       setSelectedSpatialFeature(feature)
+      setAssignmentSpatialFeature(feature)
     },
     [],
   )
@@ -1851,6 +1891,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
     if (!projectId) {
       setSpatialLayers([])
       setSelectedSpatialFeature(null)
+      setAssignmentSpatialFeature(null)
       return
     }
     let cancelled = false
@@ -2857,6 +2898,43 @@ export function MapViewer({ projectId }: MapViewerProps) {
                 <i className="fas fa-file-import" aria-hidden />
                 Import KML/SHP
               </button>
+              <div className="mv-menu-section-title">
+                <i className="fas fa-draw-polygon" aria-hidden />
+                Saved / Imported Shapes
+              </div>
+              <div className="mv-spatial-shape-list" aria-label="Saved and imported spatial shapes">
+                {spatialFeatureItems.length > 0 ? (
+                  spatialFeatureItems.map((item) => {
+                    const selected = selectedSpatialFeature?.id === item.feature.id
+                    return (
+                      <button
+                        key={item.feature.id}
+                        type="button"
+                        className={selected ? 'mv-spatial-shape mv-spatial-shape--selected' : 'mv-spatial-shape'}
+                        onClick={() => setSelectedSpatialFeature(item.feature)}
+                        title={`${item.layer.name} / ${item.meta}`}
+                      >
+                        <span className="mv-spatial-shape__top">
+                          <span className="mv-spatial-shape__title">{item.title}</span>
+                          <span className="mv-spatial-shape__source">{item.feature.source_type || 'shape'}</span>
+                        </span>
+                        <span className="mv-spatial-shape__meta">{item.layer.name}</span>
+                        <span className="mv-spatial-shape__meta">{item.meta}</span>
+                        <span className="mv-spatial-shape__footer">
+                          {selected ? <span className="mv-spatial-shape__selected">Selected</span> : null}
+                          {item.canUseForAnalysis ? (
+                            <span className="mv-spatial-shape__usable">L/C section ready</span>
+                          ) : (
+                            <span className="mv-spatial-shape__warning">Point only</span>
+                          )}
+                        </span>
+                      </button>
+                    )
+                  })
+                ) : (
+                  <p className="mv-menu-empty">No saved/imported shapes yet. Import KML/SHP or draw a shape first.</p>
+                )}
+              </div>
               <div className="mv-menu-divider" />
               <button
                 type="button"
@@ -2922,9 +3000,9 @@ export function MapViewer({ projectId }: MapViewerProps) {
                 className="mv-menu-action"
                 onClick={() => {
                   if (selectedSpatialFeature) {
-                    setSelectedSpatialFeature(selectedSpatialFeature)
+                    setAssignmentSpatialFeature(selectedSpatialFeature)
                   } else {
-                    void modal.alert('No feature selected', 'Click a saved/imported spatial shape on the map to view its properties.')
+                    void modal.alert('No feature selected', 'Select a saved/imported spatial shape from Data Layers & Import first.')
                   }
                 }}
               >
@@ -3341,7 +3419,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
           <button
             type="button"
             className="mv-tool"
-            disabled={!selectedSpatialFeature}
+            disabled={!selectedSpatialFeatureUsableForAnalysis}
             onClick={() => void useSelectedShapeAsAnalysisLine('profile')}
             title="Use the selected imported/digitized KML/SHP feature as the L-section line."
           >
@@ -3417,7 +3495,7 @@ export function MapViewer({ projectId }: MapViewerProps) {
           <button
             type="button"
             className="mv-tool"
-            disabled={!selectedSpatialFeature}
+            disabled={!selectedSpatialFeatureUsableForAnalysis}
             onClick={() => void useSelectedShapeAsAnalysisLine('cross-section')}
             title="Use the selected imported/digitized KML/SHP feature as the center alignment."
           >
@@ -3738,9 +3816,9 @@ export function MapViewer({ projectId }: MapViewerProps) {
               </div>
             ) : null}
             <SpatialAssignmentModal
-              feature={digitization.mode === 'edit' ? null : selectedSpatialFeature}
+              feature={digitization.mode === 'edit' ? null : assignmentSpatialFeature}
               saving={spatialBusy}
-              onClose={() => setSelectedSpatialFeature(null)}
+              onClose={() => setAssignmentSpatialFeature(null)}
               onSave={(payload) => void handleSpatialAssignmentSave(payload)}
               onDelete={(feature) => void handleSpatialFeatureDelete(feature)}
             />

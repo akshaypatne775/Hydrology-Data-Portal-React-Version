@@ -26,7 +26,7 @@ export function PotreeViewer({ url, projectId = '', datasetId = '' }: PotreeView
       if (!cleanMessage) return
       if (/background\.jpg/i.test(cleanMessage)) return
       logClientError({
-        area: 'ept_viewer',
+        area: 'pointcloud_viewer',
         message: cleanMessage,
         url,
         stack,
@@ -35,7 +35,7 @@ export function PotreeViewer({ url, projectId = '', datasetId = '' }: PotreeView
       })
       if (/dataview|offset is outside|decoder|hierarchy|octree|pointcloud/i.test(cleanMessage)) {
         setViewerError(
-          'Point cloud viewer could not read part of the EPT data. The issue has been logged; reprocess this point cloud from Data Catalog if it stays blank.',
+          'Point cloud viewer could not read part of the converted data. The issue has been logged; reprocess this point cloud from Data Catalog if it stays blank.',
         )
       }
     }
@@ -130,7 +130,7 @@ export function PotreeViewer({ url, projectId = '', datasetId = '' }: PotreeView
           button.click()
           setToolMessage('L/C Sections dialog opened inside the point cloud viewer.')
         } else {
-          setToolMessage('L/C section automation is available only on the latest EPT viewer template.')
+          setToolMessage('L/C section automation is available only on the latest point cloud viewer template.')
         }
         return
       }

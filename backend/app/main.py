@@ -39,7 +39,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 import laspy
@@ -131,9 +131,14 @@ OSGEO4W_BAT = os.getenv(
     "OSGEO4W_BAT",
     r"C:\Program Files\QGIS 3.44.8\OSGeo4W.bat",
 ).strip()
-UNTWINE_EXE = os.getenv("UNTWINE_EXE", "untwine").strip()
-ENTWINE_EXE = os.getenv("ENTWINE_EXE", "entwine").strip()
-PDAL_EXE = os.getenv("PDAL_EXE", "pdal").strip()
+UNTWINE_EXE = os.getenv(
+    "UNTWINE_EXE",
+    r"C:\Program Files\QGIS 3.22.8\apps\qgis-ltr\untwine.exe",
+).strip()
+PDAL_EXE = os.getenv(
+    "PDAL_EXE",
+    r"C:\Program Files\QGIS 3.22.8\bin\pdal.exe",
+).strip()
 PROJECT_FILES_CACHE_TTL_SECONDS = float(os.getenv("PROJECT_FILES_CACHE_TTL_SECONDS", "4"))
 TIFF_TILE_BUDGET_MB = float(os.getenv("TIFF_TILE_BUDGET_MB", "100"))
 TIFF_TILE_MIN_ZOOM_LIMIT = int(os.getenv("TIFF_TILE_MIN_ZOOM_LIMIT", "14"))
@@ -1101,7 +1106,7 @@ async def process_pointcloud_background(
     file_name: str | None = None,
 ) -> None:
     """
-    Background conversion worker for EPT point clouds.
+    Background conversion worker for COPC point clouds with Untwine EPT fallback.
     """
     if output_dir.is_dir():
         shutil.rmtree(output_dir, ignore_errors=True)
@@ -1111,7 +1116,9 @@ async def process_pointcloud_background(
         err_path.unlink(missing_ok=True)
 
     try:
-        converter_label = await run_in_threadpool(process_pointcloud, str(final_path), str(output_dir), output_dir.name)
+        conversion = await run_in_threadpool(process_pointcloud, str(final_path), str(output_dir), output_dir.name)
+        converter_label = conversion.get("converter", "Point Cloud")
+        viewer_type = conversion.get("asset_type", "ept")
         if project_id and job_id:
             _upsert_processing_job(
                 project_id,
@@ -1121,14 +1128,15 @@ async def process_pointcloud_background(
                     "file_name": file_name or final_path.name,
                     "status": "Completed",
                     "updated_at": _now_iso(),
-                    "result_url": _ept_viewer_url("", project_id, output_dir.name, file_name or final_path.name),
+                    "result_url": _pointcloud_viewer_url("", project_id, output_dir.name, file_name or final_path.name, viewer_type),
                     "converter": converter_label,
+                    "viewer_type": viewer_type,
                 },
             )
             _invalidate_project_files_cache(project_id)
     except Exception as exc:  # noqa: BLE001
         msg = str(exc)
-        print("EPT conversion failed:", msg)
+        print("Point cloud conversion failed:", msg)
         try:
             err_path.write_text(msg, encoding="utf-8")
         except OSError:
@@ -1260,7 +1268,7 @@ def _prepare_las_for_ept(input_las: Path, prepared_dir: Path, dataset_name: str)
     Potree's bundled EPT loader is most reliable with projected meter
     coordinates. The working QGIS reference EPT uses UTM, while many drone
     LAS files arrive as EPSG:4326 lon/lat degrees. Reproject geographic LAS
-    inputs to local UTM before Entwine builds the EPT hierarchy.
+    inputs to local UTM before Untwine builds the EPT hierarchy.
     """
     if not POINTCLOUD_EPT_PROJECT_GEOGRAPHIC or input_las.suffix.lower() not in {".las", ".laz"}:
         return None, ""
@@ -1345,129 +1353,134 @@ def _prepare_las_for_ept(input_las: Path, prepared_dir: Path, dataset_name: str)
 
 def _run_ept_converter_once(input_las: str, output_path: Path) -> str:
     """
-    Convert LAS/LAZ to Entwine Point Tile (EPT) with native PDAL bindings.
-    The writer filename is the output directory, so ept.json is created
-    directly inside output_path with no nested converter folders.
+    Convert LAS/LAZ to Entwine Point Tile (EPT) with Untwine only.
+    The generated ept.json and ept-hierarchy are written directly inside
+    output_path, matching the React viewer URL for this dataset.
     """
-    output_path.mkdir(parents=True, exist_ok=True)
-    writer_candidates = [
-        str(os.getenv("PDAL_EPT_WRITER") or "").strip(),
-        "writers.ept",
-        "writers.ept_addon",
-    ]
-    writer_candidates = [writer for index, writer in enumerate(writer_candidates) if writer and writer not in writer_candidates[:index]]
-
-    def pipeline_config_for(writer_type: str) -> dict[str, list[dict[str, str]]]:
-        return {
-            "pipeline": [
-                {
-                    "type": "readers.las",
-                    "filename": str(Path(input_las)),
-                },
-                {
-                    "type": writer_type,
-                    "filename": str(output_path),
-                },
-            ],
-        }
-
     def reset_output_dir() -> None:
         if output_path.is_file():
             output_path.unlink(missing_ok=True)
-        if output_path.is_dir() and not (output_path / "ept.json").is_file():
+        if output_path.is_dir():
             shutil.rmtree(output_path, ignore_errors=True)
         output_path.mkdir(parents=True, exist_ok=True)
 
-    errors: list[str] = []
-    try:
-        import pdal  # type: ignore[import-not-found]
-    except Exception as exc:  # noqa: BLE001
-        errors.append(
-            "Python PDAL import failed in the active backend environment. "
-            f"{exc.__class__.__name__}: {exc}"
-        )
-    else:
-        for writer_type in writer_candidates:
-            try:
-                reset_output_dir()
-                pipeline = pdal.Pipeline(json.dumps(pipeline_config_for(writer_type)))
-                pipeline.execute()
-                if (output_path / "ept.json").is_file():
-                    return f"Python PDAL {writer_type}"
-                errors.append(f"Python PDAL {writer_type}: completed but ept.json was not created.")
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"Python PDAL {writer_type}: {exc}")
+    input_path = Path(input_las)
+    if not input_path.is_file():
+        raise RuntimeError(f"EPT conversion failed: input LAS/LAZ file was not found: {input_path}")
 
-    pdal_exe = _resolve_converter_executable(PDAL_EXE)
-    if pdal_exe:
-        for writer_type in writer_candidates:
-            if writer_type == "writers.ept_addon":
-                errors.append(
-                    "PDAL CLI writers.ept_addon: installed PDAL exposes only the EPT addon writer, "
-                    "which cannot create a full ept.json point cloud dataset."
-                )
-                continue
-            pipeline_config = pipeline_config_for(writer_type)
-            pipeline_file: Path | None = None
-            try:
-                reset_output_dir()
-                with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
-                    json.dump(pipeline_config, handle)
-                    pipeline_file = Path(handle.name)
-                result = subprocess.run(
-                    [pdal_exe, "pipeline", str(pipeline_file)],
-                    capture_output=True,
-                    text=True,
-                    timeout=None,
-                )
-                if result.returncode == 0 and (output_path / "ept.json").is_file():
-                    return f"PDAL CLI {writer_type}"
-                message = result.stderr or result.stdout or f"pdal pipeline exited with code {result.returncode}"
-                errors.append(f"PDAL CLI {writer_type}: {message.strip()}")
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"PDAL CLI {writer_type}: {exc}")
-            finally:
-                if pipeline_file is not None:
-                    try:
-                        pipeline_file.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-    else:
-        errors.append(
-            "No pdal.exe found. Install PDAL/Untwine tools or run Droid_Environment_Manager\\_Setup_EPT_Environment.bat "
-            "before starting the backend."
-        )
-
-    converter_attempts: list[tuple[str, list[str]]] = []
-    entwine = _resolve_converter_executable(ENTWINE_EXE)
-    if entwine:
-        converter_attempts.append(("Entwine", [entwine, "build", "-i", input_las, "-o", str(output_path)]))
     untwine = _resolve_converter_executable(UNTWINE_EXE)
-    if untwine:
-        converter_attempts.append(("Untwine", [untwine, str(output_path), "-i", input_las]))
-
-    for label, command in converter_attempts:
-        try:
-            reset_output_dir()
-            result = subprocess.run(command, capture_output=True, text=True, timeout=None)
-            if result.returncode == 0 and (output_path / "ept.json").is_file():
-                return label
-            message = result.stderr or result.stdout or f"{label} exited with code {result.returncode}"
-            errors.append(f"{label}: {message.strip()}")
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"{label}: {exc}")
+    if not untwine:
+        raise RuntimeError(
+            "EPT conversion failed: untwine.exe was not found. "
+            f"Expected UNTWINE_EXE at: {UNTWINE_EXE}. "
+            "Install QGIS/Untwine or set the UNTWINE_EXE environment variable before starting the backend. "
+            "Entwine fallback is intentionally disabled."
+        )
 
     reset_output_dir()
-    message = "EPT conversion failed.\n\n" + "\n\n".join(errors)
-    print(f"PDAL EPT conversion failed for {input_las}: {message}")
-    raise RuntimeError(message)
+    command = [untwine, "-i", str(input_path), "-o", str(output_path)]
+    print(f"Running Untwine EPT conversion: {command}")
+    env = os.environ.copy()
+    untwine_path = Path(untwine)
+    path_entries = [str(untwine_path.parent)]
+    qgis_root = None
+    for parent in untwine_path.parents:
+        if parent.name.lower().startswith("qgis "):
+            qgis_root = parent
+            break
+    if qgis_root:
+        for candidate in (
+            qgis_root / "bin",
+            qgis_root / "apps" / "qgis-ltr",
+            qgis_root / "apps" / "Qt5" / "bin",
+        ):
+            if candidate.is_dir():
+                path_entries.append(str(candidate))
+    env["PATH"] = os.pathsep.join(dict.fromkeys(path_entries)) + os.pathsep + env.get("PATH", "")
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=None, env=env)
+    except FileNotFoundError as exc:
+        reset_output_dir()
+        raise RuntimeError(f"EPT conversion failed: untwine.exe was not found at {untwine}") from exc
+    except Exception as exc:  # noqa: BLE001
+        reset_output_dir()
+        raise RuntimeError(f"EPT conversion failed while running Untwine: {exc}") from exc
+
+    if result.returncode != 0:
+        reset_output_dir()
+        message = result.stderr.strip() or result.stdout.strip() or f"untwine exited with code {result.returncode}"
+        print(f"Untwine EPT conversion failed for {input_path}: {message}")
+        raise RuntimeError(f"Untwine EPT conversion failed:\n{message}")
+
+    if not (output_path / "ept.json").is_file():
+        reset_output_dir()
+        message = result.stderr.strip() or result.stdout.strip() or "Untwine completed but ept.json was not created."
+        raise RuntimeError(f"Untwine EPT conversion failed:\n{message}")
+
+    return "Untwine"
 
 
-def process_pointcloud(input_las: str, output_dir: str, dataset_name: str) -> str:
+def _run_copc_converter_once(input_las: str, output_path: Path) -> str:
     """
-    Convert LAS/LAZ to Entwine Point Tile (EPT) output with native PDAL.
-    The output directory contains ept.json, ept-data, and ept-hierarchy
-    directly, matching the React viewer URL for this dataset.
+    Convert LAS/LAZ to a single Cloud Optimized Point Cloud asset.
+    COPC is the primary fast-streaming output; Untwine EPT remains fallback.
+    """
+    def reset_output_dir() -> None:
+        if output_path.is_file():
+            output_path.unlink(missing_ok=True)
+        if output_path.is_dir():
+            shutil.rmtree(output_path, ignore_errors=True)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+    input_path = Path(input_las)
+    if not input_path.is_file():
+        raise RuntimeError(f"COPC conversion failed: input LAS/LAZ file was not found: {input_path}")
+
+    pdal_exe = _resolve_converter_executable(PDAL_EXE)
+    if not pdal_exe:
+        raise RuntimeError(
+            "COPC conversion failed: pdal executable was not found. "
+            "Set PDAL_EXE or install PDAL before starting the backend."
+        )
+    if not _pdal_has_driver(pdal_exe, "writers.copc"):
+        raise RuntimeError(
+            "COPC conversion failed: the configured PDAL executable does not expose writers.copc. "
+            f"PDAL_EXE={pdal_exe}. Install a PDAL build with COPC writer support or keep using Untwine EPT fallback."
+        )
+
+    reset_output_dir()
+    output_file = output_path / "output.copc.laz"
+    command = [pdal_exe, "translate", str(input_path), str(output_file)]
+    print(f"Running PDAL COPC conversion: {command}")
+    env = os.environ.copy()
+    env["PATH"] = str(Path(pdal_exe).parent) + os.pathsep + env.get("PATH", "")
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=None, env=env)
+    except FileNotFoundError as exc:
+        reset_output_dir()
+        raise RuntimeError(f"COPC conversion failed: pdal executable was not found at {pdal_exe}") from exc
+    except Exception as exc:  # noqa: BLE001
+        reset_output_dir()
+        raise RuntimeError(f"COPC conversion failed while running PDAL: {exc}") from exc
+
+    if result.returncode != 0:
+        reset_output_dir()
+        message = result.stderr.strip() or result.stdout.strip() or f"pdal exited with code {result.returncode}"
+        print(f"PDAL COPC conversion failed for {input_path}: {message}")
+        raise RuntimeError(f"PDAL COPC conversion failed:\n{message}")
+
+    if not output_file.is_file() or output_file.stat().st_size <= 0:
+        reset_output_dir()
+        message = result.stderr.strip() or result.stdout.strip() or "PDAL completed but output.copc.laz was not created."
+        raise RuntimeError(f"PDAL COPC conversion failed:\n{message}")
+
+    return "PDAL COPC"
+
+
+def process_pointcloud(input_las: str, output_dir: str, dataset_name: str) -> dict[str, str]:
+    """
+    Convert LAS/LAZ to COPC first, then fall back to Untwine EPT only if
+    PDAL COPC conversion is unavailable or fails.
     """
     safe_dataset_name = _ept_dataset_name(dataset_name)
     output_path = Path(output_dir)
@@ -1478,7 +1491,7 @@ def process_pointcloud(input_las: str, output_dir: str, dataset_name: str) -> st
     prepared_input: Path | None = None
     prepared_note = ""
     repaired_input: Path | None = None
-    converter_label = ""
+    conversion_result: dict[str, str] | None = None
     try:
         input_path = Path(input_las)
         prepared_input, prepared_note = _prepare_las_for_ept(
@@ -1487,38 +1500,74 @@ def process_pointcloud(input_las: str, output_dir: str, dataset_name: str) -> st
             safe_dataset_name,
         )
         converter_input = str(prepared_input or input_path)
+        copc_error = ""
         try:
-            converter_label = _run_ept_converter_once(converter_input, output_path)
+            converter_label = _run_copc_converter_once(converter_input, output_path)
             if prepared_note:
                 (output_path / ".crs_note.txt").write_text(prepared_note, encoding="utf-8")
+            (output_path / ".viewer_type.txt").write_text("copc", encoding="utf-8")
+            (output_path / ".converter.txt").write_text(converter_label, encoding="utf-8")
+            conversion_result = {
+                "asset_type": "copc",
+                "asset_path": str(output_path / "output.copc.laz"),
+                "asset_name": "output.copc.laz",
+                "converter": converter_label,
+            }
         except RuntimeError as exc:
-            original_error = str(exc)
-            repair_source = Path(converter_input)
-            can_repair = repair_source.suffix.lower() in {".las", ".laz"}
-            if not can_repair or not _ept_error_needs_las_bbox_repair(original_error):
-                raise
-
-            repair_dir = output_path.parent / "_repaired_inputs"
-            repaired_input = repair_dir / f"{safe_dataset_name}.bbox-repaired.las"
-            _repair_las_bounding_box(repair_source, repaired_input)
-
-            if output_path.is_dir():
-                shutil.rmtree(output_path, ignore_errors=True)
-            output_path.mkdir(parents=True, exist_ok=True)
+            copc_error = str(exc)
+            print(f"COPC primary conversion failed; falling back to Untwine EPT: {copc_error}")
             try:
-                converter_label = _run_ept_converter_once(str(repaired_input), output_path)
+                converter_label = _run_ept_converter_once(converter_input, output_path)
                 if prepared_note:
                     (output_path / ".crs_note.txt").write_text(prepared_note, encoding="utf-8")
-                (output_path / ".repair_note.txt").write_text(
-                    "LAS bounding box header was repaired automatically before EPT conversion.",
-                    encoding="utf-8",
-                )
-            except RuntimeError as retry_exc:
+            except RuntimeError as ept_exc:
+                original_error = str(ept_exc)
+                repair_source = Path(converter_input)
+                can_repair = repair_source.suffix.lower() in {".las", ".laz"}
+                if not can_repair or not _ept_error_needs_las_bbox_repair(original_error):
+                    raise RuntimeError(
+                        "COPC conversion failed and Untwine EPT fallback failed.\n\n"
+                        f"COPC error:\n{copc_error}\n\nEPT fallback error:\n{original_error}"
+                    ) from ept_exc
+
+                repair_dir = output_path.parent / "_repaired_inputs"
+                repaired_input = repair_dir / f"{safe_dataset_name}.bbox-repaired.las"
+                _repair_las_bounding_box(repair_source, repaired_input)
+
+                if output_path.is_dir():
+                    shutil.rmtree(output_path, ignore_errors=True)
+                output_path.mkdir(parents=True, exist_ok=True)
+                try:
+                    converter_label = _run_ept_converter_once(str(repaired_input), output_path)
+                    if prepared_note:
+                        (output_path / ".crs_note.txt").write_text(prepared_note, encoding="utf-8")
+                    (output_path / ".repair_note.txt").write_text(
+                        "LAS bounding box header was repaired automatically before EPT fallback conversion.",
+                        encoding="utf-8",
+                    )
+                except RuntimeError as retry_exc:
+                    raise RuntimeError(
+                        "COPC conversion failed and automatic LAS bounding-box repair was attempted for "
+                        "the Untwine EPT fallback, but EPT conversion still failed.\n\n"
+                        f"COPC error:\n{copc_error}\n\nOriginal EPT fallback error:\n{original_error}\n\n"
+                        f"Retry EPT fallback error:\n{retry_exc}"
+                    ) from retry_exc
+
+            if not (output_path / "ept.json").is_file():
                 raise RuntimeError(
-                    "Automatic LAS bounding-box repair was attempted, but EPT conversion still failed. "
-                    "Please verify or repair the source LAS file and upload it again.\n\n"
-                    f"Original converter error:\n{original_error}\n\nRetry converter error:\n{retry_exc}"
-                ) from retry_exc
+                    "COPC conversion failed and Untwine EPT fallback finished but ept.json was not created.\n\n"
+                    f"COPC error:\n{copc_error}"
+                )
+            (output_path / ".viewer_type.txt").write_text("ept", encoding="utf-8")
+            (output_path / ".converter.txt").write_text(converter_label or "Untwine", encoding="utf-8")
+            if copc_error:
+                (output_path / ".copc_fallback_note.txt").write_text(copc_error[:8000], encoding="utf-8")
+            conversion_result = {
+                "asset_type": "ept",
+                "asset_path": str(output_path / "ept.json"),
+                "asset_name": "ept.json",
+                "converter": converter_label or "Untwine",
+            }
     finally:
         if repaired_input is not None:
             try:
@@ -1535,11 +1584,9 @@ def process_pointcloud(input_las: str, output_dir: str, dataset_name: str) -> st
             except OSError:
                 pass
 
-    if not (output_path / "ept.json").is_file():
-        raise RuntimeError("EPT conversion finished but ept.json was not created.")
-    (output_path / ".viewer_type.txt").write_text("ept", encoding="utf-8")
-    (output_path / ".converter.txt").write_text(converter_label or "EPT", encoding="utf-8")
-    return converter_label or "EPT"
+    if conversion_result is None:
+        raise RuntimeError("Point cloud conversion finished without producing a COPC or EPT viewer asset.")
+    return conversion_result
 
 
 def process_pointcloud_ept_job(
@@ -1554,7 +1601,9 @@ def process_pointcloud_ept_job(
     output_path = Path(output_dir)
     err_path = output_path / ".conversion_error.txt"
     try:
-        converter_label = process_pointcloud(input_las, output_dir, dataset_name)
+        conversion = process_pointcloud(input_las, output_dir, dataset_name)
+        converter_label = conversion.get("converter", "Point Cloud")
+        viewer_type = conversion.get("asset_type", "ept")
         (output_path / ".source_name.txt").write_text(file_name, encoding="utf-8")
         if source_hash:
             (output_path / ".source_hash.txt").write_text(source_hash, encoding="utf-8")
@@ -1566,8 +1615,9 @@ def process_pointcloud_ept_job(
                 "file_name": file_name,
                 "status": "Completed",
                 "updated_at": _now_iso(),
-                    "result_url": _ept_viewer_url("", project_id, dataset_name, file_name),
+                "result_url": _pointcloud_viewer_url("", project_id, dataset_name, file_name, viewer_type),
                 "converter": converter_label,
+                "viewer_type": viewer_type,
             },
         )
     except Exception as exc:
@@ -2432,35 +2482,95 @@ def _legacy_ept_pointcloud_dataset_dir(project_id: str, dataset_name: str) -> Pa
     return _legacy_project_pointcloud_root(project_id) / _safe_ept_folder_name(dataset_name)
 
 
+def _ept_asset_quality(dataset_dir: Path) -> int:
+    ept_json = dataset_dir / "ept.json"
+    if not ept_json.is_file() or (dataset_dir / ".conversion_error.txt").is_file():
+        return -1
+    hierarchy_dir = dataset_dir / "ept-hierarchy"
+    data_dir = dataset_dir / "ept-data"
+    if not hierarchy_dir.is_dir() or not data_dir.is_dir():
+        return -1
+    try:
+        hierarchy_count = sum(1 for _ in hierarchy_dir.glob("*.json"))
+        data_count = sum(1 for p in data_dir.rglob("*") if p.is_file())
+        ept_size = ept_json.stat().st_size
+    except OSError:
+        return -1
+    if hierarchy_count < 2 or data_count < 1 or ept_size <= 0:
+        return -1
+    score = 100
+    score += min(hierarchy_count, 5000) * 20
+    score += min(data_count, 50000)
+    score += min(ept_size // 1024, 50)
+    return score
+
+
+def _ept_asset_candidates(project_id: str, dataset_name: str) -> list[tuple[str, Path]]:
+    safe_project = _safe_project_id(project_id)
+    safe_dataset = _safe_ept_folder_name(dataset_name)
+    return [
+        (f"exports/pointclouds/{safe_dataset}/ept.json", _ept_dataset_dir(safe_project, safe_dataset)),
+        (
+            f"processed/pointclouds/{safe_dataset}/ept.json",
+            _legacy_ept_pointcloud_dataset_dir(safe_project, safe_dataset),
+        ),
+        (f"processed/{safe_dataset}/ept.json", _legacy_ept_dataset_dir(safe_project, safe_dataset)),
+    ]
+
+
+def _best_ept_asset(project_id: str, dataset_name: str) -> tuple[str, Path] | None:
+    best: tuple[int, int, str, Path] | None = None
+    for index, (rel_path, dataset_dir) in enumerate(_ept_asset_candidates(project_id, dataset_name)):
+        quality = _ept_asset_quality(dataset_dir)
+        if quality < 0:
+            continue
+        # Prefer newer export output only when quality is equal; otherwise choose
+        # the richer hierarchy because the Potree/EPT loader streams it more reliably.
+        rank = (quality, -index, rel_path, dataset_dir)
+        if best is None or rank > best:
+            best = rank
+    if best is None:
+        return None
+    return best[2], best[3]
+
+
 def _ept_json_url(base_url: str, project_id: str, dataset_name: str) -> str:
     safe_project = _safe_project_id(project_id)
     safe_dataset = _safe_ept_folder_name(dataset_name)
-    new_ept = _ept_dataset_dir(safe_project, safe_dataset) / "ept.json"
-    old_pointcloud_ept = _legacy_ept_pointcloud_dataset_dir(safe_project, safe_dataset) / "ept.json"
-    legacy_ept = _legacy_ept_dataset_dir(safe_project, safe_dataset) / "ept.json"
-    if new_ept.is_file() or (not old_pointcloud_ept.is_file() and not legacy_ept.is_file()):
-        rel_path = f"exports/pointclouds/{safe_dataset}/ept.json"
-    elif old_pointcloud_ept.is_file():
-        rel_path = f"processed/pointclouds/{safe_dataset}/ept.json"
-    else:
-        rel_path = f"processed/{safe_dataset}/ept.json"
+    best = _best_ept_asset(safe_project, safe_dataset)
+    rel_path = best[0] if best else f"exports/pointclouds/{safe_dataset}/ept.json"
     return (
         f"{base_url.rstrip('/')}/api/data/projects/{safe_project}/{quote(rel_path, safe='/')}"
     )
 
 
+def _copc_url(base_url: str, project_id: str, dataset_name: str) -> str:
+    safe_project = _safe_project_id(project_id)
+    safe_dataset = _safe_ept_folder_name(dataset_name)
+    rel_path = f"exports/pointclouds/{safe_dataset}/output.copc.laz"
+    return f"{base_url.rstrip('/')}/api/data/projects/{safe_project}/{quote(rel_path, safe='/')}"
+
+
+def _copc_viewer_url(base_url: str, project_id: str, dataset_name: str, display_name: str = "") -> str:
+    safe_project = _safe_project_id(project_id)
+    safe_dataset = _safe_ept_folder_name(dataset_name)
+    copc_path = f"/api/data/projects/{safe_project}/exports/pointclouds/{safe_dataset}/output.copc.laz"
+    query = urlencode(
+        {
+            "copc": copc_path,
+            "project": safe_project,
+            "dataset": safe_dataset,
+            "name": display_name or safe_dataset,
+        }
+    )
+    return f"/droid-ept-viewer/index.html?{query}"
+
+
 def _ept_viewer_url(base_url: str, project_id: str, dataset_name: str, display_name: str = "") -> str:
     safe_project = _safe_project_id(project_id)
     safe_dataset = _safe_ept_folder_name(dataset_name)
-    new_ept = _ept_dataset_dir(safe_project, safe_dataset) / "ept.json"
-    old_pointcloud_ept = _legacy_ept_pointcloud_dataset_dir(safe_project, safe_dataset) / "ept.json"
-    legacy_ept = _legacy_ept_dataset_dir(safe_project, safe_dataset) / "ept.json"
-    if new_ept.is_file() or (not old_pointcloud_ept.is_file() and not legacy_ept.is_file()):
-        rel_path = f"exports/pointclouds/{safe_dataset}/ept.json"
-    elif old_pointcloud_ept.is_file():
-        rel_path = f"processed/pointclouds/{safe_dataset}/ept.json"
-    else:
-        rel_path = f"processed/{safe_dataset}/ept.json"
+    best = _best_ept_asset(safe_project, safe_dataset)
+    rel_path = best[0] if best else f"exports/pointclouds/{safe_dataset}/ept.json"
     ept_path = f"/api/data/projects/{safe_project}/{rel_path}"
     query = urlencode(
         {
@@ -2471,6 +2581,18 @@ def _ept_viewer_url(base_url: str, project_id: str, dataset_name: str, display_n
         }
     )
     return f"/droid-ept-viewer/index.html?{query}"
+
+
+def _pointcloud_viewer_url(
+    base_url: str,
+    project_id: str,
+    dataset_name: str,
+    display_name: str = "",
+    viewer_type: str = "ept",
+) -> str:
+    if (viewer_type or "").lower() == "copc":
+        return _copc_viewer_url(base_url, project_id, dataset_name, display_name)
+    return _ept_viewer_url(base_url, project_id, dataset_name, display_name)
 
 
 def _safe_dataset_id(dataset_id: str) -> str:
@@ -3479,7 +3601,8 @@ def pointcloud_status(
     project_id: str, request: Request, tileset_id: str | None = None
 ) -> dict[str, bool | str]:
     """
-    Poll conversion progress: ept.json appears when EPT conversion finishes.
+    Poll conversion progress: output.copc.laz appears when COPC finishes;
+    ept.json appears when the Untwine EPT fallback finishes.
     If conversion fails, .conversion_error.txt is written under the output folder.
     """
     user = _require_user(request)
@@ -3556,13 +3679,38 @@ def pointcloud_status(
                     add_candidate(child, candidates)
 
     for candidate in candidates:
+        copc_file = candidate / "output.copc.laz"
+        if copc_file.is_file():
+            source_name = source_name_for(candidate)
+            return {
+                "ready": True,
+                "failed": False,
+                "tileset_url": _copc_viewer_url(base_url, safe_id, candidate.name, source_name),
+                "copc_url": _copc_url(base_url, safe_id, candidate.name),
+                "viewer_type": "copc",
+            }
+
+    for candidate in candidates:
         ept_json = candidate / "ept.json"
-        if ept_json.is_file():
+        if ept_json.is_file() and _ept_asset_quality(candidate) >= 0:
             source_name = source_name_for(candidate)
             return {
                 "ready": True,
                 "failed": False,
                 "tileset_url": _ept_viewer_url(base_url, safe_id, candidate.name, source_name),
+                "ept_url": _ept_json_url(base_url, safe_id, candidate.name),
+                "viewer_type": "ept",
+            }
+        if ept_json.is_file():
+            return {
+                "ready": False,
+                "failed": True,
+                "error": (
+                    "Point cloud EPT output exists, but its hierarchy is incomplete for this viewer. "
+                    "Reprocess this LAS/LAZ so the output contains ept.json, ept-data, and a chunked "
+                    "multi-file ept-hierarchy folder."
+                ),
+                "tileset_url": _ept_viewer_url(base_url, safe_id, candidate.name, source_name_for(candidate)),
                 "ept_url": _ept_json_url(base_url, safe_id, candidate.name),
                 "viewer_type": "ept",
             }
@@ -3575,13 +3723,21 @@ def pointcloud_status(
                 msg = err_file.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 msg = "Unknown conversion error"
+            viewer_type = "ept"
+            marker = candidate / ".viewer_type.txt"
+            if marker.is_file():
+                try:
+                    viewer_type = marker.read_text(encoding="utf-8", errors="replace").strip() or viewer_type
+                except OSError:
+                    viewer_type = "ept"
             return {
                 "ready": False,
                 "failed": True,
                 "error": msg[:8000],
-                "tileset_url": _ept_viewer_url(base_url, safe_id, candidate.name),
+                "tileset_url": _pointcloud_viewer_url(base_url, safe_id, candidate.name, viewer_type=viewer_type),
                 "ept_url": _ept_json_url(base_url, safe_id, candidate.name),
-                "viewer_type": "ept",
+                "copc_url": _copc_url(base_url, safe_id, candidate.name),
+                "viewer_type": viewer_type,
             }
 
     pending_suffix = f"/{quote(_safe_ept_folder_name(tileset_id), safe='')}" if tileset_id else ""
@@ -3593,7 +3749,7 @@ def pointcloud_status(
             if tileset_id
             else f"{base_url}/data/projects/{safe_id}/processed{pending_suffix}/"
         ),
-        "viewer_type": "ept",
+        "viewer_type": "pending",
     }
 
 
@@ -5038,8 +5194,16 @@ async def complete_upload(
     except OSError:
         existing_hash = None
 
+    copc_file = output_dir / "output.copc.laz"
     ept_json = output_dir / "ept.json"
-    if ept_json.is_file() and existing_hash == content_hash:
+    cached_viewer_type = "copc" if copc_file.is_file() else ""
+    if cached_viewer_type and existing_hash == content_hash:
+        try:
+            (output_dir / ".source_name.txt").write_text(safe_name, encoding="utf-8")
+            (output_dir / ".viewer_type.txt").write_text(cached_viewer_type, encoding="utf-8")
+        except OSError:
+            pass
+        cached_viewer_url = _pointcloud_viewer_url(str(request.base_url), safe_project_id, ept_dataset_name, safe_name, cached_viewer_type)
         _upsert_processing_job(
             safe_project_id,
             {
@@ -5048,21 +5212,29 @@ async def complete_upload(
                 "file_name": safe_name,
                 "status": "Completed",
                 "updated_at": _now_iso(),
-                "result_url": _ept_viewer_url("", safe_project_id, ept_dataset_name, safe_name),
+                "result_url": _pointcloud_viewer_url("", safe_project_id, ept_dataset_name, safe_name, cached_viewer_type),
+                "viewer_type": cached_viewer_type,
             },
         )
         return {
             "status": "success",
             "message": (
                 f"Merged {total} chunks into {safe_name}. "
-                "Found existing Droid EPT point cloud viewer for same file content; reusing project viewer."
+                "Found existing point cloud viewer for same file content; reusing project viewer."
             ),
             "tileset_url": "PENDING",
             "project_id": safe_project_id,
-            "target_tileset_url": _ept_viewer_url(str(request.base_url), safe_project_id, ept_dataset_name, safe_name),
-            "ept_url": _ept_json_url(str(request.base_url), safe_project_id, ept_dataset_name),
+            "target_tileset_url": cached_viewer_url,
+            "copc_url": _copc_url(str(request.base_url), safe_project_id, ept_dataset_name) if cached_viewer_type == "copc" else "",
+            "ept_url": _ept_json_url(str(request.base_url), safe_project_id, ept_dataset_name) if cached_viewer_type == "ept" else "",
+            "viewer_type": cached_viewer_type,
             "tileset_id": ept_dataset_name,
         }
+    if ept_json.is_file() and existing_hash == content_hash:
+        print(
+            "Found existing EPT point cloud for same content, but COPC is now the primary output. "
+            "Reprocessing so PDAL COPC can be attempted before Untwine fallback."
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -5095,11 +5267,13 @@ async def complete_upload(
 
     return {
         "status": "success",
-        "message": "File merged. Droid EPT point cloud processing started in background.",
+        "message": "File merged. COPC point cloud processing started in background; Untwine EPT is fallback.",
         "tileset_url": "PENDING",
         "project_id": safe_project_id,
-        "target_tileset_url": _ept_viewer_url(str(request.base_url), safe_project_id, ept_dataset_name, safe_name),
+        "target_tileset_url": _copc_viewer_url(str(request.base_url), safe_project_id, ept_dataset_name, safe_name),
+        "copc_url": _copc_url(str(request.base_url), safe_project_id, ept_dataset_name),
         "ept_url": _ept_json_url(str(request.base_url), safe_project_id, ept_dataset_name),
+        "viewer_type": "pending",
         "tileset_id": ept_dataset_name,
     }
 
@@ -7338,13 +7512,69 @@ def _safe_project_file_response_path(project_id: str, file_path: str) -> Path:
     return target_path
 
 
-def _serve_project_data_file(project_id: str, file_path: str, request: Request) -> FileResponse:
+def _copc_range_response(target_path: Path, request: Request) -> Response:
+    file_size = target_path.stat().st_size
+    range_header = request.headers.get("range")
+    common_headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, max-age=86400",
+        "Content-Type": "application/octet-stream",
+    }
+    if not range_header:
+        response = FileResponse(str(target_path), media_type="application/octet-stream")
+        response.headers.update(common_headers)
+        return response
+
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
+    if not match:
+        raise HTTPException(status_code=416, detail="Invalid range", headers={"Content-Range": f"bytes */{file_size}"})
+
+    start_raw, end_raw = match.groups()
+    if start_raw == "" and end_raw == "":
+        raise HTTPException(status_code=416, detail="Invalid range", headers={"Content-Range": f"bytes */{file_size}"})
+    if start_raw == "":
+        suffix_length = int(end_raw)
+        if suffix_length <= 0:
+            raise HTTPException(status_code=416, detail="Invalid range", headers={"Content-Range": f"bytes */{file_size}"})
+        start = max(file_size - suffix_length, 0)
+        end = file_size - 1
+    else:
+        start = int(start_raw)
+        end = int(end_raw) if end_raw else file_size - 1
+
+    if start >= file_size or start < 0 or end < start:
+        raise HTTPException(status_code=416, detail="Invalid range", headers={"Content-Range": f"bytes */{file_size}"})
+    end = min(end, file_size - 1)
+    content_length = end - start + 1
+
+    def iter_file() -> bytes:
+        with open(target_path, "rb") as handle:
+            handle.seek(start)
+            remaining = content_length
+            while remaining > 0:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    headers = {
+        **common_headers,
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+        "Content-Length": str(content_length),
+    }
+    return StreamingResponse(iter_file(), status_code=206, headers=headers, media_type="application/octet-stream")
+
+
+def _serve_project_data_file(project_id: str, file_path: str, request: Request) -> Response:
     safe_project_id = _safe_project_id(project_id)
     _ensure_project_file_access(request, safe_project_id)
     target_path = _safe_project_file_response_path(safe_project_id, file_path)
     cleaned_request_path = file_path.replace("\\", "/").lower().lstrip("/")
     if cleaned_request_path.startswith("raw/") and target_path.suffix.lower() in {".las", ".laz"}:
         raise HTTPException(status_code=404, detail="Raw point cloud download is not available")
+    if target_path.name.lower().endswith(".copc.laz") and "/exports/pointclouds/" in f"/{cleaned_request_path}":
+        return _copc_range_response(target_path, request)
     response = FileResponse(str(target_path))
     if cleaned_request_path.startswith("processed/"):
         response.headers["Cache-Control"] = "private, max-age=86400"
@@ -7361,7 +7591,7 @@ def _serve_pointcloud_data_file(project_id: str, file_path: str, request: Reques
 
 
 @app.get("/api/data/projects/{project_id}/{file_path:path}")
-def secure_project_data_file(project_id: str, file_path: str, request: Request) -> FileResponse:
+def secure_project_data_file(project_id: str, file_path: str, request: Request) -> Response:
     return _serve_project_data_file(project_id, file_path, request)
 
 
@@ -7371,7 +7601,7 @@ def secure_pointcloud_data_file(project_id: str, file_path: str, request: Reques
 
 
 @app.get("/data/projects/{project_id}/{file_path:path}")
-def secure_legacy_project_data_file(project_id: str, file_path: str, request: Request) -> FileResponse:
+def secure_legacy_project_data_file(project_id: str, file_path: str, request: Request) -> Response:
     return _serve_project_data_file(project_id, file_path, request)
 
 
@@ -7521,6 +7751,32 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
         add_ready_pointcloud_name_keys(source_name)
         add_ready_pointcloud_name_keys(ready_ept.parent.name)
 
+    ready_copc_paths = [
+        *_project_pointcloud_root(safe_project_id).glob("*/output.copc.laz"),
+    ]
+    for ready_copc in ready_copc_paths:
+        if not ready_copc.is_file() or (ready_copc.parent / ".conversion_error.txt").is_file():
+            continue
+        marker = ready_copc.parent / ".source_name.txt"
+        source_name = ""
+        if marker.is_file():
+            try:
+                source_name = marker.read_text(encoding="utf-8").strip()
+            except OSError:
+                source_name = ""
+        add_ready_pointcloud_name_keys(source_name)
+        add_ready_pointcloud_name_keys(ready_copc.parent.name)
+
+    for job in _read_processing_jobs().get(safe_project_id, []):
+        if not isinstance(job, dict):
+            continue
+        if str(job.get("kind") or "").lower() != "pointcloud":
+            continue
+        if str(job.get("status") or "").strip().lower() not in {"completed", "web-ready", "web-ready"}:
+            continue
+        add_ready_pointcloud_name_keys(str(job.get("file_name") or ""))
+        add_ready_pointcloud_name_keys(str(job.get("job_id") or ""))
+
     jobs_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "_dataset_jobs"
     raw_meta_by_rel: dict[str, dict[str, str]] = {}
     if jobs_root.is_dir():
@@ -7566,13 +7822,16 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
             else:
                 file_url = f"{base_url}/data/{rel_path}"
                 download_url = file_url
+            row_status = str(meta.get("status") or jobs_by_file.get(display_name, {}).get("status", "Raw"))
+            if is_pointcloud_raw and Path(display_name).stem.lower() not in ready_pointcloud_names:
+                row_status = "Uploaded"
             files.append(
                 {
                     "name": display_name,
                     "kind": "Reports" if is_report else "Raw Survey Data",
                     "type": "pdf" if is_report else file_path.suffix.lower().lstrip(".") or "file",
                     "size_bytes": str(file_path.stat().st_size),
-                    "status": str(meta.get("status") or jobs_by_file.get(display_name, {}).get("status", "Raw")),
+                    "status": row_status,
                     "updated_at": str(meta.get("updated_at") or ""),
                     "file_url": file_url,
                     "download_url": download_url,
@@ -7813,12 +8072,62 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
             )
             listed_rel_paths.add(rel)
 
+        copc_paths = [
+            *_project_pointcloud_root(safe_project_id).glob("*/output.copc.laz"),
+        ]
+        for copc_file in sorted({p.resolve() for p in copc_paths}, key=lambda p: (p.parent.stat().st_mtime, p.parent.name.lower()), reverse=True):
+            rel = copc_file.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            rel_base = copc_file.parent.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            if rel in listed_rel_paths or rel_base in listed_rel_paths:
+                continue
+            if (copc_file.parent / ".conversion_error.txt").is_file():
+                listed_rel_paths.add(rel)
+                listed_rel_paths.add(rel_base)
+                continue
+            source_name = ""
+            source_marker = copc_file.parent / ".source_name.txt"
+            if source_marker.is_file():
+                try:
+                    source_name = source_marker.read_text(encoding="utf-8").strip()
+                except OSError:
+                    source_name = ""
+            display_name = source_name or f"{copc_file.parent.name}.laz"
+            viewer_url = _copc_viewer_url(base_url, safe_project_id, copc_file.parent.name, display_name)
+            files.append(
+                {
+                    "name": display_name,
+                    "kind": "Droid COPC Point Cloud",
+                    "type": "PointCloud",
+                    "size_bytes": str(copc_file.stat().st_size),
+                    "status": jobs_by_file.get(display_name, {}).get("status", "WEB-READY"),
+                    "file_url": viewer_url,
+                    "layer_url": viewer_url,
+                    "copc_url": _copc_url(base_url, safe_project_id, copc_file.parent.name),
+                    "viewer_type": "copc",
+                    "file_path": str(copc_file.resolve()),
+                    "rel_path": rel,
+                    "dataset_id": copc_file.parent.name,
+                    "dataset_type": "pointcloud",
+                    "month": "",
+                    "raw_rel_path": "",
+                },
+            )
+            listed_rel_paths.add(rel)
+            listed_rel_paths.add(rel_base)
+
         ept_json_paths = [
             *_project_pointcloud_root(safe_project_id).glob("*/ept.json"),
             *_legacy_project_pointcloud_root(safe_project_id).glob("*/ept.json"),
             *processed_root.glob("*/ept.json"),
         ]
         for ept_json in sorted({p.resolve() for p in ept_json_paths}, key=lambda p: (p.parent.stat().st_mtime, p.parent.name.lower()), reverse=True):
+            best_ept = _best_ept_asset(safe_project_id, ept_json.parent.name)
+            if not best_ept:
+                continue
+            best_rel_path, best_dir = best_ept
+            best_ept_json = best_dir / "ept.json"
+            if ept_json != best_ept_json.resolve():
+                continue
             rel = ept_json.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
             rel_base = ept_json.parent.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
             if rel in listed_rel_paths or rel_base in listed_rel_paths:
@@ -7842,7 +8151,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "kind": "Droid EPT Point Cloud",
                     "type": "PointCloud",
                     "size_bytes": str(get_dir_size(ept_json.parent)),
-                    "status": jobs_by_file.get(display_name, {}).get("status", "WEB-READY"),
+                    "status": "WEB-READY",
                     "file_url": viewer_url,
                     "layer_url": viewer_url,
                     "ept_url": _ept_json_url(base_url, safe_project_id, ept_json.parent.name),
@@ -8110,13 +8419,13 @@ def client_error_log(payload: ClientErrorLogPayload, request: Request) -> dict[s
         user_email=str(user.get("email") or ""),
         extra=payload.extra or {},
     )
-    if payload.area == "ept_viewer" and safe_project_id and safe_dataset_id:
-        output_path = (Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "processed" / safe_dataset_id).resolve()
+    if payload.area in {"ept_viewer", "pointcloud_viewer"} and safe_project_id and safe_dataset_id:
+        output_path = _ept_dataset_dir(safe_project_id, safe_dataset_id).resolve()
         local_root = Path(LOCAL_DATA_PATH).resolve()
         if output_path.exists() and local_root in output_path.parents:
             marker = output_path / ".conversion_error.txt"
             marker.write_text(
-                "EPT viewer runtime error after conversion. "
+                "Point cloud viewer runtime error after conversion. "
                 f"{payload.message}\n{payload.stack[:6000]}",
                 encoding="utf-8",
             )

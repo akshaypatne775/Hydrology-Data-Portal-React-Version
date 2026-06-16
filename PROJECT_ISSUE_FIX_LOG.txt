@@ -954,6 +954,315 @@ Verification:
 
 
 ===============================================================================
+Date: 2026-06-16 11:55 IST
+Area: Point Cloud / Untwine DLL Runtime Path Fix
+
+Issue:
+- During EPT fallback conversion, Windows showed:
+  "untwine.exe - System Error"
+  "The code execution cannot proceed because pdal_util.dll was not found."
+- Root cause:
+  untwine.exe was launched directly from:
+  C:\Program Files\QGIS 3.22.8\apps\qgis-ltr\untwine.exe
+  but its required DLL dependency was in:
+  C:\Program Files\QGIS 3.22.8\bin\pdal_util.dll
+  and that QGIS bin folder was not included in the subprocess PATH.
+
+Fix:
+- Backend Untwine launcher now detects the QGIS install root from the untwine.exe path.
+- It prepends these folders to PATH before running Untwine:
+  C:\Program Files\QGIS 3.22.8\apps\qgis-ltr
+  C:\Program Files\QGIS 3.22.8\bin
+  C:\Program Files\QGIS 3.22.8\apps\Qt5\bin when present
+- This lets Untwine find pdal_util.dll and other QGIS runtime dependencies.
+
+Files touched:
+- backend/app/main.py
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Backend compile passed: python -m compileall backend/app
+
+Next step:
+- Restart the backend after this code change, then retry point cloud conversion.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-16 11:45 IST
+Area: Point Cloud / COPC Upload Diagnosis And Cache Reuse Fix
+
+Issue:
+- After uploading a LAS, Data Catalog did not clearly show a new COPC output.
+- Screenshot showed frontend proxy timeout for /api/upload-chunk.
+- Backend processing_jobs showed latest CS-New upload was marked Completed but reused an older EPT output folder with the same file content hash.
+- The output folder source marker still had the old source filename, so Data Catalog could show confusing duplicate/raw LAS rows.
+- Current terminal PATH did not contain pdal.exe.
+- QGIS PDAL was found at:
+  C:\Program Files\QGIS 3.22.8\bin\pdal.exe
+- That PDAL version runs, but its driver list did not show writers.copc, so it may not be capable of true COPC output. In that case the portal correctly falls back to Untwine EPT.
+
+Fix:
+- Backend now includes COPC output folders when hiding duplicate raw LAS rows.
+- Backend now also treats completed pointcloud processing jobs as ready names, so re-uploaded same-content raw LAS rows are not shown as separate Web-Ready entries.
+- Same-content cache reuse now only reuses existing COPC output. Existing old EPT output is no longer silently treated as final when COPC is the primary target; upload will reprocess so COPC can be attempted first.
+- Cached COPC reuse updates .source_name.txt and .viewer_type.txt to the current upload name/type.
+- Default PDAL_EXE now points to:
+  C:\Program Files\QGIS 3.22.8\bin\pdal.exe
+- COPC conversion now checks for writers.copc before running. If the configured PDAL build does not support COPC, backend throws a clear COPC error and falls back to Untwine EPT rather than creating a fake .copc.laz.
+
+Files touched:
+- backend/app/main.py
+- PROJECT_ISSUE_FIX_LOG.txt
+
+Verification:
+- Backend compile passed: python -m compileall backend/app
+
+Next check:
+- Restart the dev backend so the new code is active.
+- Re-upload the same LAS. If installed PDAL still lacks writers.copc, the portal will fall back to EPT and should show viewer_type=ept, not a stuck COPC state.
+- For true COPC output, install/configure a PDAL build that exposes writers.copc, then set PDAL_EXE to that pdal.exe before starting backend.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-16 11:25 IST
+Area: Latest Handover Pointer
+
+Note:
+- A full project handover snapshot was added in this same file.
+- Search inside this file for:
+  "Full Project Handover Snapshot / Recent Work Notes Before Codex Reinstall"
+- That section records the current project architecture, recent work, COPC/EPT point cloud pipeline, GitHub safety notes, and next manual test steps.
+===============================================================================
+
+
+===============================================================================
+Date: 2026-06-16 11:25 IST
+Area: Full Project Handover Snapshot / Recent Work Notes Before Codex Reinstall
+
+Purpose:
+- This entry is a handover note so the next Codex/session/developer can quickly understand the current Droid Survair Cloud Portal state.
+- Keep using this same file for future issue/fix notes. Do not create many separate random notes files.
+
+Project:
+- Main workspace:
+  D:\1_Portal_Workflows_development\Droid Survair Cloud Portal
+- Main stack:
+  React + Vite frontend, FastAPI backend, SQLite database, Leaflet 2D viewer, Potree/Cesium style 3D viewer, local Project_Data storage.
+- Project data lives under:
+  Project_Data/
+- Large generated files, uploads, raw LAS/LAZ, TIFF/COG, point cloud outputs, tiles, chunks, and database WAL files should NOT be committed to GitHub.
+
+Environment Architecture:
+- Dev world:
+  Frontend port 5173, backend port 8001, dev database snapshot.
+  Used for normal coding/testing.
+- Live world:
+  Frontend preview port 4173, backend port 8000, live database.
+  Cloudflare tunnel should point to 4173.
+- Important database rule:
+  Never copy dev database over live database manually.
+  Dev can be refreshed from live, but live client data must not be overwritten by testing data.
+- Environment scripts live in:
+  Droid_Environment_Manager/
+- Architecture notes live in:
+  Droid_Environment_Manager/ARCHITECTURE_REFERENCE.txt
+
+Important Recent Features Added/Fixes:
+
+1. Digitization and Spatial Data Management:
+- Added/updated Leaflet drawing tools for polygons, polylines, and markers.
+- Added spatial assignment modal fields:
+  Plot ID, Owner Name, Structure Type.
+- Added dynamic colors by structure type.
+- Added save/load of spatial features/layers in backend SQLite.
+- Added KML/SHP import concepts and saved/imported shape list in 2D viewer.
+- User-created shapes can be managed by that user; admin-created shapes should stay admin-controlled.
+- Admin can manage/delete user data.
+
+2. 2D Ortho/COG TIFF Issues:
+- Fixed manual COG/TIFF placement by auto coordinate/EPSG detection logic.
+- Fixed nodata transparency and partial/half-disappearing large TIFF display issues.
+- Important lesson:
+  If future COG/TIFF appears white, half loaded, or changes with zoom, check nodata handling, tile clipping, raster bounds, EPSG detection, and tile serving range/caching first.
+
+3. 2D Compare / Swipe Slider:
+- Existing split view was converted into a single-map swipe comparison slider.
+- Primary layer renders fully in the background.
+- Compare layer sits above it and is clipped by the draggable vertical slider.
+- Important fix:
+  Do not clip the primary layer. Only clip the compare layer.
+  Removing pointer-events none from the compare pane restored interaction on the right side.
+- Dropdown layer changes should update comparison automatically without needing slider on/off.
+
+4. Admin Control / Permissions / Responsive UI:
+- Admin Control was expanded for:
+  Hidden tabs per user.
+  User upload on/off.
+  User role controls.
+  Password reset access.
+  Project/user management.
+- Data Catalog visibility and user upload permission are separate:
+  Data Catalog can be visible while upload is blocked.
+- Upload endpoints were updated to allow admins OR users with can_upload_data.
+- Responsive fixes were added for laptop/Mac/desktop/4K/ultrawide layouts.
+- Use Deep Teal #0e3e49 and Montserrat.
+- Use red only for admin/high-risk actions.
+- Font Awesome icon protection must remain in CSS:
+  font-family: "Font Awesome 6 Free" !important;
+  font-weight: 900 !important;
+
+5. Project Delete / Auth:
+- Admin-only project delete button/workflow was requested/added around Projects/Admin management.
+- Session TTL was increased so logged-in users do not get logged out too quickly.
+- Avoid full-page reloads for updates when possible; keep user in current workspace/view.
+
+6. 3D Viewer / Point Cloud Sidebar:
+- 3D Viewer has custom Droid sidebar with Point Clouds and 3D Models.
+- Potree default branding/sidebar must stay hidden.
+- Point cloud list and 3D model list should not duplicate items.
+- Data Catalog "Open Point Cloud" should open the 3D viewer directly, not download LAS/LAZ.
+- Raw LAS/LAZ serving should remain blocked to avoid data leak/download.
+
+7. Cross Section / L Section:
+- 2D viewer has L-section/profile and cross-section work in progress.
+- Important distinction:
+  L-section/profile follows one selected/drawn/imported line.
+  Cross-section uses perpendicular sections along a selected line/alignment.
+- Imported KML/SHP/drawn shapes should be selectable from Data Layers & Import, then usable for L-section/cross-section.
+- Cross-section export PNG issue was noted and should be checked again.
+- Potree reference folder exists for cross-section behavior:
+  reference\Potree for Website
+
+8. Standalone Converter:
+- A portable standalone conversion UI/workbench was created earlier:
+  Droid_Standalone_Converter/
+- It has its own installer/start scripts so conversion can run outside the portal.
+- Keep output inside that portable folder if using it independently.
+
+9. GitHub Safety:
+- Big data files must not go to GitHub:
+  Project_Data/, raw LAS/LAZ, TIFF/COG, COPC/EPT outputs, chunks, converted point clouds, logs, database WAL/SHM.
+- If GitHub Desktop still shows ignored big files, they may already be tracked in Git history/index.
+  Need to remove from tracking without deleting local files:
+  git rm --cached <path>
+  then commit updated .gitignore and index cleanup.
+- GitHub push was blocked by secret scanning:
+  Mapbox token found in frontend/public/droid-ept-viewer/libs/.../Cesium.js around line 504.
+  Do not bypass secret scan. Remove/replace token and clean it from commit/history if already committed.
+
+Current Latest Work: COPC Primary + Untwine EPT Fallback
+
+Issue:
+- Old point cloud conversion had multiple problems:
+  PotreeConverter/Entwine/EPT output could fail or create incomplete hierarchy.
+  Some generated EPT folders showed "Point cloud is still preparing" forever.
+  Some viewer errors included DataView offset/hierarchy decode issues.
+  Raw LAS/LAZ clicks could trigger downloads, creating data leak risk.
+
+Implemented on 2026-06-16:
+- Backend now tries COPC first:
+  PDAL_EXE from environment, default "pdal".
+  Command:
+  pdal translate "<input_las_file>" "<output_dir>/output.copc.laz"
+- If COPC fails or PDAL is not found, backend falls back to Untwine EPT only.
+- Entwine fallback is intentionally disabled.
+- On COPC success, output folder contains:
+  output.copc.laz
+  .viewer_type.txt = copc
+  .converter.txt = PDAL COPC
+  .source_name.txt
+- On EPT fallback success, output folder contains:
+  ept.json
+  ept-data/ept-hierarchy output from Untwine
+  .viewer_type.txt = ept
+  .converter.txt = Untwine
+  .copc_fallback_note.txt when COPC failed first
+- On conversion failure, .conversion_error.txt is written and processing job is marked Failed.
+- Point cloud status endpoint now detects:
+  output.copc.laz first and returns viewer_type "copc", copc_url, tileset_url.
+  ept.json second and returns viewer_type "ept", ept_url, tileset_url.
+- Data Catalog discovery now lists COPC point clouds as "Droid COPC Point Cloud".
+- .copc.laz serving now supports HTTP Range:
+  Accept-Ranges: bytes
+  Content-Range for 206 responses
+  private cache header
+- Raw LAS/LAZ in raw/ is still blocked.
+
+Frontend COPC/EPT changes:
+- PointCloudStatus type now includes:
+  viewer_type: "copc" | "ept"
+  copc_url
+  ept_url
+- Data Catalog URL normalization:
+  raw .las/.laz stays blocked.
+  processed .copc.laz becomes:
+  /droid-ept-viewer/index.html?copc=...&project=...&dataset=...&name=...
+  ept.json still becomes:
+  /droid-ept-viewer/index.html?ept=...&project=...&dataset=...&name=...
+- Point cloud iframe viewer:
+  frontend/public/droid-ept-viewer/index.html
+  now accepts both query params:
+  ?copc=...
+  ?ept=...
+- For COPC:
+  Potree.loadPointCloud(copcUrl, displayName, callback)
+- For EPT:
+  it still checks/fetches ept.json before loading.
+- Upload progress text is now format-neutral:
+  "point cloud viewer" instead of only "EPT viewer".
+- Viewer error logging area changed to:
+  pointcloud_viewer
+
+Files touched by latest COPC work:
+- backend/app/main.py
+- frontend/public/droid-ept-viewer/index.html
+- frontend/src/components/Datasets/DatasetsPanel.tsx
+- frontend/src/components/GlobeViewer/PotreeViewer.tsx
+- frontend/src/context/UploadContext.tsx
+- frontend/src/services/pointCloudService.ts
+
+Other currently modified files in working tree at time of this note:
+- Droid_Environment_Manager/ARCHITECTURE_REFERENCE.txt
+- Droid_Environment_Manager/_Setup_EPT_Environment.bat
+- frontend/src/components/MapViewer/MapViewer.css
+- frontend/src/components/MapViewer/MapViewer.tsx
+
+Verification after latest COPC work:
+- Backend syntax check passed:
+  python -m compileall backend/app
+- Frontend production build passed:
+  npm.cmd run build
+- Vite showed only normal large chunk warning for MapViewer; no build failure.
+
+Next Steps / What To Test Manually:
+1. Restart dev backend/frontend.
+2. Upload a small LAS/LAZ point cloud.
+3. Confirm output folder:
+   Project_Data/projects/<project_id>/exports/pointclouds/<dataset_id>/output.copc.laz
+4. Check status:
+   /api/pointcloud-status/<project_id>?tileset_id=<dataset_id>
+   should return viewer_type "copc".
+5. Open from Data Catalog:
+   It should open in Droid point cloud viewer, not download.
+6. Test fallback:
+   Temporarily set bad PDAL_EXE and upload tiny LAS/LAZ.
+   It should create ept.json through Untwine and return viewer_type "ept".
+7. If viewer stays blank:
+   Check Project_Data/logs and .conversion_error.txt inside the dataset folder.
+8. If GitHub Desktop shows big data:
+   Do not push.
+   Clean tracked data from git index first.
+
+Important Reminder:
+- Do not delete client Project_Data or live database.
+- Work/code edits should happen in dev. Live should be updated through controlled script/manual deploy.
+- Before major live client use, test point cloud upload/open with one small known-good file and one existing EPT file.
+===============================================================================
+
+
+===============================================================================
 Date: 2026-06-10
 Area: Point Cloud / Safe Viewer Open And Persistent Error Logs
 
@@ -1131,3 +1440,8 @@ Verification:
 - Backend compile passed: python -m compileall backend/app
 - Frontend build passed: cmd /c npm run build
 ===============================================================================
+2026-06-16 - Point cloud COPC/EPT readiness refinement
+- Symptom: Data Catalog showed point clouds as WEB-READY, but opening some LAS/LAZ outputs showed a blank/still-preparing viewer. The expected COPC output folder was empty.
+- Root cause: The installed QGIS PDAL build exposes LAS drivers but not the COPC writer, so COPC cannot be produced on this machine yet. The backend correctly falls back to Untwine EPT, but some generated EPT outputs contained only a single root hierarchy JSON, while known-good QGIS EPT outputs contain a chunked multi-file ept-hierarchy. Those single-hierarchy outputs are not reliable for the portal viewer.
+- Fix: Backend now scores EPT outputs and treats only chunked, multi-file EPT hierarchy outputs as viewer-ready. Raw LAS/LAZ rows no longer show WEB-READY unless a healthy COPC/EPT viewer asset exists. Data Catalog will avoid exposing raw LAS/LAZ paths as viewer actions.
+- Future note: To enable true COPC, install/use a PDAL build with writers.copc support, then set PDAL_EXE before starting the backend. Until then, Untwine EPT fallback is the supported path.

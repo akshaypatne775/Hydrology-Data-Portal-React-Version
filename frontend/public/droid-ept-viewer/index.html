@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>Droid EPT Point Cloud Viewer</title>
+  <title>Droid Point Cloud Viewer</title>
   <link rel="stylesheet" href="./build/potree/potree.css">
   <link rel="stylesheet" href="./libs/jquery-ui/jquery-ui.min.css">
   <link rel="stylesheet" href="./libs/openlayers3/ol.css">
@@ -350,7 +350,7 @@
     <div id="potree_sidebar_container"></div>
   </div>
 
-  <header class="droid-toolbar" aria-label="Droid EPT viewer tools">
+  <header class="droid-toolbar" aria-label="Droid point cloud viewer tools">
     <div class="droid-title">
       <span>3D Point Cloud</span>
       <strong id="datasetName">Loading point cloud...</strong>
@@ -412,7 +412,10 @@
     import * as THREE from "./libs/three.js/build/three.module.js";
 
     const params = new URLSearchParams(window.location.search);
+    const copcUrl = params.get("copc") || "";
     const eptUrl = params.get("ept") || "";
+    const pointCloudUrl = copcUrl || eptUrl;
+    const pointCloudFormat = copcUrl || /\.copc\.laz(?:[?#].*)?$/i.test(pointCloudUrl) ? "COPC" : "EPT";
     const projectId = params.get("project") || "";
     const datasetId = params.get("dataset") || "";
     const displayName = params.get("name") || datasetId || "Point Cloud";
@@ -450,7 +453,7 @@
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
         body: JSON.stringify({
-          area: "ept_viewer",
+          area: "pointcloud_viewer",
           message: String(message).slice(0, 8000),
           stack: String(stack).slice(0, 6000),
           url: window.location.href,
@@ -461,9 +464,9 @@
     }
 
     window.addEventListener("error", (event) => {
-      logViewerError(event.message || "EPT viewer runtime error", event.error && event.error.stack || "");
+      logViewerError(event.message || "Point cloud viewer runtime error", event.error && event.error.stack || "");
       if (/dataview|offset is outside|decoder|hierarchy|ept|laszip/i.test(event.message || "")) {
-        showNotice("Point Cloud Viewer Issue", "This EPT point cloud could not be decoded fully. Reprocess the point cloud if the view stays blank.");
+        showNotice("Point Cloud Viewer Issue", "This point cloud could not be decoded fully. Reprocess the point cloud if the view stays blank.");
       }
     });
     window.addEventListener("unhandledrejection", (event) => {
@@ -471,9 +474,9 @@
       logViewerError(reason instanceof Error ? reason.message : String(reason || "Promise rejection"), reason instanceof Error ? reason.stack || "" : "");
     });
 
-    if (!eptUrl) {
-      showNotice("Missing Point Cloud", "No EPT URL was provided for this viewer.");
-      throw new Error("Missing ept query parameter");
+    if (!pointCloudUrl) {
+      showNotice("Missing Point Cloud", "No point cloud URL was provided for this viewer.");
+      throw new Error("Missing point cloud query parameter");
     }
 
     window.viewer = new Potree.Viewer(document.getElementById("potree_render_area"));
@@ -736,10 +739,21 @@
     async function loadPointCloud() {
       try {
         datasetName.textContent = `Loading ${displayName}...`;
-        const metadataResponse = await fetch(eptUrl, { cache: "no-store", credentials: "same-origin" });
-        if (!metadataResponse.ok) throw new Error(`EPT metadata not available (${metadataResponse.status})`);
-        await metadataResponse.json();
-        const event = await Potree.loadPointCloud(eptUrl, displayName);
+        if (pointCloudFormat === "EPT") {
+          const metadataResponse = await fetch(pointCloudUrl, { cache: "no-store", credentials: "same-origin" });
+          if (!metadataResponse.ok) throw new Error(`EPT metadata not available (${metadataResponse.status})`);
+          await metadataResponse.json();
+        }
+        const event = await new Promise((resolve, reject) => {
+          try {
+            const maybePromise = Potree.loadPointCloud(pointCloudUrl, displayName, (loadedEvent) => resolve(loadedEvent));
+            if (maybePromise && typeof maybePromise.then === "function") {
+              maybePromise.then(resolve).catch(reject);
+            }
+          } catch (error) {
+            reject(error);
+          }
+        });
         activePointCloud = event.pointcloud;
         viewer.scene.addPointCloud(activePointCloud);
         const material = activePointCloud.material;
