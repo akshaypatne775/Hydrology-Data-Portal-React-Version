@@ -431,7 +431,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     if (asset) setSelected3DAsset(asset)
   }, [project3DModels, projectPointClouds])
 
-  const selectedPointCloudUrl = active3DCanvasTab === 'potree' && selected3DAsset?.viewer === 'potree'
+  const selectedPointCloudUrl = selected3DAsset?.viewer === 'potree'
     ? selected3DAsset.url
     : active3DCanvasTab === 'cesium' || selected3DAsset?.viewer === 'cesium'
       ? ''
@@ -744,7 +744,10 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
           pointClouds={projectPointClouds}
           models={project3DModels}
           selectedAsset={selected3DAsset}
-          onSelect={setSelected3DAsset}
+          onSelect={(asset) => {
+            setSelected3DAsset(asset)
+            setActive3DCanvasTab(asset.viewer)
+          }}
           onBack={() => {
             setActiveViewerTab('2D')
             setActiveId('map')
@@ -1035,7 +1038,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                   {routedViewerId === 'map'
                     ? 'Leaflet - 2D GIS'
                     : routedViewerId === 'globe'
-                      ? activePointCloudLayer?.url
+                      ? selectedPointCloudUrl
                         ? 'Droid 3D Point Cloud'
                         : '3D Model Viewer'
                     : activeId === 'datasets'

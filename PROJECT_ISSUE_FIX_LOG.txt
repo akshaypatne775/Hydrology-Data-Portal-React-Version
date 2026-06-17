@@ -1445,3 +1445,40 @@ Verification:
 - Root cause: The installed QGIS PDAL build exposes LAS drivers but not the COPC writer, so COPC cannot be produced on this machine yet. The backend correctly falls back to Untwine EPT, but some generated EPT outputs contained only a single root hierarchy JSON, while known-good QGIS EPT outputs contain a chunked multi-file ept-hierarchy. Those single-hierarchy outputs are not reliable for the portal viewer.
 - Fix: Backend now scores EPT outputs and treats only chunked, multi-file EPT hierarchy outputs as viewer-ready. Raw LAS/LAZ rows no longer show WEB-READY unless a healthy COPC/EPT viewer asset exists. Data Catalog will avoid exposing raw LAS/LAZ paths as viewer actions.
 - Future note: To enable true COPC, install/use a PDAL build with writers.copc support, then set PDAL_EXE before starting the backend. Until then, Untwine EPT fallback is the supported path.
+
+2026-06-16 - Backend startup COPC environment setup
+- Symptom: QGIS 3.22.8 OSGeo shell did not expose PDAL writers.copc, but a COPC-capable PDAL was present in the Miniforge droid-ept environment.
+- Fix: Droid_Environment_Manager/_Setup_EPT_Environment.bat now auto-detects OSGeo/QGIS, Untwine, and PDAL. It prefers a PDAL executable with writers.copc and exports PDAL_EXE to the backend process. Dev/Live backend scripts already call it, and root start_backend.bat plus droid_manager.bat now call it too.
+- Verified: The setup script selected C:\Users\droid\miniforge3\envs\droid-ept\Library\bin\pdal.exe and reported COPC converter support.
+
+2026-06-17 - Manual QGIS EPT point cloud support restored
+- Symptom: Manually pasted QGIS EPT folders did not sync/show reliably, and some EPT folders opened blank in the Potree viewer.
+- Root cause: The backend was treating single-root ept-hierarchy outputs as incomplete, but QGIS/small EPT datasets can be valid with a single hierarchy JSON. The viewer also forced RGB rendering (`rgba`) for every point cloud, while some QGIS EPT outputs contain Intensity but no Red/Green/Blue dimensions.
+- Fix: EPT readiness now accepts valid ept.json + ept-data + at least one ept-hierarchy JSON. Manual Sync now detects EPT/COPC point-cloud folders under processed/pointclouds and processed roots. The viewer chooses RGB when available, otherwise Intensity, Classification, or Elevation so non-RGB EPT clouds render instead of blanking.
+
+2026-06-17 - Prevent EPT point clouds opening as Cesium 3D models
+- Symptom: A manually pasted EPT folder such as ept_Stope appeared/opened under the 3D Model/Cesium flow instead of the Potree point-cloud viewer.
+- Root cause: Manual sync/model discovery could encounter point-cloud folders while scanning processed folders, and old synced metadata could remain classified as 3DModel.
+- Fix: Backend now excludes folders containing ept.json or output.copc.laz from 3D model detection, prioritizes manual point-cloud candidates before model candidates, auto-corrects any existing synced metadata to dataset_type/layer_type pointcloud, and returns explicit layer_type=pointcloud for COPC/EPT project file rows.
+
+2026-06-17 - Potree point-cloud elevation color mode
+- Request: Add a DTM-like elevation color schema option inside the Potree point-cloud viewer.
+- Fix: The Droid Potree toolbar now includes Natural Color, Elevation Color, and Intensity buttons. Elevation Color switches the material to Potree's elevation attribute, auto-fits the color range from EPT metadata/bounds, and uses Potree's available spectral/rainbow/viridis gradient. Natural Color restores RGB where available or the best fallback attribute for non-RGB EPT point clouds.
+
+2026-06-17 - Potree color buttons visible in React 3D toolbar
+- Symptom: Color mode buttons were added inside the iframe viewer template, but they were not visible from the portal's 3D viewer toolbar.
+- Root cause: The visible top overlay is React's PotreeViewer toolbar, while the iframe toolbar can be covered/stale depending on cache and layout.
+- Fix: React PotreeViewer now exposes Natural, Elevation, and Intensity buttons directly in the visible overlay toolbar. Those buttons call the iframe's color buttons/functions, and the iframe viewer exposes global color helpers for reliable bridging.
+- Verification: Frontend build passed: npm run build.
+
+2026-06-17 - Potree Section Box Slice tool
+- Request: Add an underground-friendly Potree slice workflow with line-based section box, manual section box, Apply Slice, Clear Slice, Profile CSV, and full clipped-points CSV export.
+- Fix: The Droid Potree iframe viewer now exposes Slice Line, Section Box, Apply Slice, Clear Slice, Export Profile CSV, and Export Clipped CSV controls. Slice Line creates a Potree profile and aligns a clip-enabled BoxVolume to it. Section Box uses Potree's native editable BoxVolume insertion. Apply Slice switches Potree clipping to SHOW_INSIDE so only the selected section remains visible.
+- React bridge: The visible React Potree toolbar now has matching slice/export buttons and calls iframe bridge functions: droidStartSliceLine, droidStartSectionBox, droidApplySlice, droidClearSlice, droidExportProfileCsv, and droidExportClippedPointsCsv.
+- Backend export: Added /api/projects/{project_id}/pointclouds/{dataset_id}/slice-export. It runs an async chunked LAS/LAZ crop against the active section box and writes clipped_points.csv under Project_Data/projects/{project_id}/exports/pointcloud_slices/{dataset_id}/{job_id}/. The raw LAS/LAZ stays protected; only the derived CSV is served through the authenticated project data route.
+
+2026-06-17 - HCL manual point cloud opening in Cesium instead of Potree
+- Symptom: HCL Underground has both a 3D model and manually synced point cloud folders. Clicking/opening the point cloud could switch to the 3D Model/Cesium side instead of staying in Potree.
+- Root cause: Dashboard 3D selection waited for an async effect to switch the active canvas tab, so a selected Potree asset could briefly be evaluated while the active tab was still Cesium. Manual detection also only handled some one-level point-cloud folders, leaving nested manual EPT/COPC layouts vulnerable to model discovery.
+- Fix: Selecting an item in the 3D sidebar now immediately sets both selected asset and active viewer tab from the asset type. The selected point-cloud URL now trusts selectedAsset.viewer === "potree" directly instead of waiting on tab state. Backend manual sync/project listing now detects nested EPT/COPC folders and excludes any folder containing point-cloud viewer assets from 3D model classification.
+- Verification: Backend compile passed: python -m compileall backend/app. Frontend build could not be rerun in this turn because the shell command was blocked by the local Codex usage-limit reviewer.

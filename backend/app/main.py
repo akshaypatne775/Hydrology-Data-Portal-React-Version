@@ -430,6 +430,19 @@ class PointCloudProcessPayload(BaseModel):
     project_id: str = "default-project"
 
 
+class PointCloudSliceBoxPayload(BaseModel):
+    center: list[float]
+    rotation: list[float] = []
+    dimensions: list[float]
+
+
+class PointCloudSliceExportPayload(BaseModel):
+    name: str = "slice-export"
+    box: PointCloudSliceBoxPayload
+    source_asset: str = ""
+    viewer_type: str = ""
+
+
 class ClientErrorLogPayload(BaseModel):
     area: str = "frontend"
     message: str
@@ -2496,7 +2509,7 @@ def _ept_asset_quality(dataset_dir: Path) -> int:
         ept_size = ept_json.stat().st_size
     except OSError:
         return -1
-    if hierarchy_count < 2 or data_count < 1 or ept_size <= 0:
+    if hierarchy_count < 1 or data_count < 1 or ept_size <= 0:
         return -1
     score = 100
     score += min(hierarchy_count, 5000) * 20
@@ -2713,7 +2726,25 @@ def _ensure_tileset_alias(tileset_path: Path) -> Path:
     return alias
 
 
+def _contains_pointcloud_viewer_asset(folder: Path) -> bool:
+    if not folder.is_dir():
+        return False
+    for pattern in (
+        "ept.json",
+        "*/ept.json",
+        "*/*/ept.json",
+        "output.copc.laz",
+        "*/output.copc.laz",
+        "*/*/output.copc.laz",
+    ):
+        if any(folder.glob(pattern)):
+            return True
+    return False
+
+
 def _is_3d_model_dataset(folder: Path) -> bool:
+    if _contains_pointcloud_viewer_asset(folder):
+        return False
     return _find_tileset_json(folder) is not None
 
 
@@ -2747,11 +2778,15 @@ def _candidate_processed_model_dirs(processed_root: Path) -> list[Path]:
         return []
     candidates: list[Path] = []
     for child in sorted([p for p in processed_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
+        if _contains_pointcloud_viewer_asset(child):
+            continue
         tileset = _find_tileset_json(child)
         if tileset:
             candidates.append(_ensure_tileset_alias(tileset).parent)
             continue
         for nested in sorted([p for p in child.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
+            if _contains_pointcloud_viewer_asset(nested):
+                continue
             tileset = _find_tileset_json(nested)
             if tileset:
                 candidates.append(_ensure_tileset_alias(tileset).parent)
@@ -2880,6 +2915,217 @@ def _read_dataset_status(project_id: str, dataset_id: str) -> dict[str, str] | N
     except (OSError, json.JSONDecodeError):
         return None
     return None
+
+
+def _pointcloud_slice_exports_root(project_id: str, dataset_id: str) -> Path:
+    return _project_exports_root(project_id) / "pointcloud_slices" / _safe_ept_folder_name(dataset_id)
+
+
+def _read_text_marker(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _pointcloud_raw_candidates(project_id: str, dataset_id: str) -> list[Path]:
+    safe_project_id = _safe_project_id(project_id)
+    safe_dataset_id = _safe_ept_folder_name(dataset_id)
+    project_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id
+    raw_root = project_root / "raw"
+    candidates: list[Path] = []
+
+    def add_candidate(path: Path | None) -> None:
+        if not path:
+            return
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return
+        if resolved not in candidates and resolved.suffix.lower() in {".las", ".laz"}:
+            candidates.append(resolved)
+
+    status_ids = {safe_dataset_id}
+    for job in _read_processing_jobs().get(safe_project_id, []):
+        if not isinstance(job, dict):
+            continue
+        if str(job.get("job_id") or "") == safe_dataset_id:
+            file_name = str(job.get("file_name") or "").strip()
+            if file_name:
+                add_candidate(raw_root / f"{safe_project_id}__{file_name}")
+                add_candidate(raw_root / file_name)
+            for key in ("dataset_id", "ept_dataset_id", "file_name"):
+                value = str(job.get(key) or "").strip()
+                if value:
+                    status_ids.add(value)
+
+    for status_id in list(status_ids):
+        try:
+            status = _read_dataset_status(safe_project_id, _safe_dataset_id(status_id))
+        except HTTPException:
+            status = None
+        if status:
+            raw_rel = str(status.get("raw_rel_path") or "").strip()
+            if raw_rel:
+                add_candidate(Path(LOCAL_DATA_PATH) / raw_rel)
+            dataset_name = str(status.get("dataset_name") or "").strip()
+            if dataset_name:
+                add_candidate(raw_root / f"{safe_project_id}__{dataset_name}")
+                add_candidate(raw_root / dataset_name)
+
+    for dataset_dir in (
+        _ept_dataset_dir(safe_project_id, safe_dataset_id),
+        _legacy_ept_pointcloud_dataset_dir(safe_project_id, safe_dataset_id),
+        _legacy_ept_dataset_dir(safe_project_id, safe_dataset_id),
+    ):
+        source_name = _read_text_marker(dataset_dir / ".source_name.txt")
+        if source_name:
+            add_candidate(raw_root / f"{safe_project_id}__{source_name}")
+            add_candidate(raw_root / source_name)
+        add_candidate(dataset_dir / "output.copc.laz")
+
+    if raw_root.is_dir():
+        normalized_target = _safe_export_stem(safe_dataset_id).lower()
+        for source in raw_root.glob("*"):
+            if source.suffix.lower() not in {".las", ".laz"}:
+                continue
+            stem = _safe_export_stem(source.stem).lower()
+            if normalized_target in stem or stem in normalized_target:
+                add_candidate(source)
+
+    return candidates
+
+
+def _resolve_pointcloud_slice_source(project_id: str, dataset_id: str) -> Path:
+    project_root = (Path(LOCAL_DATA_PATH) / "projects" / _safe_project_id(project_id)).resolve()
+    for candidate in _pointcloud_raw_candidates(project_id, dataset_id):
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if not resolved.is_file():
+            continue
+        if project_root not in resolved.parents:
+            continue
+        return resolved
+    raise FileNotFoundError("No LAS/LAZ source found for this point cloud. Reprocess or keep the raw upload available for clipped CSV export.")
+
+
+def _rotation_matrix_xyz(rx: float, ry: float, rz: float) -> np.ndarray:
+    sx, cx = math.sin(rx), math.cos(rx)
+    sy, cy = math.sin(ry), math.cos(ry)
+    sz, cz = math.sin(rz), math.cos(rz)
+    matrix_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=float)
+    matrix_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=float)
+    matrix_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=float)
+    return matrix_z @ matrix_y @ matrix_x
+
+
+def _finite_vector(values: list[float], expected: int, name: str) -> np.ndarray:
+    if len(values) != expected:
+        raise ValueError(f"{name} must contain {expected} numbers")
+    vector = np.array([float(value) for value in values], dtype=float)
+    if not np.all(np.isfinite(vector)):
+        raise ValueError(f"{name} contains invalid numbers")
+    return vector
+
+
+def _point_record_value(points, dimension_names: set[str], name: str, mask: np.ndarray, default: int = 0) -> np.ndarray:
+    if name not in dimension_names:
+        return np.full(int(mask.sum()), default)
+    return np.asarray(getattr(points, name))[mask]
+
+
+def _run_pointcloud_slice_export(project_id: str, dataset_id: str, job_id: str, payload: dict[str, object]) -> None:
+    safe_project_id = _safe_project_id(project_id)
+    safe_dataset_id = _safe_ept_folder_name(dataset_id)
+    export_dir = _pointcloud_slice_exports_root(safe_project_id, safe_dataset_id) / job_id
+    out_csv = export_dir / "clipped_points.csv"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    started_at = _now_iso()
+    try:
+        box_payload = payload.get("box") if isinstance(payload, dict) else {}
+        if not isinstance(box_payload, dict):
+            raise ValueError("Invalid section box payload")
+        center = _finite_vector(list(box_payload.get("center") or []), 3, "center")
+        rotation_values = list(box_payload.get("rotation") or [0.0, 0.0, 0.0])
+        if len(rotation_values) < 3:
+            rotation_values = rotation_values + [0.0] * (3 - len(rotation_values))
+        rotation = _finite_vector(rotation_values[:3], 3, "rotation")
+        dimensions = np.maximum(_finite_vector(list(box_payload.get("dimensions") or []), 3, "dimensions"), 0.001)
+        half = dimensions / 2.0
+        rotation_matrix = _rotation_matrix_xyz(float(rotation[0]), float(rotation[1]), float(rotation[2]))
+        source = _resolve_pointcloud_slice_source(safe_project_id, safe_dataset_id)
+
+        total_written = 0
+        with laspy.open(str(source)) as reader, out_csv.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["x", "y", "z", "elevation", "intensity", "classification", "r", "g", "b"])
+            for points in reader.chunk_iterator(400_000):
+                coords = np.column_stack((np.asarray(points.x), np.asarray(points.y), np.asarray(points.z)))
+                local = (coords - center) @ rotation_matrix
+                mask = (
+                    (np.abs(local[:, 0]) <= half[0])
+                    & (np.abs(local[:, 1]) <= half[1])
+                    & (np.abs(local[:, 2]) <= half[2])
+                )
+                if not np.any(mask):
+                    continue
+                dimension_names = set(points.point_format.dimension_names)
+                xs = coords[:, 0][mask]
+                ys = coords[:, 1][mask]
+                zs = coords[:, 2][mask]
+                intensities = _point_record_value(points, dimension_names, "intensity", mask)
+                classes = _point_record_value(points, dimension_names, "classification", mask)
+                reds = _point_record_value(points, dimension_names, "red", mask)
+                greens = _point_record_value(points, dimension_names, "green", mask)
+                blues = _point_record_value(points, dimension_names, "blue", mask)
+                for row in zip(xs, ys, zs, zs, intensities, classes, reds, greens, blues):
+                    writer.writerow(row)
+                total_written += int(mask.sum())
+
+        metadata = {
+            "job_id": job_id,
+            "project_id": safe_project_id,
+            "dataset_id": safe_dataset_id,
+            "source": str(source),
+            "rows": total_written,
+            "started_at": started_at,
+            "completed_at": _now_iso(),
+            "box": box_payload,
+        }
+        (export_dir / "slice_export.json").write_text(json.dumps(metadata, ensure_ascii=True, indent=2), encoding="utf-8")
+        download_url = f"/api/data/projects/{safe_project_id}/exports/pointcloud_slices/{quote(safe_dataset_id, safe='')}/{job_id}/clipped_points.csv"
+        _upsert_processing_job(
+            safe_project_id,
+            {
+                "job_id": job_id,
+                "kind": "pointcloud_slice_export",
+                "file_name": str(payload.get("name") or "Slice Export"),
+                "status": "Completed",
+                "stage": f"Exported {total_written} clipped points",
+                "progress_percent": "100",
+                "download_url": download_url,
+                "updated_at": _now_iso(),
+            },
+        )
+    except Exception as exc:
+        error_path = export_dir / "slice_export_error.txt"
+        error_path.write_text(str(exc), encoding="utf-8")
+        _upsert_processing_job(
+            safe_project_id,
+            {
+                "job_id": job_id,
+                "kind": "pointcloud_slice_export",
+                "file_name": str(payload.get("name") or "Slice Export") if isinstance(payload, dict) else "Slice Export",
+                "status": "Failed",
+                "stage": str(exc)[:800],
+                "progress_percent": "100",
+                "updated_at": _now_iso(),
+            },
+        )
+    finally:
+        _invalidate_project_files_cache(safe_project_id)
 
 
 def _safe_tile_folder_name(tile_folder: str) -> str:
@@ -3750,6 +3996,58 @@ def pointcloud_status(
             else f"{base_url}/data/projects/{safe_id}/processed{pending_suffix}/"
         ),
         "viewer_type": "pending",
+    }
+
+
+@app.post("/api/projects/{project_id}/pointclouds/{dataset_id}/slice-export")
+def start_pointcloud_slice_export(
+    project_id: str,
+    dataset_id: str,
+    payload: PointCloudSliceExportPayload,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str]:
+    safe_project_id = _safe_project_id(project_id)
+    safe_dataset_id = _safe_ept_folder_name(dataset_id)
+    _ensure_project_file_access(request, safe_project_id)
+    center = _finite_vector(payload.box.center, 3, "center")
+    dimensions = _finite_vector(payload.box.dimensions, 3, "dimensions")
+    if np.any(dimensions <= 0):
+        raise HTTPException(status_code=400, detail="Section box dimensions must be positive")
+    rotation = payload.box.rotation or [0.0, 0.0, 0.0]
+    if len(rotation) < 3:
+        rotation = rotation + [0.0] * (3 - len(rotation))
+    _finite_vector(rotation[:3], 3, "rotation")
+    if not np.all(np.isfinite(center)):
+        raise HTTPException(status_code=400, detail="Invalid section box center")
+
+    job_id = f"slice-{int(time.time())}-{secrets.token_hex(4)}"
+    export_rel = f"exports/pointcloud_slices/{quote(safe_dataset_id, safe='')}/{job_id}/clipped_points.csv"
+    _upsert_processing_job(
+        safe_project_id,
+        {
+            "job_id": job_id,
+            "kind": "pointcloud_slice_export",
+            "file_name": payload.name or f"{safe_dataset_id} Slice",
+            "status": "Processing",
+            "stage": "Clipping point cloud inside section box",
+            "progress_percent": "5",
+            "download_url": f"/api/data/projects/{safe_project_id}/{export_rel}",
+            "updated_at": _now_iso(),
+        },
+    )
+    payload_dict = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+    background_tasks.add_task(
+        _run_pointcloud_slice_export,
+        safe_project_id,
+        safe_dataset_id,
+        job_id,
+        payload_dict,
+    )
+    return {
+        "status": "processing",
+        "job_id": job_id,
+        "download_url": f"/api/data/projects/{safe_project_id}/{export_rel}",
     }
 
 
@@ -5908,7 +6206,30 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
             tracked_dataset_by_key[cog_rel] = job_dir.name
 
     found_new = 0
+    manual_ept_dirs = {
+        path.parent
+        for path in [
+            *_legacy_project_pointcloud_root(safe_project_id).glob("*/ept.json"),
+            *processed_dir.glob("*/ept.json"),
+            *processed_dir.glob("*/*/ept.json"),
+            *processed_dir.glob("*/*/*/ept.json"),
+        ]
+        if path.is_file() and _ept_asset_quality(path.parent) >= 0
+    }
+    manual_copc_dirs = {
+        path.parent
+        for path in [
+            *_project_pointcloud_root(safe_project_id).glob("*/output.copc.laz"),
+            *_legacy_project_pointcloud_root(safe_project_id).glob("*/output.copc.laz"),
+            *processed_dir.glob("*/output.copc.laz"),
+            *processed_dir.glob("*/*/output.copc.laz"),
+            *processed_dir.glob("*/*/*/output.copc.laz"),
+        ]
+        if path.is_file()
+    }
     candidates: list[tuple[Path, str, str, str]] = [
+        *[(item, "pointcloud", "pointcloud", "pointcloud_ept") for item in sorted(manual_ept_dirs, key=lambda p: p.name.lower())],
+        *[(item, "pointcloud", "pointcloud", "pointcloud_copc") for item in sorted(manual_copc_dirs, key=lambda p: p.name.lower())],
         *[
             (
                 item,
@@ -5926,12 +6247,56 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
         folder_name = _display_model_folder_name(item, processed_dir) if layer_kind == "3DModel" else item.name
         if asset_kind == "cog":
             folder_name = folder_name.replace(".cog.tiff", ".tiff").replace(".cog.tif", ".tif").replace("_cog.tiff", ".tiff").replace("_cog.tif", ".tif")
-        if layer_kind != "3DModel":
+        if asset_kind.startswith("pointcloud_"):
+            dataset_type = "pointcloud"
+            layer_kind = "pointcloud"
+        elif layer_kind != "3DModel":
             dataset_type = _normalize_dataset_type(dataset_type, folder_name)
             layer_kind = _raster_layer_type(dataset_type, folder_name)
         if folder_name in tracked_folders or rel_path in tracked_folders:
             existing_dataset_id = tracked_dataset_by_key.get(rel_path) or tracked_dataset_by_key.get(folder_name)
-            if existing_dataset_id and asset_kind == "cog":
+            if existing_dataset_id and asset_kind.startswith("pointcloud_"):
+                existing_status = _read_dataset_status(safe_project_id, existing_dataset_id) or {}
+                if (
+                    str(existing_status.get("dataset_type") or "").lower() != "pointcloud"
+                    or str(existing_status.get("layer_type") or "").lower() != "pointcloud"
+                    or not str(existing_status.get("viewer_type") or "").strip()
+                ):
+                    viewer_type = "ept" if asset_kind == "pointcloud_ept" else "copc"
+                    viewer_url = (
+                        _ept_viewer_url("", safe_project_id, folder_name, folder_name)
+                        if viewer_type == "ept"
+                        else _copc_viewer_url("", safe_project_id, folder_name, folder_name)
+                    )
+                    _write_dataset_status(
+                        safe_project_id,
+                        existing_dataset_id,
+                        {
+                            **existing_status,
+                            "status": "Web-Ready",
+                            "updated_at": _now_iso(),
+                            "dataset_type": "pointcloud",
+                            "layer_type": "pointcloud",
+                            "viewer_type": viewer_type,
+                            "tiles_rel_path": rel_path,
+                        },
+                    )
+                    _upsert_processing_job(
+                        safe_project_id,
+                        {
+                            "job_id": existing_dataset_id,
+                            "kind": "pointcloud",
+                            "file_name": folder_name,
+                            "status": "Completed",
+                            "updated_at": _now_iso(),
+                            "result_url": viewer_url,
+                            "viewer_type": viewer_type,
+                            "dataset_type": "pointcloud",
+                            "layer_type": "pointcloud",
+                            "tiles_rel_path": rel_path,
+                        },
+                    )
+            elif existing_dataset_id and asset_kind == "cog":
                 existing_status = _read_dataset_status(safe_project_id, existing_dataset_id) or {}
                 if not existing_status.get("bounds_wgs84") or not existing_status.get("source_crs"):
                     raster_metadata = _read_raster_manual_metadata(item, dataset_type)
@@ -5962,6 +6327,7 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
                 "tile_folder": folder_name,
                 "dataset_type": dataset_type,
                 "layer_type": layer_kind,
+                "viewer_type": "ept" if asset_kind == "pointcloud_ept" else "copc" if asset_kind == "pointcloud_copc" else "",
                 "month": "",
                 "raw_rel_path": "",
                 "tiles_rel_path": "" if asset_kind == "cog" else rel_path,
@@ -5971,15 +6337,20 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
             },
         )
         result_url = f"/data/{rel_path}/tileset.json" if layer_kind == "3DModel" else f"/data/{rel_path}"
+        if asset_kind == "pointcloud_ept":
+            result_url = _ept_viewer_url("", safe_project_id, folder_name, folder_name)
+        elif asset_kind == "pointcloud_copc":
+            result_url = _copc_viewer_url("", safe_project_id, folder_name, folder_name)
         _upsert_processing_job(
             safe_project_id,
             {
                 "job_id": dataset_id,
-                "kind": "dataset",
+                "kind": "pointcloud" if asset_kind.startswith("pointcloud_") else "dataset",
                 "file_name": folder_name,
                 "status": "Completed",
                 "updated_at": _now_iso(),
                 "result_url": result_url,
+                "viewer_type": "ept" if asset_kind == "pointcloud_ept" else "copc" if asset_kind == "pointcloud_copc" else "",
                 "dataset_type": dataset_type,
                 "layer_type": layer_kind,
                 "tiles_rel_path": "" if asset_kind == "cog" else rel_path,
@@ -7737,6 +8108,8 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
         *_project_pointcloud_root(safe_project_id).glob("*/ept.json"),
         *_legacy_project_pointcloud_root(safe_project_id).glob("*/ept.json"),
         *processed_root.glob("*/ept.json"),
+        *processed_root.glob("*/*/ept.json"),
+        *processed_root.glob("*/*/*/ept.json"),
     ]
     for ready_ept in ready_ept_paths:
         if not ready_ept.is_file() or (ready_ept.parent / ".conversion_error.txt").is_file():
@@ -7753,6 +8126,10 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
 
     ready_copc_paths = [
         *_project_pointcloud_root(safe_project_id).glob("*/output.copc.laz"),
+        *_legacy_project_pointcloud_root(safe_project_id).glob("*/output.copc.laz"),
+        *processed_root.glob("*/output.copc.laz"),
+        *processed_root.glob("*/*/output.copc.laz"),
+        *processed_root.glob("*/*/*/output.copc.laz"),
     ]
     for ready_copc in ready_copc_paths:
         if not ready_copc.is_file() or (ready_copc.parent / ".conversion_error.txt").is_file():
@@ -8074,6 +8451,10 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
 
         copc_paths = [
             *_project_pointcloud_root(safe_project_id).glob("*/output.copc.laz"),
+            *_legacy_project_pointcloud_root(safe_project_id).glob("*/output.copc.laz"),
+            *processed_root.glob("*/output.copc.laz"),
+            *processed_root.glob("*/*/output.copc.laz"),
+            *processed_root.glob("*/*/*/output.copc.laz"),
         ]
         for copc_file in sorted({p.resolve() for p in copc_paths}, key=lambda p: (p.parent.stat().st_mtime, p.parent.name.lower()), reverse=True):
             rel = copc_file.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
@@ -8108,6 +8489,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "rel_path": rel,
                     "dataset_id": copc_file.parent.name,
                     "dataset_type": "pointcloud",
+                    "layer_type": "pointcloud",
                     "month": "",
                     "raw_rel_path": "",
                 },
@@ -8119,6 +8501,8 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
             *_project_pointcloud_root(safe_project_id).glob("*/ept.json"),
             *_legacy_project_pointcloud_root(safe_project_id).glob("*/ept.json"),
             *processed_root.glob("*/ept.json"),
+            *processed_root.glob("*/*/ept.json"),
+            *processed_root.glob("*/*/*/ept.json"),
         ]
         for ept_json in sorted({p.resolve() for p in ept_json_paths}, key=lambda p: (p.parent.stat().st_mtime, p.parent.name.lower()), reverse=True):
             best_ept = _best_ept_asset(safe_project_id, ept_json.parent.name)
@@ -8160,6 +8544,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "rel_path": rel,
                     "dataset_id": ept_json.parent.name,
                     "dataset_type": "pointcloud",
+                    "layer_type": "pointcloud",
                     "month": "",
                     "raw_rel_path": "",
                 },

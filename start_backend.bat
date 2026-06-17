@@ -31,6 +31,10 @@ if not exist "%PROJECT_DATA_DIR%" mkdir "%PROJECT_DATA_DIR%"
 
 pushd "%BACKEND_DIR%"
 
+if exist "%ROOT%Droid_Environment_Manager\_Setup_EPT_Environment.bat" (
+  call "%ROOT%Droid_Environment_Manager\_Setup_EPT_Environment.bat"
+)
+
 "venv\Scripts\python.exe" -c "import sys, uvicorn, fastapi" >nul 2>&1
 if errorlevel 1 (
   echo [ERROR] Backend dependencies missing or venv broken.

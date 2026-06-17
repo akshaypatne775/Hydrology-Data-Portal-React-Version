@@ -337,7 +337,7 @@ if "%BACKEND_PORT_CONFLICT%"=="1" (
   echo [OK] Backend is already running on http://127.0.0.1:8000
 ) else (
   echo [STEP] Starting backend...
-  start "Droid Cloud - Backend" /D "%BACKEND_DIR%" cmd /k ""venv\Scripts\python.exe" -m uvicorn app.main:app --app-dir "%BACKEND_DIR%" --reload --host 127.0.0.1 --port 8000"
+  start "Droid Cloud - Backend" /D "%BACKEND_DIR%" cmd /k "call ""%ROOT%Droid_Environment_Manager\_Setup_EPT_Environment.bat"" && ""venv\Scripts\python.exe"" -m uvicorn app.main:app --app-dir ""%BACKEND_DIR%"" --reload --host 127.0.0.1 --port 8000"
 )
 exit /b 0
 

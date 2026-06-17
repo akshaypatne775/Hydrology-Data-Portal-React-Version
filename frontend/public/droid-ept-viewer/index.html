@@ -253,7 +253,8 @@
       border-radius: 7px;
       font-size: 10px;
     }
-    .alignment-dialog {
+    .alignment-dialog,
+    .slice-dialog {
       position: fixed;
       inset: auto 50% 92px auto;
       z-index: 100040;
@@ -266,25 +267,30 @@
       background: rgba(14, 62, 73, 0.98);
       box-shadow: 0 18px 42px rgba(0, 0, 0, 0.4);
     }
-    .alignment-dialog.is-visible { display: block; }
-    .alignment-dialog h2 {
+    .alignment-dialog.is-visible,
+    .slice-dialog.is-visible { display: block; }
+    .alignment-dialog h2,
+    .slice-dialog h2 {
       margin: 0 0 7px;
       font-size: 14px;
       font-weight: 900;
     }
-    .alignment-dialog p {
+    .alignment-dialog p,
+    .slice-dialog p {
       margin: 0 0 10px;
       color: var(--droid-muted);
       font-size: 12px;
       line-height: 1.45;
     }
-    .alignment-grid {
+    .alignment-grid,
+    .slice-grid {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
       gap: 8px;
       margin-bottom: 10px;
     }
-    .alignment-field label {
+    .alignment-field label,
+    .slice-field label {
       display: block;
       margin-bottom: 5px;
       color: var(--droid-muted);
@@ -292,7 +298,8 @@
       font-weight: 900;
       text-transform: uppercase;
     }
-    .alignment-field input {
+    .alignment-field input,
+    .slice-field input {
       width: 100%;
       min-height: 34px;
       border: 1px solid rgba(203, 251, 241, 0.22);
@@ -302,7 +309,8 @@
       padding: 0 9px;
       font-weight: 800;
     }
-    .alignment-actions {
+    .alignment-actions,
+    .slice-actions {
       display: flex;
       justify-content: flex-end;
       gap: 8px;
@@ -357,11 +365,20 @@
     </div>
     <div class="droid-actions">
       <button class="droid-button" id="resetViewButton" type="button">Reset View</button>
+      <button class="droid-button" id="naturalColorButton" type="button">Natural Color</button>
+      <button class="droid-button" id="elevationColorButton" type="button">Elevation Color</button>
+      <button class="droid-button" id="intensityColorButton" type="button">Intensity</button>
       <button class="droid-button" id="distanceButton" type="button">Distance</button>
       <button class="droid-button" id="areaButton" type="button">Area</button>
       <button class="droid-button" id="heightButton" type="button">Height</button>
       <button class="droid-button" id="sectionButton" type="button">Cross Section</button>
       <button class="droid-button" id="alignmentButton" type="button">L/C Sections</button>
+      <button class="droid-button" id="sliceLineButton" type="button">Slice Line</button>
+      <button class="droid-button" id="sectionBoxButton" type="button">Section Box</button>
+      <button class="droid-button" id="applySliceButton" type="button">Apply Slice</button>
+      <button class="droid-button" id="profileCsvButton" type="button">Export Profile CSV</button>
+      <button class="droid-button" id="clippedCsvButton" type="button">Export Clipped CSV</button>
+      <button class="droid-button droid-button--danger" id="clearSliceButton" type="button">Clear Slice</button>
       <button class="droid-button droid-button--danger" id="clearButton" type="button">Clear</button>
     </div>
   </header>
@@ -403,6 +420,30 @@
     </div>
   </div>
 
+  <div class="slice-dialog" id="sliceDialog" role="dialog" aria-modal="true">
+    <h2>Section Box Slice</h2>
+    <p>Draw a line to auto-create a clipping section box, or insert a manual editable box. Apply Slice hides everything outside the box.</p>
+    <div class="slice-grid">
+      <div class="slice-field">
+        <label for="sliceWidthInput">Width m</label>
+        <input id="sliceWidthInput" type="number" min="0.1" step="0.1" value="8">
+      </div>
+      <div class="slice-field">
+        <label for="sliceDepthInput">Depth m</label>
+        <input id="sliceDepthInput" type="number" min="0.1" step="0.1" value="8">
+      </div>
+      <div class="slice-field">
+        <label for="sliceHeightInput">Height m</label>
+        <input id="sliceHeightInput" type="number" min="0" step="0.1" value="0">
+      </div>
+    </div>
+    <div class="slice-actions">
+      <button class="droid-button" id="sliceCancelButton" type="button">Cancel</button>
+      <button class="droid-button" id="sliceDrawLineButton" type="button">Draw Slice Line</button>
+      <button class="droid-button" id="sliceInsertBoxButton" type="button">Insert Manual Box</button>
+    </div>
+  </div>
+
   <div class="droid-notice" id="noticeBox" role="alert">
     <strong id="noticeTitle">Viewer Notice</strong>
     <span id="noticeMessage"></span>
@@ -428,11 +469,16 @@
     const budgetSlider = document.getElementById("pointBudgetSlider");
     const budgetValue = document.getElementById("pointBudgetValue");
     const alignmentDialog = document.getElementById("alignmentDialog");
+    const sliceDialog = document.getElementById("sliceDialog");
 
     let activePointCloud = null;
     let crossSections = [];
     let activeAlignmentProfile = null;
     let activeSectionProfile = null;
+    let activeSliceProfile = null;
+    let activeSectionBox = null;
+    let pointCloudMetadata = null;
+    let naturalAttributeName = "elevation";
 
     datasetName.textContent = displayName;
 
@@ -695,14 +741,327 @@
       renderSections();
     }
 
+    function getActivePointCloudBounds() {
+      const fallback = new THREE.Box3(new THREE.Vector3(-10, -10, -10), new THREE.Vector3(10, 10, 10));
+      if (!activePointCloud || !activePointCloud.boundingBox) return fallback;
+      const bounds = activePointCloud.boundingBox.clone();
+      if (activePointCloud.matrixWorld) bounds.applyMatrix4(activePointCloud.matrixWorld);
+      if (!Number.isFinite(bounds.min.x) || !Number.isFinite(bounds.max.x)) return fallback;
+      return bounds;
+    }
+
+    function getSliceSettings() {
+      const bounds = getActivePointCloudBounds();
+      const heightSpan = Math.max(1, bounds.max.z - bounds.min.z);
+      const width = Math.max(0.1, Number(document.getElementById("sliceWidthInput").value) || 8);
+      const depth = Math.max(0.1, Number(document.getElementById("sliceDepthInput").value) || width);
+      const heightInput = Number(document.getElementById("sliceHeightInput").value) || 0;
+      const height = heightInput > 0 ? heightInput : heightSpan * 1.08;
+      return { bounds, width, depth, height };
+    }
+
+    function setSliceButtonState(active) {
+      for (const id of ["sliceLineButton", "sectionBoxButton", "applySliceButton"]) {
+        const button = document.getElementById(id);
+        if (button) button.classList.toggle("is-active", Boolean(active));
+      }
+    }
+
+    function applyViewerSliceClipping() {
+      if (!activeSectionBox) {
+        showNotice("No Section Box", "Create a slice line or manual section box first.");
+        return false;
+      }
+      activeSectionBox.clip = true;
+      if (Potree.ClipTask && viewer.setClipTask) viewer.setClipTask(Potree.ClipTask.SHOW_INSIDE);
+      if (Potree.ClipMethod && viewer.setClipMethod) viewer.setClipMethod(Potree.ClipMethod.INSIDE_ANY);
+      if (activePointCloud && activePointCloud.material) {
+        if (Potree.ClipTask) activePointCloud.material.clipTask = Potree.ClipTask.SHOW_INSIDE;
+        if (Potree.ClipMethod) activePointCloud.material.clipMethod = Potree.ClipMethod.INSIDE_ANY;
+      }
+      setSliceButtonState(true);
+      hideNotice();
+      return true;
+    }
+
+    function syncSectionBoxFromProfile(profile) {
+      if (!profile || !Array.isArray(profile.points) || profile.points.length < 2) return null;
+      const { bounds, depth, height } = getSliceSettings();
+      const start = profile.points[0].clone();
+      const end = profile.points[profile.points.length - 1].clone();
+      const flatStart = start.clone().setZ(0);
+      const flatEnd = end.clone().setZ(0);
+      const length = Math.max(0.1, flatStart.distanceTo(flatEnd));
+      const center = start.clone().add(end).multiplyScalar(0.5);
+      center.z = (bounds.min.z + bounds.max.z) / 2;
+      const direction = end.clone().sub(start).setZ(0);
+      const yaw = Math.atan2(direction.y, direction.x);
+
+      if (!activeSectionBox) {
+        activeSectionBox = new Potree.BoxVolume();
+        activeSectionBox.name = "Slice Section Box";
+        activeSectionBox.clip = true;
+        activeSectionBox.showVolumeLabel = false;
+        viewer.scene.addVolume(activeSectionBox);
+      }
+
+      activeSectionBox.position.copy(center);
+      activeSectionBox.rotation.set(0, 0, Number.isFinite(yaw) ? yaw : 0);
+      activeSectionBox.scale.set(length, depth, height);
+      activeSectionBox.clip = true;
+      if (typeof profile.setWidth === "function") profile.setWidth(depth);
+      profile.userData = { ...(profile.userData || {}), sectionType: "slice", sliceBox: true };
+      return activeSectionBox;
+    }
+
+    function startSliceLine() {
+      sliceDialog.classList.remove("is-visible");
+      if (!viewer.profileTool) {
+        showNotice("Tool Loading", "Slice line tool is still loading. Try again in a moment.");
+        return;
+      }
+      const profile = viewer.profileTool.startInsertion({ name: "Slice Line" });
+      profile.name = "Slice Line";
+      profile.userData = { ...(profile.userData || {}), sectionType: "slice", sliceBox: true };
+      activeSliceProfile = profile;
+      activeSectionProfile = profile;
+      if (!crossSections.includes(profile)) crossSections.push(profile);
+      watchProfile(profile);
+      const updateSlice = () => {
+        if (profile.points && profile.points.length >= 2) {
+          syncSectionBoxFromProfile(profile);
+          applyViewerSliceClipping();
+          renderSections();
+        }
+      };
+      profile.addEventListener("marker_added", updateSlice);
+      profile.addEventListener("marker_moved", updateSlice);
+      showNotice("Slice Line Active", "Pick two points across the underground area. The editable section box will align to that line.");
+      renderSections();
+    }
+
+    function startSectionBox() {
+      sliceDialog.classList.remove("is-visible");
+      if (!viewer.volumeTool) {
+        showNotice("Tool Loading", "Section box tool is still loading. Try again in a moment.");
+        return;
+      }
+      const volume = viewer.volumeTool.startInsertion({
+        type: Potree.BoxVolume,
+        name: "Manual Section Box",
+        clip: true,
+      });
+      activeSectionBox = volume;
+      if (activeSectionBox) {
+        activeSectionBox.clip = true;
+        activeSectionBox.showVolumeLabel = false;
+        applyViewerSliceClipping();
+        showNotice("Section Box Active", "Place the box, then drag, rotate, or scale it. Apply Slice keeps only points inside it.");
+      }
+    }
+
+    function applySlice() {
+      if (!activeSectionBox && activeSliceProfile) syncSectionBoxFromProfile(activeSliceProfile);
+      if (applyViewerSliceClipping()) {
+        showNotice("Slice Applied", "Only points inside the active section box are visible. Use Clear Slice to restore the full point cloud.");
+      }
+    }
+
+    function clearSlice() {
+      if (activeSectionBox) {
+        viewer.scene.removeVolume(activeSectionBox);
+        activeSectionBox = null;
+      }
+      if (activeSliceProfile) {
+        viewer.scene.removeProfile(activeSliceProfile);
+        activeSliceProfile = null;
+      }
+      const noClipTask = Potree.ClipTask && (Potree.ClipTask.NONE !== undefined ? Potree.ClipTask.NONE : Potree.ClipTask.HIGHLIGHT);
+      if (noClipTask !== undefined && viewer.setClipTask) viewer.setClipTask(noClipTask);
+      if (activePointCloud && activePointCloud.material) {
+        if (noClipTask !== undefined) activePointCloud.material.clipTask = noClipTask;
+        if (typeof activePointCloud.material.setClipBoxes === "function") activePointCloud.material.setClipBoxes([]);
+      }
+      setSliceButtonState(false);
+      hideNotice();
+      renderSections();
+    }
+
+    function downloadTextFile(filename, text) {
+      const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      window.setTimeout(() => {
+        URL.revokeObjectURL(link.href);
+        link.remove();
+      }, 0);
+    }
+
+    function exportProfileCsv() {
+      const profile = activeSliceProfile || activeSectionProfile || crossSections[crossSections.length - 1];
+      if (!profile || !Array.isArray(profile.points) || profile.points.length === 0) {
+        showNotice("No Profile", "Draw a slice line or cross section before exporting profile CSV.");
+        return;
+      }
+      let distance = 0;
+      const rows = ["chainage,distance,x,y,z,elevation,intensity,classification,r,g,b"];
+      profile.points.forEach((point, index) => {
+        if (index > 0) distance += profile.points[index - 1].distanceTo(point);
+        rows.push([
+          distance.toFixed(3),
+          distance.toFixed(3),
+          point.x.toFixed(6),
+          point.y.toFixed(6),
+          point.z.toFixed(6),
+          point.z.toFixed(6),
+          "",
+          "",
+          "",
+          "",
+          "",
+        ].join(","));
+      });
+      downloadTextFile(`${(displayName || "pointcloud").replace(/[^A-Za-z0-9._-]+/g, "-")}-profile.csv`, rows.join("\n"));
+      showNotice("Profile CSV Exported", "The current profile vertices were exported. Use clipped export for full points inside the section box.");
+    }
+
+    async function exportClippedPointsCsv() {
+      if (!activeSectionBox) {
+        showNotice("No Section Box", "Create or apply a section box before exporting clipped points.");
+        return;
+      }
+      if (!projectId || !datasetId) {
+        showNotice("Missing Dataset", "This viewer URL does not include project and dataset identifiers.");
+        return;
+      }
+      const payload = {
+        name: `${displayName || datasetId} Slice`,
+        box: {
+          center: [activeSectionBox.position.x, activeSectionBox.position.y, activeSectionBox.position.z],
+          rotation: [activeSectionBox.rotation.x, activeSectionBox.rotation.y, activeSectionBox.rotation.z],
+          dimensions: [activeSectionBox.scale.x, activeSectionBox.scale.y, activeSectionBox.scale.z],
+        },
+        source_asset: pointCloudUrl,
+        viewer_type: pointCloudFormat.toLowerCase(),
+      };
+      try {
+        const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/pointclouds/${encodeURIComponent(datasetId)}/slice-export`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify(payload),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || `Export failed (${response.status})`);
+        showNotice("Clipped Export Started", data.download_url
+          ? "CSV export is running in the backend. Download link will be available from processing jobs when complete."
+          : "CSV export is running in the backend.");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        showNotice("Clipped Export Failed", message);
+        logViewerError(message, error instanceof Error ? error.stack || "" : "");
+      }
+    }
+
     function clearTools() {
       viewer.scene.removeAllMeasurements();
       for (const profile of [...crossSections]) viewer.scene.removeProfile(profile);
       crossSections = [];
       activeAlignmentProfile = null;
       activeSectionProfile = null;
+      clearSlice();
       hideNotice();
       renderSections();
+    }
+
+    function choosePointAttribute(metadata) {
+      const schema = Array.isArray(metadata && metadata.schema) ? metadata.schema : [];
+      const names = new Set(schema.map((entry) => String(entry && entry.name || "").toLowerCase()));
+      if (names.has("red") && names.has("green") && names.has("blue")) return "rgba";
+      if (names.has("intensity")) return "intensity";
+      if (names.has("classification")) return "classification";
+      if (names.has("z")) return "elevation";
+      return "elevation";
+    }
+
+    function applyPointMaterial(pointcloud, metadata) {
+      if (!pointcloud || !pointcloud.material) return;
+      const material = pointcloud.material;
+      material.size = 1;
+      material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
+      const attribute = choosePointAttribute(metadata);
+      naturalAttributeName = attribute;
+      if (material.activeAttributeName !== undefined) material.activeAttributeName = attribute;
+      if (attribute === "intensity" && material.intensityRange !== undefined) {
+        material.intensityRange = [0, 65535];
+      }
+    }
+
+    function setButtonActive(buttonId) {
+      for (const id of ["naturalColorButton", "elevationColorButton", "intensityColorButton"]) {
+        const button = document.getElementById(id);
+        if (button) button.classList.toggle("is-active", id === buttonId);
+      }
+    }
+
+    function getElevationRange() {
+      const bounds = pointCloudMetadata && Array.isArray(pointCloudMetadata.boundsConforming)
+        ? pointCloudMetadata.boundsConforming
+        : pointCloudMetadata && Array.isArray(pointCloudMetadata.bounds)
+          ? pointCloudMetadata.bounds
+          : null;
+      if (bounds && bounds.length >= 6) {
+        const min = Number(bounds[2]);
+        const max = Number(bounds[5]);
+        if (Number.isFinite(min) && Number.isFinite(max) && max > min) return [min, max];
+      }
+      if (activePointCloud && activePointCloud.boundingBox) {
+        const min = Number(activePointCloud.boundingBox.min && activePointCloud.boundingBox.min.z);
+        const max = Number(activePointCloud.boundingBox.max && activePointCloud.boundingBox.max.z);
+        if (Number.isFinite(min) && Number.isFinite(max) && max > min) return [min, max];
+      }
+      return [0, 100];
+    }
+
+    function applyNaturalColorMode() {
+      if (!activePointCloud || !activePointCloud.material) return;
+      activePointCloud.material.activeAttributeName = naturalAttributeName || choosePointAttribute(pointCloudMetadata);
+      setButtonActive("naturalColorButton");
+      hideNotice();
+    }
+
+    function applyElevationColorMode() {
+      if (!activePointCloud || !activePointCloud.material) {
+        showNotice("Point Cloud Loading", "Wait until the point cloud finishes loading, then apply elevation color.");
+        return;
+      }
+      const material = activePointCloud.material;
+      material.activeAttributeName = "elevation";
+      material.elevationRange = getElevationRange();
+      if (Potree.Gradients) {
+        material.gradient =
+          Potree.Gradients.SPECTRAL ||
+          Potree.Gradients.RAINBOW ||
+          Potree.Gradients.VIRIDIS ||
+          material.gradient;
+      }
+      if (Potree.ElevationGradientRepeat) {
+        if (material.elevationGradientRepeat !== undefined) material.elevationGradientRepeat = Potree.ElevationGradientRepeat.CLAMP;
+        if (material.elevationGradientRepat !== undefined) material.elevationGradientRepat = Potree.ElevationGradientRepeat.CLAMP;
+      }
+      setButtonActive("elevationColorButton");
+      hideNotice();
+    }
+
+    function applyIntensityColorMode() {
+      if (!activePointCloud || !activePointCloud.material) return;
+      activePointCloud.material.activeAttributeName = "intensity";
+      if (activePointCloud.material.intensityRange !== undefined) activePointCloud.material.intensityRange = [0, 65535];
+      setButtonActive("intensityColorButton");
+      hideNotice();
     }
 
     viewer.scene.addEventListener("profile_added", (event) => {
@@ -715,10 +1074,17 @@
       crossSections = crossSections.filter((profile) => profile !== event.profile);
       if (activeAlignmentProfile === event.profile) activeAlignmentProfile = null;
       if (activeSectionProfile === event.profile) activeSectionProfile = crossSections[crossSections.length - 1] || null;
+      if (activeSliceProfile === event.profile) activeSliceProfile = null;
       renderSections();
     });
 
     document.getElementById("resetViewButton").addEventListener("click", () => viewer.fitToScreen(0.5));
+    document.getElementById("naturalColorButton").addEventListener("click", applyNaturalColorMode);
+    document.getElementById("elevationColorButton").addEventListener("click", applyElevationColorMode);
+    document.getElementById("intensityColorButton").addEventListener("click", applyIntensityColorMode);
+    window.droidApplyNaturalColor = applyNaturalColorMode;
+    window.droidApplyElevationColor = applyElevationColorMode;
+    window.droidApplyIntensityColor = applyIntensityColorMode;
     document.getElementById("distanceButton").addEventListener("click", () => startMeasurement("distance"));
     document.getElementById("areaButton").addEventListener("click", () => startMeasurement("area"));
     document.getElementById("heightButton").addEventListener("click", () => startMeasurement("height"));
@@ -727,7 +1093,24 @@
     document.getElementById("alignmentCancelButton").addEventListener("click", () => alignmentDialog.classList.remove("is-visible"));
     document.getElementById("alignmentDrawButton").addEventListener("click", startAlignmentDrawing);
     document.getElementById("alignmentGenerateButton").addEventListener("click", generateSectionsFromAlignment);
+    document.getElementById("sliceLineButton").addEventListener("click", () => sliceDialog.classList.add("is-visible"));
+    document.getElementById("sectionBoxButton").addEventListener("click", startSectionBox);
+    document.getElementById("applySliceButton").addEventListener("click", applySlice);
+    document.getElementById("profileCsvButton").addEventListener("click", exportProfileCsv);
+    document.getElementById("clippedCsvButton").addEventListener("click", exportClippedPointsCsv);
+    document.getElementById("clearSliceButton").addEventListener("click", clearSlice);
+    document.getElementById("sliceCancelButton").addEventListener("click", () => sliceDialog.classList.remove("is-visible"));
+    document.getElementById("sliceDrawLineButton").addEventListener("click", startSliceLine);
+    document.getElementById("sliceInsertBoxButton").addEventListener("click", startSectionBox);
     document.getElementById("clearButton").addEventListener("click", clearTools);
+    window.droidStartCrossSection = startCrossSection;
+    window.droidClearSections = clearTools;
+    window.droidStartSliceLine = startSliceLine;
+    window.droidStartSectionBox = startSectionBox;
+    window.droidApplySlice = applySlice;
+    window.droidClearSlice = clearSlice;
+    window.droidExportProfileCsv = exportProfileCsv;
+    window.droidExportClippedPointsCsv = exportClippedPointsCsv;
     budgetSlider.addEventListener("input", (event) => {
       const value = Number(event.target.value);
       viewer.setPointBudget(value);
@@ -742,7 +1125,7 @@
         if (pointCloudFormat === "EPT") {
           const metadataResponse = await fetch(pointCloudUrl, { cache: "no-store", credentials: "same-origin" });
           if (!metadataResponse.ok) throw new Error(`EPT metadata not available (${metadataResponse.status})`);
-          await metadataResponse.json();
+          pointCloudMetadata = await metadataResponse.json();
         }
         const event = await new Promise((resolve, reject) => {
           try {
@@ -756,10 +1139,8 @@
         });
         activePointCloud = event.pointcloud;
         viewer.scene.addPointCloud(activePointCloud);
-        const material = activePointCloud.material;
-        material.size = 1;
-        material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
-        if (material.activeAttributeName !== undefined) material.activeAttributeName = "rgba";
+        applyPointMaterial(activePointCloud, pointCloudMetadata);
+        setButtonActive(naturalAttributeName === "intensity" ? "intensityColorButton" : "naturalColorButton");
         viewer.fitToScreen(0.5);
         datasetName.textContent = displayName;
         hideNotice();

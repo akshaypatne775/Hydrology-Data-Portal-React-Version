@@ -74,12 +74,35 @@ export function PotreeViewer({ url, projectId = '', datasetId = '' }: PotreeView
     return () => frame.removeEventListener('load', onFrameLoad)
   }, [datasetId, projectId, url])
 
-  const runPotreeTool = (action: 'cross-section' | 'lc-sections' | 'clear') => {
+  const runPotreeTool = (
+    action:
+      | 'cross-section'
+      | 'lc-sections'
+      | 'slice-line'
+      | 'section-box'
+      | 'apply-slice'
+      | 'clear-slice'
+      | 'profile-csv'
+      | 'clipped-csv'
+      | 'clear'
+      | 'natural-color'
+      | 'elevation-color'
+      | 'intensity-color',
+  ) => {
     const frame = frameRef.current
     const win = frame?.contentWindow as
       | (Window & {
           droidStartCrossSection?: () => unknown
           droidClearSections?: () => unknown
+          droidApplyNaturalColor?: () => unknown
+          droidApplyElevationColor?: () => unknown
+          droidApplyIntensityColor?: () => unknown
+          droidStartSliceLine?: () => unknown
+          droidStartSectionBox?: () => unknown
+          droidApplySlice?: () => unknown
+          droidClearSlice?: () => unknown
+          droidExportProfileCsv?: () => unknown
+          droidExportClippedPointsCsv?: () => unknown
           viewer?: {
             profileTool?: { startInsertion?: (args?: { name?: string }) => unknown }
             profileWindow?: { show?: () => void }
@@ -135,6 +158,75 @@ export function PotreeViewer({ url, projectId = '', datasetId = '' }: PotreeView
         return
       }
 
+      if (action === 'natural-color') {
+        const button = doc.getElementById('naturalColorButton') as HTMLButtonElement | null
+        if (button) button.click()
+        else win.droidApplyNaturalColor?.()
+        setToolMessage('Natural color mode applied.')
+        return
+      }
+
+      if (action === 'elevation-color') {
+        const button = doc.getElementById('elevationColorButton') as HTMLButtonElement | null
+        if (button) button.click()
+        else win.droidApplyElevationColor?.()
+        setToolMessage('Elevation color mode applied.')
+        return
+      }
+
+      if (action === 'intensity-color') {
+        const button = doc.getElementById('intensityColorButton') as HTMLButtonElement | null
+        if (button) button.click()
+        else win.droidApplyIntensityColor?.()
+        setToolMessage('Intensity color mode applied.')
+        return
+      }
+
+      const sliceActions: Record<
+        string,
+        { buttonId: string; fallback?: () => unknown; message: string }
+      > = {
+        'slice-line': {
+          buttonId: 'sliceLineButton',
+          fallback: win.droidStartSliceLine,
+          message: 'Slice line mode active. Draw two points to create an editable section box.',
+        },
+        'section-box': {
+          buttonId: 'sectionBoxButton',
+          fallback: win.droidStartSectionBox,
+          message: 'Manual section box active. Place and edit the clipping box.',
+        },
+        'apply-slice': {
+          buttonId: 'applySliceButton',
+          fallback: win.droidApplySlice,
+          message: 'Slice clipping applied.',
+        },
+        'clear-slice': {
+          buttonId: 'clearSliceButton',
+          fallback: win.droidClearSlice,
+          message: 'Slice clipping cleared.',
+        },
+        'profile-csv': {
+          buttonId: 'profileCsvButton',
+          fallback: win.droidExportProfileCsv,
+          message: 'Profile CSV export requested.',
+        },
+        'clipped-csv': {
+          buttonId: 'clippedCsvButton',
+          fallback: win.droidExportClippedPointsCsv,
+          message: 'Full clipped-points CSV export requested.',
+        },
+      }
+
+      const sliceAction = sliceActions[action]
+      if (sliceAction) {
+        const button = doc.getElementById(sliceAction.buttonId) as HTMLButtonElement | null
+        if (button) button.click()
+        else sliceAction.fallback?.()
+        setToolMessage(sliceAction.message)
+        return
+      }
+
       const clearButton = doc.getElementById('clearButton') as HTMLButtonElement | null
       if (clearButton) {
         clearButton.click()
@@ -169,6 +261,42 @@ export function PotreeViewer({ url, projectId = '', datasetId = '' }: PotreeView
         <button type="button" onClick={() => runPotreeTool('lc-sections')}>
           <i className="fas fa-route" aria-hidden />
           L/C Sections
+        </button>
+        <button type="button" onClick={() => runPotreeTool('slice-line')}>
+          <i className="fas fa-slash" aria-hidden />
+          Slice Line
+        </button>
+        <button type="button" onClick={() => runPotreeTool('section-box')}>
+          <i className="fas fa-cube" aria-hidden />
+          Section Box
+        </button>
+        <button type="button" onClick={() => runPotreeTool('apply-slice')}>
+          <i className="fas fa-crop" aria-hidden />
+          Apply Slice
+        </button>
+        <button type="button" onClick={() => runPotreeTool('profile-csv')}>
+          <i className="fas fa-file-csv" aria-hidden />
+          Profile CSV
+        </button>
+        <button type="button" onClick={() => runPotreeTool('clipped-csv')}>
+          <i className="fas fa-download" aria-hidden />
+          Clipped CSV
+        </button>
+        <button type="button" onClick={() => runPotreeTool('clear-slice')}>
+          <i className="fas fa-broom" aria-hidden />
+          Clear Slice
+        </button>
+        <button type="button" onClick={() => runPotreeTool('natural-color')}>
+          <i className="fas fa-eye" aria-hidden />
+          Natural
+        </button>
+        <button type="button" onClick={() => runPotreeTool('elevation-color')}>
+          <i className="fas fa-mountain" aria-hidden />
+          Elevation
+        </button>
+        <button type="button" onClick={() => runPotreeTool('intensity-color')}>
+          <i className="fas fa-sun" aria-hidden />
+          Intensity
         </button>
         <button type="button" onClick={() => runPotreeTool('clear')}>
           <i className="fas fa-eraser" aria-hidden />
