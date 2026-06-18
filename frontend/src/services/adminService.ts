@@ -142,5 +142,8 @@ export async function forceDeleteAdminDataset(projectId: string, datasetKey: str
   const res = await apiRequest(`/api/admin/projects/${encodeURIComponent(projectId)}/datasets/${encodeURIComponent(datasetKey)}`, {
     method: 'DELETE',
   })
-  if (!res.ok) throw new Error(`Force delete failed (${res.status})`)
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null) as { detail?: string } | null
+    throw new Error(detail?.detail || `Force delete failed (${res.status})`)
+  }
 }

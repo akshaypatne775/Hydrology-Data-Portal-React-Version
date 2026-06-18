@@ -1,13 +1,16 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useProjects } from '../hooks/useProjects'
 import { logout } from '../services/authService'
 import type { Project } from '../services/projectService'
 import { getProjectFiles, getProjectJobs } from '../services/datasetService'
 import type { ProjectFile, ProjectJob } from '../services/datasetService'
+import { getPointCloudStatus } from '../services/pointCloudService'
 import { useWorkspaceContext } from '../context/WorkspaceContext'
 import { useModal } from '../context/ModalContext'
 import { toSameOriginBackendUrl } from '../lib/apiBase'
 import Viewer3DSidebar from './GlobeViewer/Viewer3DSidebar'
+import type { PotreeToolAction, PotreeViewerHandle } from './GlobeViewer/PotreeViewer'
+import type { WorkspaceTabId } from '../hooks/useWorkspaceState'
 import './Dashboard.css'
 
 const MapViewer = lazy(() =>
@@ -23,6 +26,25 @@ const AdminDashboard = lazy(() => import('./Admin/AdminDashboard'))
 const DROID_CLOUD_LOGO_URL =
   'https://www.droidminingsolutions.com/wp-content/uploads/2026/06/Droid-Cloud-Logo.png'
 const WORKSPACE_STATE_KEY = 'droid_workspace_state_v1'
+
+const POTREE_HEADER_TOOLS: Array<{ action: PotreeToolAction; label: string; icon: string }> = [
+  { action: 'reset-view', label: 'Reset View', icon: 'fa-solid fa-expand' },
+  { action: 'natural-color', label: 'Natural Color', icon: 'fa-solid fa-eye' },
+  { action: 'elevation-color', label: 'Elevation Color', icon: 'fa-solid fa-mountain' },
+  { action: 'intensity-color', label: 'Intensity', icon: 'fa-solid fa-sun' },
+  { action: 'distance', label: 'Distance', icon: 'fa-solid fa-ruler' },
+  { action: 'area', label: 'Area', icon: 'fa-solid fa-vector-square' },
+  { action: 'height', label: 'Height', icon: 'fa-solid fa-up-down' },
+  { action: 'cross-section', label: 'Cross Section', icon: 'fa-solid fa-vector-square' },
+  { action: 'lc-sections', label: 'L/C Sections', icon: 'fa-solid fa-route' },
+  { action: 'slice-line', label: 'Slice Line', icon: 'fa-solid fa-slash' },
+  { action: 'section-box', label: 'Section Box', icon: 'fa-solid fa-cube' },
+  { action: 'apply-slice', label: 'Apply Slice', icon: 'fa-solid fa-crop' },
+  { action: 'profile-csv', label: 'Profile CSV', icon: 'fa-solid fa-file-csv' },
+  { action: 'clipped-csv', label: 'Clipped CSV/LAS', icon: 'fa-solid fa-download' },
+  { action: 'clear-slice', label: 'Clear Slice', icon: 'fa-solid fa-broom' },
+  { action: 'clear', label: 'Clear', icon: 'fa-solid fa-eraser' },
+]
 
 const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: 'fa-solid fa-house' },
@@ -141,6 +163,16 @@ function normalize3DAssetToken(value: unknown): string {
   return normalized
 }
 
+function canonicalPointCloudAssetName(value: unknown): string {
+  const token = normalize3DAssetToken(value).split('/').pop() || ''
+  return token
+    .replace(/\.(copc\.laz|las|laz|json)$/i, '')
+    .replace(/^(ept|copc|pointcloud|point-cloud|pc)[_\-\s]+/i, '')
+    .replace(/[_\-\s]+(ept|copc|pointcloud|point-cloud|pc)$/i, '')
+    .replace(/[-_][a-f0-9]{8,}$/i, '')
+    .replace(/[^a-z0-9]+/g, '')
+}
+
 function canonical3DAssetKey(viewer: Project3DAsset['viewer'], values: unknown[]): string {
   const tokens = values.map(normalize3DAssetToken).filter(Boolean)
   for (const token of tokens) {
@@ -178,6 +210,7 @@ function isConvertedPointCloudAssetUrl(url: string): boolean {
   return (
     normalized.includes('/droid-ept-viewer/') ||
     normalized.endsWith('/ept.json') ||
+    normalized.endsWith('.copc.laz') ||
     (
       normalized.includes('/processed/') &&
       normalized.endsWith('/ept.json')
@@ -205,7 +238,7 @@ function isBetter3DAsset(candidate: Project3DAsset, current: Project3DAsset): bo
 }
 
 function specific3DAssetNameKey(asset: Project3DAsset): string {
-  const name = normalize3DAssetToken(asset.name)
+  const name = asset.viewer === 'potree' ? canonicalPointCloudAssetName(asset.name) : normalize3DAssetToken(asset.name)
   if (!name || name === 'point cloud' || name === '3d model') return ''
   return `${asset.viewer}:name:${name}`
 }
@@ -236,7 +269,8 @@ function project3DAssetsFromFiles(files: ProjectFile[]): Project3DAsset[] {
       signature.includes('pointcloud') ||
       signature.includes('point cloud') ||
       signature.includes('/droid-ept-viewer/') ||
-      signature.includes('/ept.json')
+      signature.includes('/ept.json') ||
+      signature.includes('.copc.laz')
     )
       ? 'potree'
       : (
@@ -275,7 +309,8 @@ function project3DAssetsFromJobs(jobs: ProjectJob[]): Project3DAsset[] {
       signature.includes('pointcloud') ||
       signature.includes('point cloud') ||
       signature.includes('/droid-ept-viewer/') ||
-      signature.includes('/ept.json')
+      signature.includes('/ept.json') ||
+      signature.includes('.copc.laz')
     )
       ? 'potree'
       : (
@@ -301,16 +336,6 @@ function project3DAssetsFromJobs(jobs: ProjectJob[]): Project3DAsset[] {
   return Array.from(assets.values())
 }
 
-function isPointCloudViewerLayer(layer: { layerType?: string; url?: string }): boolean {
-  const layerType = String(layer.layerType || '').toLowerCase().replace(/[\s_-]+/g, '')
-  const url = String(layer.url || '').toLowerCase()
-  return (
-    layerType.includes('pointcloud') ||
-    url.includes('/droid-ept-viewer/') ||
-    url.includes('/ept.json')
-  )
-}
-
 type DashboardProps = {
   user: { id: number; email: string; role?: string; can_access_catalog?: boolean; can_upload_data?: boolean; hidden_tabs?: string[] }
   onLogout: () => void
@@ -318,6 +343,7 @@ type DashboardProps = {
 
 export function Dashboard({ user, onLogout }: DashboardProps) {
   const modal = useModal()
+  const potreeViewerRef = useRef<PotreeViewerHandle | null>(null)
   const {
     activeId,
     setActiveId,
@@ -361,6 +387,14 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   }, [activeId, activeViewerTab, selectedProject?.id])
 
   const hiddenClientTabs = useMemo(() => new Set(isAdmin ? [] : user.hidden_tabs ?? []), [isAdmin, user.hidden_tabs])
+  const defaultProjectWorkspaceTab = useCallback((): WorkspaceTabId => {
+    if (!hiddenClientTabs.has('dashboard')) return 'dashboard'
+    if (canAccessDataCatalog && !hiddenClientTabs.has('datasets')) return 'datasets'
+    for (const fallback of ['map', 'globe', 'compare', 'downloads'] as WorkspaceTabId[]) {
+      if (!hiddenClientTabs.has(fallback)) return fallback
+    }
+    return 'projects'
+  }, [canAccessDataCatalog, hiddenClientTabs])
   const visibleNavItems = useMemo(
     () =>
       (selectedProject ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.id === 'projects' || item.id === 'admin'))
@@ -372,15 +406,6 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   const visibleDashboardModules = useMemo(
     () => DASHBOARD_MODULES.filter((module) => !hiddenClientTabs.has(module.id)),
     [hiddenClientTabs],
-  )
-  const activePointCloudLayer = useMemo(
-    () =>
-      activeLayers.find(
-        (layer) =>
-          layer.projectId === selectedProject?.id &&
-          isPointCloudViewerLayer(layer),
-      ),
-    [activeLayers, selectedProject?.id],
   )
   const active3DLayer = useMemo(
     () =>
@@ -455,9 +480,9 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
 
   useEffect(() => {
     if ((activeId === 'datasets' && !canAccessDataCatalog) || hiddenClientTabs.has(activeId)) {
-      setActiveId(selectedProject ? 'dashboard' : 'projects')
+      setActiveId(selectedProject ? defaultProjectWorkspaceTab() : 'projects')
     }
-  }, [activeId, canAccessDataCatalog, hiddenClientTabs, selectedProject, setActiveId])
+  }, [activeId, canAccessDataCatalog, defaultProjectWorkspaceTab, hiddenClientTabs, selectedProject, setActiveId])
 
   const handleShare = useCallback(async () => {
     const url = `${window.location.origin}${window.location.pathname}`
@@ -480,9 +505,9 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   const openProject = useCallback(
     (project: Project) => {
       setSelectedProject(project)
-      setActiveId('dashboard')
+      setActiveId(defaultProjectWorkspaceTab())
     },
-    [setActiveId, setSelectedProject],
+    [defaultProjectWorkspaceTab, setActiveId, setSelectedProject],
   )
 
   useEffect(() => {
@@ -511,12 +536,56 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
       getProjectFiles(selectedProject.id, true),
       getProjectJobs(selectedProject.id, true),
     ])
-      .then(([files, jobs]) => {
+      .then(async ([files, jobs]) => {
         if (cancelled) return
         const combined = new Map<string, Project3DAsset>()
         for (const asset of [...project3DAssetsFromFiles(files), ...project3DAssetsFromJobs(jobs)]) {
           set3DAssetOnce(combined, asset)
         }
+        const unresolvedPointClouds = files.filter((file) => {
+          const signature = [file.kind, file.type, file.layer_type, file.dataset_type, file.name]
+            .map((value) => String(value || '').toLowerCase())
+            .join(' ')
+          const rawUrl = String(file.layer_url || file.file_url || '').trim()
+          const hasViewerUrl = rawUrl && !isRawPointCloudAssetUrl(rawUrl)
+          return (
+            !hasViewerUrl &&
+            (
+              signature.includes('pointcloud') ||
+              signature.includes('point cloud') ||
+              String(file.name || '').toLowerCase().endsWith('.las') ||
+              String(file.name || '').toLowerCase().endsWith('.laz')
+            )
+          )
+        })
+        await Promise.all(unresolvedPointClouds.map(async (file) => {
+          if (cancelled) return
+          const lookupCandidates = Array.from(new Set([
+            String(file.dataset_id || '').trim(),
+            String(file.name || '').trim(),
+            String(file.rel_path || '').trim(),
+          ].filter(Boolean)))
+          for (const lookup of lookupCandidates) {
+            try {
+              const status = await getPointCloudStatus(selectedProject.id, lookup)
+              const rawUrl = String(status?.tileset_url || status?.copc_url || status?.ept_url || '').trim()
+              const url = toSameOriginBackendUrl(rawUrl) || rawUrl
+              if (status?.ready && url && !isRawPointCloudAssetUrl(url)) {
+                set3DAssetOnce(combined, {
+                  id: String(file.dataset_id || lookup),
+                  name: String(file.name || lookup || 'Point Cloud'),
+                  url,
+                  viewer: 'potree',
+                  dedupeKey: canonical3DAssetKey('potree', [file.dataset_id, file.rel_path, file.name, url]),
+                })
+                break
+              }
+            } catch {
+              // Missing/processing point clouds stay out of the 3D list until a viewer asset is ready.
+            }
+          }
+        }))
+        if (cancelled) return
         setProject3DAssets(Array.from(combined.values()))
       })
       .catch(() => {
@@ -750,7 +819,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
           }}
           onBack={() => {
             setActiveViewerTab('2D')
-            setActiveId('map')
+            setActiveId('datasets')
           }}
         />
       ) : (
@@ -972,6 +1041,21 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                 </div>
               </article>
 
+              {!isAdmin ? (
+                <section className="ds-user-guide" aria-label="How to use Droid Cloud">
+                  <div>
+                    <p className="ds-user-guide__kicker">How to use</p>
+                    <h3>Quick workspace guide</h3>
+                  </div>
+                  <div className="ds-user-guide__grid">
+                    <span><i className="fa-solid fa-database" aria-hidden /> Data Catalog: upload and open approved project files.</span>
+                    <span><i className="fa-solid fa-map" aria-hidden /> Viewer (2D): inspect ortho, DTM, profile, and map tools.</span>
+                    <span><i className="fa-solid fa-cloud" aria-hidden /> Viewer (3D): open Potree point clouds and 3D models.</span>
+                    <span><i className="fa-solid fa-clock" aria-hidden /> Processing files open after the status becomes Web-Ready.</span>
+                  </div>
+                </section>
+              ) : null}
+
               <div className="ds-overview-metrics">
                 {dashboardMetrics.map((metric) => (
                   <article
@@ -1022,31 +1106,74 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                   : 'ds-map-shell ds-map-shell--viewer'
               }
             >
-              <div className="ds-map-toolbar">
-                <h2 className="ds-map-toolbar__title">
-                  {routedViewerId === 'map'
-                    ? 'WORKSPACE - 2D VIEWER'
-                    : routedViewerId === 'globe'
-                      ? 'WORKSPACE - 3D VIEWER'
-                    : activeId === 'datasets'
-                      ? 'Data Catalog'
-                    : activeId === 'compare'
-                      ? 'Data Comparison'
-                      : 'Data Downloads'}
-                </h2>
-                <span className="ds-map-toolbar__badge">
-                  {routedViewerId === 'map'
-                    ? 'Leaflet - 2D GIS'
-                    : routedViewerId === 'globe'
-                      ? selectedPointCloudUrl
-                        ? 'Droid 3D Point Cloud'
-                        : '3D Model Viewer'
-                    : activeId === 'datasets'
-                      ? 'Data Catalog'
-                    : activeId === 'compare'
-                      ? 'Scenario Compare'
-                      : 'Export Center'}
-                </span>
+              <div className={routedViewerId === 'globe' ? 'ds-map-toolbar ds-map-toolbar--3d' : 'ds-map-toolbar'}>
+                <div className="ds-map-toolbar__main">
+                  <h2 className="ds-map-toolbar__title">
+                    {routedViewerId === 'map'
+                      ? 'WORKSPACE - 2D VIEWER'
+                      : routedViewerId === 'globe'
+                        ? 'WORKSPACE - 3D VIEWER'
+                      : activeId === 'datasets'
+                        ? 'Data Catalog'
+                      : activeId === 'compare'
+                        ? 'Data Comparison'
+                        : 'Data Downloads'}
+                  </h2>
+                  <span className="ds-map-toolbar__badge">
+                    {routedViewerId === 'map'
+                      ? 'Leaflet - 2D GIS'
+                      : routedViewerId === 'globe'
+                        ? selectedPointCloudUrl
+                          ? 'Droid 3D Point Cloud'
+                          : '3D Model Viewer'
+                      : activeId === 'datasets'
+                        ? 'Data Catalog'
+                      : activeId === 'compare'
+                        ? 'Scenario Compare'
+                        : 'Export Center'}
+                  </span>
+                </div>
+                {routedViewerId === 'globe' ? (
+                  <div className="ds-map-toolbar__3d-controls">
+                    <div className="ds-3d-viewer-tabs" role="tablist" aria-label="3D viewer type">
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={active3DCanvasTab === 'potree'}
+                        className={active3DCanvasTab === 'potree' ? 'ds-3d-viewer-tabs__tab ds-3d-viewer-tabs__tab--active' : 'ds-3d-viewer-tabs__tab'}
+                        onClick={() => select3DCanvasTab('potree')}
+                        disabled={projectPointClouds.length === 0}
+                      >
+                        Potree Viewer
+                      </button>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={active3DCanvasTab === 'cesium'}
+                        className={active3DCanvasTab === 'cesium' ? 'ds-3d-viewer-tabs__tab ds-3d-viewer-tabs__tab--active' : 'ds-3d-viewer-tabs__tab'}
+                        onClick={() => select3DCanvasTab('cesium')}
+                        disabled={project3DModels.length === 0}
+                      >
+                        3D Models
+                      </button>
+                    </div>
+                    {selectedPointCloudUrl ? (
+                      <div className="ds-potree-header-tools" aria-label="Point cloud tools">
+                        {POTREE_HEADER_TOOLS.map((tool) => (
+                          <button
+                            key={tool.action}
+                            type="button"
+                            className="ds-potree-header-tools__button"
+                            onClick={() => potreeViewerRef.current?.runTool(tool.action)}
+                          >
+                            <i className={tool.icon} aria-hidden />
+                            {tool.label}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
               {routedViewerId === 'map' ? (
                 <div
@@ -1090,6 +1217,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                     <>
                       {selectedPointCloudUrl ? (
                       <PointCloudViewer
+                        ref={potreeViewerRef}
                         key={selectedPointCloudUrl}
                         url={selectedPointCloudUrl}
                         name={selected3DAsset?.name}

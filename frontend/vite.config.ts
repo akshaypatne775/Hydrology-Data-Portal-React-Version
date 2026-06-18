@@ -28,14 +28,14 @@ export default defineConfig((env) => {
       host: '0.0.0.0',
       port: 5173,
       strictPort: true,
-      allowedHosts: ['portal.droidminingsolutions.com'],
+      allowedHosts: ['portal.droidminingsolutions.com', 'cloud.droidminingsolutions.com'],
       proxy: backendProxy,
     },
     preview: {
       host: '0.0.0.0',
       port: 4173,
       strictPort: true,
-      allowedHosts: ['portal.droidminingsolutions.com'],
+      allowedHosts: ['portal.droidminingsolutions.com', 'cloud.droidminingsolutions.com'],
       proxy: backendProxy,
     },
   }

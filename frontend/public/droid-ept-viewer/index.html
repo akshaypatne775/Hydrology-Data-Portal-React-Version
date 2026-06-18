@@ -81,7 +81,7 @@
       left: 14px;
       right: 14px;
       z-index: 100020;
-      display: flex;
+      display: none !important;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
@@ -809,6 +809,12 @@
       activeSectionBox.rotation.set(0, 0, Number.isFinite(yaw) ? yaw : 0);
       activeSectionBox.scale.set(length, depth, height);
       activeSectionBox.clip = true;
+      activeSectionBox.userData = {
+        ...(activeSectionBox.userData || {}),
+        section_box_volume_m3: Math.abs(length * depth * height),
+        dimensions: [length, depth, height],
+        source: "slice-line",
+      };
       if (typeof profile.setWidth === "function") profile.setWidth(depth);
       profile.userData = { ...(profile.userData || {}), sectionType: "slice", sliceBox: true };
       return activeSectionBox;
@@ -842,28 +848,66 @@
 
     function startSectionBox() {
       sliceDialog.classList.remove("is-visible");
-      if (!viewer.volumeTool) {
-        showNotice("Tool Loading", "Section box tool is still loading. Try again in a moment.");
+      if (!activePointCloud) {
+        showNotice("Point Cloud Loading", "Wait until the point cloud is visible before creating a section box.");
         return;
       }
-      const volume = viewer.volumeTool.startInsertion({
-        type: Potree.BoxVolume,
-        name: "Manual Section Box",
-        clip: true,
-      });
-      activeSectionBox = volume;
       if (activeSectionBox) {
-        activeSectionBox.clip = true;
+        viewer.scene.removeVolume(activeSectionBox);
+        activeSectionBox = null;
+      }
+      const bounds = getActivePointCloudBounds();
+      const center = bounds.getCenter(new THREE.Vector3());
+      const size = bounds.getSize(new THREE.Vector3());
+      const safeX = Math.max(1, size.x * 0.25);
+      const safeY = Math.max(1, size.y * 0.25);
+      const safeZ = Math.max(1, size.z * 1.05);
+      activeSectionBox = new Potree.BoxVolume();
+      if (activeSectionBox) {
+        activeSectionBox.name = "Manual Section Box";
+        activeSectionBox.position.copy(center);
+        activeSectionBox.rotation.set(0, 0, 0);
+        activeSectionBox.scale.set(safeX, safeY, safeZ);
+        activeSectionBox.clip = false;
         activeSectionBox.showVolumeLabel = false;
-        applyViewerSliceClipping();
-        showNotice("Section Box Active", "Place the box, then drag, rotate, or scale it. Apply Slice keeps only points inside it.");
+        activeSectionBox.userData = {
+          ...(activeSectionBox.userData || {}),
+          section_box_volume_m3: Math.abs(safeX * safeY * safeZ),
+          dimensions: [safeX, safeY, safeZ],
+          source: "manual-box",
+        };
+        viewer.scene.addVolume(activeSectionBox);
+        if (viewer.inputHandler) {
+          if (typeof viewer.inputHandler.deselectAll === "function") viewer.inputHandler.deselectAll();
+          if (typeof viewer.inputHandler.toggleSelection === "function") viewer.inputHandler.toggleSelection(activeSectionBox);
+        }
+        const noClipTask = Potree.ClipTask && (Potree.ClipTask.NONE !== undefined ? Potree.ClipTask.NONE : Potree.ClipTask.HIGHLIGHT);
+        if (noClipTask !== undefined && viewer.setClipTask) viewer.setClipTask(noClipTask);
+        if (activePointCloud && activePointCloud.material) {
+          if (noClipTask !== undefined) activePointCloud.material.clipTask = noClipTask;
+          if (typeof activePointCloud.material.setClipBoxes === "function") activePointCloud.material.setClipBoxes([]);
+        }
+        setSliceButtonState(false);
+        showNotice("Section Box Active", "A section box was placed on the point cloud. Move, rotate, or scale it, then click Apply Slice.");
       }
     }
 
     function applySlice() {
       if (!activeSectionBox && activeSliceProfile) syncSectionBoxFromProfile(activeSliceProfile);
       if (applyViewerSliceClipping()) {
-        showNotice("Slice Applied", "Only points inside the active section box are visible. Use Clear Slice to restore the full point cloud.");
+        const dimensions = activeSectionBox && activeSectionBox.scale
+          ? [Math.abs(activeSectionBox.scale.x), Math.abs(activeSectionBox.scale.y), Math.abs(activeSectionBox.scale.z)]
+          : [0, 0, 0];
+        const sectionVolume = dimensions[0] * dimensions[1] * dimensions[2];
+        activeSectionBox.userData = {
+          ...(activeSectionBox.userData || {}),
+          section_box_volume_m3: sectionVolume,
+          dimensions,
+        };
+        const volumeText = Number.isFinite(sectionVolume) && sectionVolume > 0
+          ? ` Section box volume: ${formatNumber(sectionVolume.toFixed(2))} m3.`
+          : "";
+        showNotice("Slice Applied", `Only points inside the active section box are visible.${volumeText} Use Clear Slice to restore the full point cloud.`);
       }
     }
 
@@ -943,6 +987,7 @@
           center: [activeSectionBox.position.x, activeSectionBox.position.y, activeSectionBox.position.z],
           rotation: [activeSectionBox.rotation.x, activeSectionBox.rotation.y, activeSectionBox.rotation.z],
           dimensions: [activeSectionBox.scale.x, activeSectionBox.scale.y, activeSectionBox.scale.z],
+          section_box_volume_m3: Math.abs(activeSectionBox.scale.x * activeSectionBox.scale.y * activeSectionBox.scale.z),
         },
         source_asset: pointCloudUrl,
         viewer_type: pointCloudFormat.toLowerCase(),
@@ -957,8 +1002,8 @@
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.detail || `Export failed (${response.status})`);
         showNotice("Clipped Export Started", data.download_url
-          ? "CSV export is running in the backend. Download link will be available from processing jobs when complete."
-          : "CSV export is running in the backend.");
+          ? "CSV and LAS export are running in the backend. Download links will be available from processing jobs when complete."
+          : "CSV and LAS export are running in the backend.");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         showNotice("Clipped Export Failed", message);
@@ -1085,6 +1130,8 @@
     window.droidApplyNaturalColor = applyNaturalColorMode;
     window.droidApplyElevationColor = applyElevationColorMode;
     window.droidApplyIntensityColor = applyIntensityColorMode;
+    window.droidResetView = () => viewer.fitToScreen(0.5);
+    window.droidStartMeasurement = startMeasurement;
     document.getElementById("distanceButton").addEventListener("click", () => startMeasurement("distance"));
     document.getElementById("areaButton").addEventListener("click", () => startMeasurement("area"));
     document.getElementById("heightButton").addEventListener("click", () => startMeasurement("height"));
@@ -1140,7 +1187,7 @@
         activePointCloud = event.pointcloud;
         viewer.scene.addPointCloud(activePointCloud);
         applyPointMaterial(activePointCloud, pointCloudMetadata);
-        setButtonActive(naturalAttributeName === "intensity" ? "intensityColorButton" : "naturalColorButton");
+        applyElevationColorMode();
         viewer.fitToScreen(0.5);
         datasetName.textContent = displayName;
         hideNotice();

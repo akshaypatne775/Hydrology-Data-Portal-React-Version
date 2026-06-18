@@ -729,6 +729,60 @@
   border: 1px solid rgba(148, 163, 184, 0.26);
 }
 
+.ds-user-guide {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.35fr) 1fr;
+  gap: 1rem;
+  align-items: center;
+  padding: 1rem;
+  border: 1px solid rgba(14, 62, 73, 0.14);
+  border-radius: 12px;
+  background:
+    linear-gradient(135deg, rgba(14, 62, 73, 0.08), rgba(20, 184, 166, 0.08)),
+    #ffffff;
+  box-shadow: 0 12px 32px rgba(14, 62, 73, 0.08);
+}
+
+.ds-user-guide__kicker {
+  margin: 0 0 0.2rem;
+  color: #64748b;
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.ds-user-guide h3 {
+  margin: 0;
+  color: #0e3e49;
+  font-size: 1rem;
+  font-weight: 900;
+}
+
+.ds-user-guide__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.ds-user-guide__grid span {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  color: #334155;
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.ds-user-guide__grid i,
+.ds-user-guide__grid i::before,
+.ds-user-guide__grid i::after {
+  color: #0e3e49;
+  font-family: "Font Awesome 6 Free" !important;
+  font-weight: 900 !important;
+}
+
 .ds-overview-metrics {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
@@ -1135,6 +1189,30 @@
   border-bottom: 1px solid #e2e8f0;
 }
 
+.ds-map-toolbar__main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.ds-map-toolbar--3d {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.62rem;
+  padding: 0.72rem 1rem 0.78rem;
+}
+
+.ds-map-toolbar__3d-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+  width: 100%;
+}
+
 .ds-map-toolbar__title {
   margin: 0;
   font-size: 0.72rem;
@@ -1374,34 +1452,33 @@
   position: relative;
 }
 
+.ds-map-body--globe > .ds-3d-viewer-tabs {
+  display: none;
+}
+
 .ds-3d-viewer-tabs {
-  position: absolute;
-  top: 0.85rem;
-  left: 50%;
-  z-index: 920;
+  flex: 0 0 auto;
   display: inline-flex;
   gap: 0.35rem;
-  transform: translateX(-50%);
-  padding: 0.32rem;
-  border: 1px solid rgba(255, 255, 255, 0.24);
-  border-radius: 10px;
-  background: rgba(3, 16, 20, 0.76);
-  box-shadow: 0 14px 32px rgba(2, 6, 23, 0.26);
-  backdrop-filter: blur(12px);
+  padding: 0.24rem;
+  border: 1px solid rgba(14, 62, 73, 0.22);
+  border-radius: 8px;
+  background: rgba(14, 62, 73, 0.07);
   font-family: 'Montserrat', sans-serif;
 }
 
 .ds-3d-viewer-tabs__tab {
-  min-width: 8.5rem;
-  min-height: 2.15rem;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.92);
+  min-width: 7.9rem;
+  min-height: 2rem;
+  border: 1px solid rgba(14, 62, 73, 0.18);
+  border-radius: 6px;
+  background: #ffffff;
   color: #0e3e49;
   font-family: 'Montserrat', sans-serif;
-  font-size: 0.76rem;
+  font-size: 0.72rem;
   font-weight: 900;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .ds-3d-viewer-tabs__tab--active {
@@ -1415,16 +1492,78 @@
   cursor: not-allowed;
 }
 
+.ds-potree-header-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.38rem;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.12rem 0.05rem 0.22rem;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(14, 62, 73, 0.45) transparent;
+}
+
+.ds-potree-header-tools__button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  gap: 0.35rem;
+  min-height: 2rem;
+  padding: 0.42rem 0.62rem;
+  border: 1px solid rgba(14, 62, 73, 0.24);
+  border-radius: 7px;
+  background: rgba(14, 62, 73, 0.12);
+  color: #0e3e49;
+  font-family: 'Montserrat', sans-serif;
+  font-size: 0.68rem;
+  font-weight: 900;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+
+.ds-potree-header-tools__button:hover,
+.ds-potree-header-tools__button:focus-visible {
+  border-color: #0e3e49;
+  background: #0e3e49;
+  color: #ffffff;
+  transform: translateY(-1px);
+}
+
+.ds-potree-header-tools__button i,
+.ds-potree-header-tools__button i::before,
+.ds-potree-header-tools__button i::after {
+  font-family: "Font Awesome 6 Free" !important;
+  font-weight: 900 !important;
+}
+
 @media (max-width: 900px) {
+  .ds-user-guide {
+    grid-template-columns: 1fr;
+  }
+
+  .ds-user-guide__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ds-map-toolbar__3d-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
   .ds-3d-viewer-tabs {
-    left: 0.75rem;
-    right: 0.75rem;
-    transform: none;
+    width: 100%;
   }
 
   .ds-3d-viewer-tabs__tab {
     min-width: 0;
     flex: 1;
+  }
+
+  .ds-potree-header-tools {
+    width: 100%;
   }
 }
 

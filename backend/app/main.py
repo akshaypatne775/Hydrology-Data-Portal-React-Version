@@ -3041,6 +3041,7 @@ def _run_pointcloud_slice_export(project_id: str, dataset_id: str, job_id: str, 
     safe_dataset_id = _safe_ept_folder_name(dataset_id)
     export_dir = _pointcloud_slice_exports_root(safe_project_id, safe_dataset_id) / job_id
     out_csv = export_dir / "clipped_points.csv"
+    out_las = export_dir / "clipped_points.las"
     export_dir.mkdir(parents=True, exist_ok=True)
     started_at = _now_iso()
     try:
@@ -3058,7 +3059,13 @@ def _run_pointcloud_slice_export(project_id: str, dataset_id: str, job_id: str, 
         source = _resolve_pointcloud_slice_source(safe_project_id, safe_dataset_id)
 
         total_written = 0
-        with laspy.open(str(source)) as reader, out_csv.open("w", newline="", encoding="utf-8") as handle:
+        clipped_min: np.ndarray | None = None
+        clipped_max: np.ndarray | None = None
+        hull_sample_chunks: list[np.ndarray] = []
+        hull_sample_limit = 50000
+        hull_sample_count = 0
+        section_box_volume_m3 = float(np.prod(dimensions))
+        with laspy.open(str(source)) as reader, out_csv.open("w", newline="", encoding="utf-8") as handle, laspy.open(str(out_las), mode="w", header=reader.header) as las_writer:
             writer = csv.writer(handle)
             writer.writerow(["x", "y", "z", "elevation", "intensity", "classification", "r", "g", "b"])
             for points in reader.chunk_iterator(400_000):
@@ -3071,10 +3078,27 @@ def _run_pointcloud_slice_export(project_id: str, dataset_id: str, job_id: str, 
                 )
                 if not np.any(mask):
                     continue
+                clipped_points = points[mask]
+                las_writer.write_points(clipped_points)
                 dimension_names = set(points.point_format.dimension_names)
                 xs = coords[:, 0][mask]
                 ys = coords[:, 1][mask]
                 zs = coords[:, 2][mask]
+                selected_coords = np.column_stack((xs, ys, zs))
+                chunk_min = selected_coords.min(axis=0)
+                chunk_max = selected_coords.max(axis=0)
+                clipped_min = chunk_min if clipped_min is None else np.minimum(clipped_min, chunk_min)
+                clipped_max = chunk_max if clipped_max is None else np.maximum(clipped_max, chunk_max)
+                if hull_sample_count < hull_sample_limit:
+                    remaining = hull_sample_limit - hull_sample_count
+                    if len(selected_coords) > remaining:
+                        stride = max(1, int(np.ceil(len(selected_coords) / remaining)))
+                        sample = selected_coords[::stride][:remaining]
+                    else:
+                        sample = selected_coords
+                    if len(sample):
+                        hull_sample_chunks.append(sample.astype(float, copy=False))
+                        hull_sample_count += int(len(sample))
                 intensities = _point_record_value(points, dimension_names, "intensity", mask)
                 classes = _point_record_value(points, dimension_names, "classification", mask)
                 reds = _point_record_value(points, dimension_names, "red", mask)
@@ -3084,18 +3108,46 @@ def _run_pointcloud_slice_export(project_id: str, dataset_id: str, job_id: str, 
                     writer.writerow(row)
                 total_written += int(mask.sum())
 
+        clipped_bbox_volume_m3 = 0.0
+        clipped_hull_volume_m3 = 0.0
+        clipped_hull_method = "not_computed"
+        clipped_bounds: list[float] = []
+        if clipped_min is not None and clipped_max is not None:
+            clipped_span = np.maximum(clipped_max - clipped_min, 0.0)
+            clipped_bbox_volume_m3 = float(np.prod(clipped_span))
+            clipped_bounds = [float(value) for value in [*clipped_min.tolist(), *clipped_max.tolist()]]
+        if hull_sample_chunks and hull_sample_count >= 4:
+            try:
+                from scipy.spatial import ConvexHull  # type: ignore
+
+                hull_points = np.vstack(hull_sample_chunks)
+                if hull_points.shape[0] >= 4:
+                    clipped_hull_volume_m3 = float(ConvexHull(hull_points).volume)
+                    clipped_hull_method = "sampled_convex_hull"
+            except Exception:
+                clipped_hull_volume_m3 = clipped_bbox_volume_m3
+                clipped_hull_method = "axis_aligned_bbox_fallback"
+
         metadata = {
             "job_id": job_id,
             "project_id": safe_project_id,
             "dataset_id": safe_dataset_id,
             "source": str(source),
             "rows": total_written,
+            "csv": str(out_csv),
+            "las": str(out_las),
+            "section_box_volume_m3": section_box_volume_m3,
+            "clipped_bbox_volume_m3": clipped_bbox_volume_m3,
+            "clipped_hull_volume_m3": clipped_hull_volume_m3,
+            "clipped_hull_method": clipped_hull_method,
+            "clipped_bounds": clipped_bounds,
             "started_at": started_at,
             "completed_at": _now_iso(),
             "box": box_payload,
         }
         (export_dir / "slice_export.json").write_text(json.dumps(metadata, ensure_ascii=True, indent=2), encoding="utf-8")
         download_url = f"/api/data/projects/{safe_project_id}/exports/pointcloud_slices/{quote(safe_dataset_id, safe='')}/{job_id}/clipped_points.csv"
+        download_url_las = f"/api/data/projects/{safe_project_id}/exports/pointcloud_slices/{quote(safe_dataset_id, safe='')}/{job_id}/clipped_points.las"
         _upsert_processing_job(
             safe_project_id,
             {
@@ -3103,9 +3155,14 @@ def _run_pointcloud_slice_export(project_id: str, dataset_id: str, job_id: str, 
                 "kind": "pointcloud_slice_export",
                 "file_name": str(payload.get("name") or "Slice Export"),
                 "status": "Completed",
-                "stage": f"Exported {total_written} clipped points",
+                "stage": f"Exported {total_written} clipped points | Box volume {section_box_volume_m3:.2f} m3",
                 "progress_percent": "100",
                 "download_url": download_url,
+                "download_url_las": download_url_las,
+                "section_box_volume_m3": f"{section_box_volume_m3:.3f}",
+                "clipped_bbox_volume_m3": f"{clipped_bbox_volume_m3:.3f}",
+                "clipped_hull_volume_m3": f"{clipped_hull_volume_m3:.3f}",
+                "clipped_hull_method": clipped_hull_method,
                 "updated_at": _now_iso(),
             },
         )
@@ -3505,7 +3562,7 @@ def _write_portal_error_log(area: str, message: str, **extra: object) -> None:
         pass
 
 
-HIDEABLE_USER_TABS = {"datasets", "map", "globe", "compare", "downloads"}
+HIDEABLE_USER_TABS = {"dashboard", "datasets", "map", "globe", "compare", "downloads"}
 
 
 def _normalize_hidden_tabs(value: object) -> list[str]:
@@ -3876,9 +3933,28 @@ def pointcloud_status(
         if folder not in bucket:
             bucket.append(folder)
 
+    def pointcloud_lookup_keys(value: object) -> set[str]:
+        text = str(value or "").strip()
+        if not text:
+            return set()
+        try:
+            text = unquote(text)
+        except Exception:
+            pass
+        text = text.replace("\\", "/").split("/")[-1]
+        stem = Path(text).stem.lower()
+        raw = text.lower()
+        canonical = stem
+        canonical = canonical.replace(safe_id.lower(), "")
+        canonical = re.sub(r"^(ept|copc|pointcloud|point-cloud|pc)[_\-\s]+", "", canonical, flags=re.IGNORECASE)
+        canonical = re.sub(r"[_\-\s]+(ept|copc|pointcloud|point-cloud|pc)$", "", canonical, flags=re.IGNORECASE)
+        canonical = re.sub(r"[-_][a-f0-9]{8,}$", "", canonical, flags=re.IGNORECASE)
+        canonical = re.sub(r"[^a-z0-9]+", "", canonical)
+        return {key for key in {raw, stem, canonical} if key}
+
     def job_match_candidates(lookup: str) -> list[str]:
-        normalized_lookup = lookup.strip().lower()
-        if not normalized_lookup:
+        lookup_keys = pointcloud_lookup_keys(lookup)
+        if not lookup_keys:
             return []
         matches: list[str] = []
         for job in _read_processing_jobs().get(safe_id, []):
@@ -3886,7 +3962,8 @@ def pointcloud_status(
             file_name = str(job.get("file_name") or "").strip()
             if not job_id:
                 continue
-            if normalized_lookup in {job_id.lower(), file_name.lower(), Path(file_name).stem.lower()}:
+            job_keys = pointcloud_lookup_keys(job_id) | pointcloud_lookup_keys(file_name)
+            if lookup_keys.intersection(job_keys):
                 matches.append(job_id)
         return matches
 
@@ -3903,13 +3980,17 @@ def pointcloud_status(
             add_candidate(_legacy_ept_dataset_dir(safe_id, safe_job_id), candidates)
         lookup = tileset_id.strip().lower()
         lookup_stem = Path(lookup).stem
+        lookup_keys = pointcloud_lookup_keys(tileset_id)
         for root in ept_search_roots():
             if root.is_dir():
                 for child in sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True):
                     if child.name in {"ortho", "dtm", "dsm", "pointclouds"}:
                         continue
                     source_name = source_name_for(child).lower()
-                    if source_name and lookup in {source_name, Path(source_name).stem}:
+                    child_keys = pointcloud_lookup_keys(child.name) | pointcloud_lookup_keys(source_name)
+                    if lookup_keys.intersection(child_keys):
+                        add_candidate(child, candidates)
+                    elif source_name and lookup in {source_name, Path(source_name).stem}:
                         add_candidate(child, candidates)
                     elif lookup_stem and child.name.lower().startswith(f"{lookup_stem}-"):
                         add_candidate(child, candidates)
@@ -4022,7 +4103,8 @@ def start_pointcloud_slice_export(
         raise HTTPException(status_code=400, detail="Invalid section box center")
 
     job_id = f"slice-{int(time.time())}-{secrets.token_hex(4)}"
-    export_rel = f"exports/pointcloud_slices/{quote(safe_dataset_id, safe='')}/{job_id}/clipped_points.csv"
+    export_base_rel = f"exports/pointcloud_slices/{quote(safe_dataset_id, safe='')}/{job_id}"
+    export_rel = f"{export_base_rel}/clipped_points.csv"
     _upsert_processing_job(
         safe_project_id,
         {
@@ -4033,6 +4115,7 @@ def start_pointcloud_slice_export(
             "stage": "Clipping point cloud inside section box",
             "progress_percent": "5",
             "download_url": f"/api/data/projects/{safe_project_id}/{export_rel}",
+            "download_url_las": f"/api/data/projects/{safe_project_id}/{export_base_rel}/clipped_points.las",
             "updated_at": _now_iso(),
         },
     )
@@ -4048,6 +4131,7 @@ def start_pointcloud_slice_export(
         "status": "processing",
         "job_id": job_id,
         "download_url": f"/api/data/projects/{safe_project_id}/{export_rel}",
+        "download_url_las": f"/api/data/projects/{safe_project_id}/{export_base_rel}/clipped_points.las",
     }
 
 
@@ -7397,22 +7481,28 @@ def admin_update_dataset_metadata(
 
 
 def _admin_dataset_status_by_key(project_id: str, dataset_key: str) -> tuple[str, dict[str, str]]:
-    clean_key = os.path.basename(dataset_key.replace("\\", "/").strip().strip("/"))
+    raw_key = dataset_key.replace("\\", "/").strip().strip("/")
+    clean_key = os.path.basename(raw_key)
     if not clean_key or clean_key in {".", ".."}:
         raise HTTPException(status_code=400, detail="Invalid dataset_name")
     decoded = clean_key
+    normalized_decoded = _safe_export_stem(decoded).lower()
     for st in _project_dataset_statuses(project_id):
         dataset_id = str(st.get("dataset_id") or "")
         dataset_name = str(st.get("dataset_name") or "")
         tile_folder = str(st.get("tile_folder") or "")
+        raw_rel = str(st.get("raw_rel_path") or "")
         candidates = {
             dataset_id,
             dataset_name,
             Path(dataset_name).stem,
             tile_folder,
             Path(tile_folder).name,
+            Path(raw_rel).name,
+            Path(raw_rel).stem,
         }
-        if decoded in candidates:
+        normalized_candidates = {_safe_export_stem(candidate).lower() for candidate in candidates if candidate}
+        if decoded in candidates or normalized_decoded in normalized_candidates:
             return dataset_id, st
     raise HTTPException(status_code=404, detail="Dataset not found")
 
@@ -7543,10 +7633,24 @@ def admin_delete_dataset_by_name(
 
     local_root = Path(LOCAL_DATA_PATH).resolve()
     removed = 0
-    for candidate in (
-        Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "processed" / safe_dataset_name,
+    processed_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "processed"
+    raw_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "raw"
+    candidate_paths = [
+        processed_root / safe_dataset_name,
+        processed_root / "pointclouds" / safe_dataset_name,
+        processed_root / "3dmodel" / safe_dataset_name,
+        raw_root / safe_dataset_name,
+        raw_root / f"{safe_project_id}__{safe_dataset_name}",
         Path(LOCAL_DATA_PATH) / "pointclouds" / safe_project_id / safe_dataset_name,
-    ):
+    ]
+    normalized_target = _safe_export_stem(safe_dataset_name).lower()
+    for root in (processed_root, processed_root / "pointclouds", processed_root / "3dmodel", raw_root):
+        if not root.is_dir():
+            continue
+        for child in root.iterdir():
+            if _safe_export_stem(child.name).lower() == normalized_target:
+                candidate_paths.append(child)
+    for candidate in candidate_paths:
         resolved = candidate.resolve()
         if resolved.exists() and local_root in resolved.parents:
             removed += _safe_remove_dataset_path(resolved)
@@ -8091,18 +8195,49 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
     }
     files: list[dict[str, str]] = []
     listed_rel_paths: set[str] = set()
+    listed_pointcloud_keys: set[str] = set()
 
     raw_dir_proj, processed_root = get_project_dirs(safe_project_id)
     ready_pointcloud_names: set[str] = set()
+
+    def canonical_pointcloud_key(value: object) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            text = unquote(text)
+        except Exception:
+            pass
+        text = Path(text.replace("\\", "/")).name
+        stem = Path(text).stem.lower()
+        stem = stem.replace(safe_project_id.lower(), "")
+        stem = re.sub(r"^(ept|copc|pointcloud|point-cloud|pc)[_\-\s]+", "", stem, flags=re.IGNORECASE)
+        stem = re.sub(r"[_\-\s]+(ept|copc|pointcloud|point-cloud|pc)$", "", stem, flags=re.IGNORECASE)
+        stem = re.sub(r"[-_][a-f0-9]{8,}$", "", stem, flags=re.IGNORECASE)
+        stem = re.sub(r"[^a-z0-9]+", "", stem)
+        return stem
+
+    def pointcloud_keys(*values: object) -> set[str]:
+        keys: set[str] = set()
+        for value in values:
+            key = canonical_pointcloud_key(value)
+            if key:
+                keys.add(key)
+            stem = Path(str(value or "")).stem.lower()
+            if stem:
+                keys.add(stem)
+        return keys
 
     def add_ready_pointcloud_name_keys(name: str) -> None:
         stem = Path(str(name or "").strip()).stem.lower()
         if not stem:
             return
         ready_pointcloud_names.add(stem)
+        ready_pointcloud_names.update(pointcloud_keys(name))
         base_without_hash = re.sub(r"-[a-f0-9]{8,}$", "", stem, flags=re.IGNORECASE)
         if base_without_hash:
             ready_pointcloud_names.add(base_without_hash)
+            ready_pointcloud_names.update(pointcloud_keys(base_without_hash))
 
     ready_ept_paths = [
         *_project_pointcloud_root(safe_project_id).glob("*/ept.json"),
@@ -8183,10 +8318,11 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
             dataset_type = str(meta.get("dataset_type") or _infer_dataset_type(display_name))
             is_report = dataset_type == "reports" or file_path.suffix.lower() == ".pdf"
             is_pointcloud_raw = dataset_type == "pointcloud" or file_path.suffix.lower() in {".las", ".laz"}
-            if is_pointcloud_raw and Path(display_name).stem.lower() in ready_pointcloud_names:
+            dataset_id_for_file = str(meta.get("dataset_id") or "")
+            raw_pc_keys = pointcloud_keys(display_name, file_path.name, dataset_id_for_file, rel_path)
+            if is_pointcloud_raw and raw_pc_keys.intersection(ready_pointcloud_names):
                 listed_rel_paths.add(rel_path)
                 continue
-            dataset_id_for_file = str(meta.get("dataset_id") or "")
             if is_report and dataset_id_for_file:
                 file_url = f"{base_url}/api/projects/{safe_project_id}/reports/{dataset_id_for_file}/view"
                 download_url = f"{base_url}/api/projects/{safe_project_id}/reports/{dataset_id_for_file}/download"
@@ -8200,7 +8336,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                 file_url = f"{base_url}/data/{rel_path}"
                 download_url = file_url
             row_status = str(meta.get("status") or jobs_by_file.get(display_name, {}).get("status", "Raw"))
-            if is_pointcloud_raw and Path(display_name).stem.lower() not in ready_pointcloud_names:
+            if is_pointcloud_raw and not raw_pc_keys.intersection(ready_pointcloud_names):
                 row_status = "Uploaded"
             files.append(
                 {
@@ -8473,6 +8609,11 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                 except OSError:
                     source_name = ""
             display_name = source_name or f"{copc_file.parent.name}.laz"
+            pc_row_keys = pointcloud_keys(display_name, copc_file.parent.name)
+            if pc_row_keys.intersection(listed_pointcloud_keys):
+                listed_rel_paths.add(rel)
+                listed_rel_paths.add(rel_base)
+                continue
             viewer_url = _copc_viewer_url(base_url, safe_project_id, copc_file.parent.name, display_name)
             files.append(
                 {
@@ -8496,6 +8637,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
             )
             listed_rel_paths.add(rel)
             listed_rel_paths.add(rel_base)
+            listed_pointcloud_keys.update(pc_row_keys)
 
         ept_json_paths = [
             *_project_pointcloud_root(safe_project_id).glob("*/ept.json"),
@@ -8528,6 +8670,11 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                 except OSError:
                     source_name = ""
             display_name = source_name or f"{ept_json.parent.name}.las"
+            pc_row_keys = pointcloud_keys(display_name, ept_json.parent.name)
+            if pc_row_keys.intersection(listed_pointcloud_keys):
+                listed_rel_paths.add(rel)
+                listed_rel_paths.add(rel_base)
+                continue
             viewer_url = _ept_viewer_url(base_url, safe_project_id, ept_json.parent.name, display_name)
             files.append(
                 {
@@ -8551,6 +8698,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
             )
             listed_rel_paths.add(rel)
             listed_rel_paths.add(rel_base)
+            listed_pointcloud_keys.update(pc_row_keys)
 
         for model_root in _candidate_processed_model_dirs(processed_root):
             tileset_path = _find_tileset_json(model_root)
@@ -8707,6 +8855,49 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "rel_path": rel,
                     "dataset_id": str(metadata.get("dataset_id") or export_file.parent.name),
                     "dataset_type": "grid_export",
+                    "month": "",
+                    "raw_rel_path": "",
+                },
+            )
+            listed_rel_paths.add(rel)
+
+    slice_export_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "exports" / "pointcloud_slices"
+    if slice_export_root.is_dir():
+        project_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id
+        for export_file in sorted(slice_export_root.rglob("*"), key=lambda p: p.stat().st_mtime if p.is_file() else 0, reverse=True):
+            if not export_file.is_file() or export_file.suffix.lower() not in {".csv", ".las"}:
+                continue
+            rel = export_file.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            if rel in listed_rel_paths:
+                continue
+            metadata: dict[str, str] = {}
+            metadata_path = export_file.parent / "slice_export.json"
+            if metadata_path.is_file():
+                try:
+                    loaded = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        metadata = {str(k): str(v) for k, v in loaded.items()}
+                except (OSError, json.JSONDecodeError, TypeError):
+                    metadata = {}
+            project_rel = export_file.relative_to(project_root).as_posix()
+            file_url = f"{base_url}/api/data/projects/{safe_project_id}/{project_rel}"
+            dataset_id = str(metadata.get("dataset_id") or export_file.parent.parent.name)
+            label = "Clipped Points LAS" if export_file.suffix.lower() == ".las" else "Clipped Points CSV"
+            files.append(
+                {
+                    "name": f"{str(metadata.get('job_id') or export_file.parent.name)} - {label}",
+                    "kind": "Generated Grid Export",
+                    "type": export_file.suffix.lower().lstrip("."),
+                    "size_bytes": str(export_file.stat().st_size),
+                    "status": "Web-Ready",
+                    "updated_at": datetime.fromtimestamp(export_file.stat().st_mtime, timezone.utc).isoformat(),
+                    "file_url": file_url,
+                    "download_url": file_url,
+                    "layer_url": "",
+                    "file_path": str(export_file.resolve()),
+                    "rel_path": rel,
+                    "dataset_id": dataset_id,
+                    "dataset_type": "pointcloud_slice_export",
                     "month": "",
                     "raw_rel_path": "",
                 },

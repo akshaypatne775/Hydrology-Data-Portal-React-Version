@@ -363,9 +363,34 @@ function isPointCloudRow(row: Pick<DatasetRow, 'layerType' | 'type' | 'fileName'
   return isPointCloudLayer(row.layerType) || row.type === 'Point Cloud' || /\.(las|laz)$/i.test(row.fileName)
 }
 
-function datasetMergeKey(row: Pick<DatasetRow, 'datasetId' | 'fileName' | 'layerType' | 'type'>): string {
-  if (isPointCloudRow(row)) return `pointcloud:${row.fileName.toLowerCase()}`
-  return row.datasetId || row.fileName
+function datasetMergeKey(
+  row: Pick<DatasetRow, 'datasetId' | 'fileName' | 'layerType' | 'type' | 'layerUrl' | 'relPath' | 'cogRelPath' | 'filePath'>,
+): string {
+  const stableId = row.datasetId || row.relPath || row.cogRelPath || row.layerUrl || row.filePath || row.fileName
+  if (isPointCloudRow(row)) {
+    const canonicalName = normalizedPointCloudName(row.fileName || String(stableId))
+    return `pointcloud:${canonicalName || String(stableId).toLowerCase()}`
+  }
+  return String(stableId)
+}
+
+function isSameDatasetRow(left: DatasetRow, right: DatasetRow): boolean {
+  const leftKeys = new Set([
+    left.id,
+    left.datasetId,
+    left.relPath,
+    left.cogRelPath,
+    left.layerUrl,
+    left.filePath,
+  ].filter(Boolean))
+  return [
+    right.id,
+    right.datasetId,
+    right.relPath,
+    right.cogRelPath,
+    right.layerUrl,
+    right.filePath,
+  ].some((key) => Boolean(key) && leftKeys.has(key))
 }
 
 function isRawPointCloudUrl(url: string): boolean {
@@ -413,7 +438,17 @@ function normalizePointCloudViewerUrl(url: string | undefined, projectId: string
 }
 
 function normalizedPointCloudName(name: string): string {
-  return name.trim().toLowerCase().replace(/\.(las|laz)$/i, '')
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop()!
+    .replace(/\.(copc\.laz|las|laz|json)$/i, '')
+    .replace(/^(ept|copc|pointcloud|point-cloud|pc)[_\-\s]+/i, '')
+    .replace(/[_\-\s]+(ept|copc|pointcloud|point-cloud|pc)$/i, '')
+    .replace(/[-_][a-f0-9]{8,}$/i, '')
+    .replace(/[^a-z0-9]+/g, '')
 }
 
 function buildActiveLayer(projectId: string, row: DatasetRow) {
@@ -524,7 +559,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
 
   useEffect(() => {
     if (!projectId) return
-    const cacheKey = `datasets:rows:v2:${projectId}`
+    const cacheKey = `datasets:rows:v3:${projectId}`
     let cancelled = false
     setLoadingRows(true)
     try {
@@ -566,9 +601,9 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       const readyPointCloudNames = new Set(
         prev
           .filter((row) => isPointCloudLayer(row.layerType) && row.layerUrl && isPointCloudViewerUrl(row.layerUrl))
-          .map((row) => row.fileName.toLowerCase()),
+          .map((row) => normalizedPointCloudName(row.fileName)),
       )
-      const filteredLive = live.filter((row) => !readyPointCloudNames.has(row.fileName.toLowerCase()))
+      const filteredLive = live.filter((row) => !readyPointCloudNames.has(normalizedPointCloudName(row.fileName)))
       const filteredLiveKeys = new Set(filteredLive.map((row) => datasetMergeKey(row)))
       const base = prev.filter((row) => !row.id.startsWith('live-') && !filteredLiveKeys.has(datasetMergeKey(row)))
       const mergedMap = new Map<string, DatasetRow>()
@@ -786,15 +821,12 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       const layer = buildActiveLayer(projectId, row)
       if (layer) removeLayer(layer.id)
       window.sessionStorage.removeItem(`datasets:rows:v2:${projectId}`)
-      setDatasets((prev) => prev.filter((item) => (
-        item.id !== row.id &&
-        item.datasetId !== row.datasetId &&
-        item.relPath !== row.relPath
-      )))
+      setDatasets((prev) => prev.filter((item) => !isSameDatasetRow(item, row)))
+      void loadRows(projectId, `datasets:rows:v2:${projectId}`, () => false)
     } catch (error) {
       await modal.alert('Admin force delete failed', error instanceof Error ? error.message : 'Admin force delete failed')
     }
-  }, [modal, projectId, removeLayer])
+  }, [loadRows, modal, projectId, removeLayer])
 
   const onSyncManual = useCallback(async () => {
     if (!projectId || syncingManual) return
@@ -1135,12 +1167,19 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                                   datasetType: 'pointcloud',
                                 })
                               } else {
-                                let status = await getPointCloudStatus(projectId, row.datasetId || row.fileName)
-                                if ((!status?.ready || (!status?.tileset_url && !status?.copc_url && !status?.ept_url)) && row.datasetId && row.fileName) {
-                                  status = await getPointCloudStatus(projectId, row.fileName)
-                                }
-                                if (!status?.ready || (!status?.tileset_url && !status?.copc_url && !status?.ept_url)) {
-                                  status = await getPointCloudStatus(projectId)
+                                let status: Awaited<ReturnType<typeof getPointCloudStatus>> | null = null
+                                const lookupCandidates = Array.from(new Set([
+                                  row.datasetId,
+                                  row.fileName,
+                                  normalizedPointCloudName(row.fileName),
+                                ].map((value) => String(value || '').trim()).filter(Boolean)))
+                                for (const lookup of lookupCandidates) {
+                                  const candidateStatus = await getPointCloudStatus(projectId, lookup)
+                                  if (candidateStatus?.ready && (candidateStatus.tileset_url || candidateStatus.copc_url || candidateStatus.ept_url)) {
+                                    status = candidateStatus
+                                    break
+                                  }
+                                  if (!status || candidateStatus?.failed) status = candidateStatus
                                 }
                                 const resolvedUrl = normalizePointCloudViewerUrl(
                                   status?.tileset_url,
@@ -1243,11 +1282,8 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                             const layer = buildActiveLayer(projectId, row)
                             if (layer) removeLayer(layer.id)
                             window.sessionStorage.removeItem(`datasets:rows:v2:${projectId}`)
-                            setDatasets((prev) => prev.filter((item) => (
-                              item.id !== row.id &&
-                              item.datasetId !== row.datasetId &&
-                              item.relPath !== row.relPath
-                            )))
+                            setDatasets((prev) => prev.filter((item) => !isSameDatasetRow(item, row)))
+                            void loadRows(projectId, `datasets:rows:v2:${projectId}`, () => false)
                             invalidateProjectDataCache(projectId)
                           } catch {
                             // keep UI stable on failure

@@ -17,6 +17,7 @@ import {
 import './AdminDashboard.css'
 
 const HIDEABLE_CLIENT_TABS = [
+  { id: 'dashboard', label: 'Dashboard' },
   { id: 'datasets', label: 'Data Catalog' },
   { id: 'map', label: 'Viewer (2D)' },
   { id: 'globe', label: 'Viewer (3D)' },

@@ -1,5 +1,27 @@
-import { useEffect, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { logClientError } from '../../services/errorLogService'
+
+export type PotreeToolAction =
+  | 'reset-view'
+  | 'cross-section'
+  | 'lc-sections'
+  | 'slice-line'
+  | 'section-box'
+  | 'apply-slice'
+  | 'clear-slice'
+  | 'profile-csv'
+  | 'clipped-csv'
+  | 'distance'
+  | 'area'
+  | 'height'
+  | 'clear'
+  | 'natural-color'
+  | 'elevation-color'
+  | 'intensity-color'
+
+export type PotreeViewerHandle = {
+  runTool: (action: PotreeToolAction) => void
+}
 
 type PotreeViewerProps = {
   url: string
@@ -7,7 +29,10 @@ type PotreeViewerProps = {
   datasetId?: string
 }
 
-export function PotreeViewer({ url, projectId = '', datasetId = '' }: PotreeViewerProps) {
+export const PotreeViewer = forwardRef<PotreeViewerHandle, PotreeViewerProps>(function PotreeViewer(
+  { url, projectId = '', datasetId = '' },
+  ref,
+) {
   const frameRef = useRef<HTMLIFrameElement | null>(null)
   const [viewerError, setViewerError] = useState('')
   const [toolMessage, setToolMessage] = useState('')
@@ -74,21 +99,7 @@ export function PotreeViewer({ url, projectId = '', datasetId = '' }: PotreeView
     return () => frame.removeEventListener('load', onFrameLoad)
   }, [datasetId, projectId, url])
 
-  const runPotreeTool = (
-    action:
-      | 'cross-section'
-      | 'lc-sections'
-      | 'slice-line'
-      | 'section-box'
-      | 'apply-slice'
-      | 'clear-slice'
-      | 'profile-csv'
-      | 'clipped-csv'
-      | 'clear'
-      | 'natural-color'
-      | 'elevation-color'
-      | 'intensity-color',
-  ) => {
+  const runPotreeTool = useCallback((action: PotreeToolAction) => {
     const frame = frameRef.current
     const win = frame?.contentWindow as
       | (Window & {
@@ -97,6 +108,8 @@ export function PotreeViewer({ url, projectId = '', datasetId = '' }: PotreeView
           droidApplyNaturalColor?: () => unknown
           droidApplyElevationColor?: () => unknown
           droidApplyIntensityColor?: () => unknown
+          droidResetView?: () => unknown
+          droidStartMeasurement?: (mode: 'distance' | 'area' | 'height') => unknown
           droidStartSliceLine?: () => unknown
           droidStartSectionBox?: () => unknown
           droidApplySlice?: () => unknown
@@ -122,6 +135,14 @@ export function PotreeViewer({ url, projectId = '', datasetId = '' }: PotreeView
     }
 
     try {
+      if (action === 'reset-view') {
+        const button = doc.getElementById('resetViewButton') as HTMLButtonElement | null
+        if (button) button.click()
+        else win.droidResetView?.()
+        setToolMessage('Point cloud view reset.')
+        return
+      }
+
       if (action === 'cross-section') {
         const button = doc.getElementById('sectionButton') as HTMLButtonElement | null
         if (button) {
@@ -182,6 +203,15 @@ export function PotreeViewer({ url, projectId = '', datasetId = '' }: PotreeView
         return
       }
 
+      if (action === 'distance' || action === 'area' || action === 'height') {
+        const buttonId = action === 'distance' ? 'distanceButton' : action === 'area' ? 'areaButton' : 'heightButton'
+        const button = doc.getElementById(buttonId) as HTMLButtonElement | null
+        if (button) button.click()
+        else win.droidStartMeasurement?.(action)
+        setToolMessage(`${action[0].toUpperCase()}${action.slice(1)} measurement active.`)
+        return
+      }
+
       const sliceActions: Record<
         string,
         { buttonId: string; fallback?: () => unknown; message: string }
@@ -214,7 +244,7 @@ export function PotreeViewer({ url, projectId = '', datasetId = '' }: PotreeView
         'clipped-csv': {
           buttonId: 'clippedCsvButton',
           fallback: win.droidExportClippedPointsCsv,
-          message: 'Full clipped-points CSV export requested.',
+          message: 'Full clipped-points CSV and LAS export requested.',
         },
       }
 
@@ -249,60 +279,12 @@ export function PotreeViewer({ url, projectId = '', datasetId = '' }: PotreeView
         dataset_id: datasetId,
       })
     }
-  }
+  }, [datasetId, projectId, url])
+
+  useImperativeHandle(ref, () => ({ runTool: runPotreeTool }), [runPotreeTool])
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%', background: '#06171b' }}>
-      <div className="potree-cross-section-toolbar" aria-label="Point cloud section tools">
-        <button type="button" onClick={() => runPotreeTool('cross-section')}>
-          <i className="fas fa-vector-square" aria-hidden />
-          Cross Section
-        </button>
-        <button type="button" onClick={() => runPotreeTool('lc-sections')}>
-          <i className="fas fa-route" aria-hidden />
-          L/C Sections
-        </button>
-        <button type="button" onClick={() => runPotreeTool('slice-line')}>
-          <i className="fas fa-slash" aria-hidden />
-          Slice Line
-        </button>
-        <button type="button" onClick={() => runPotreeTool('section-box')}>
-          <i className="fas fa-cube" aria-hidden />
-          Section Box
-        </button>
-        <button type="button" onClick={() => runPotreeTool('apply-slice')}>
-          <i className="fas fa-crop" aria-hidden />
-          Apply Slice
-        </button>
-        <button type="button" onClick={() => runPotreeTool('profile-csv')}>
-          <i className="fas fa-file-csv" aria-hidden />
-          Profile CSV
-        </button>
-        <button type="button" onClick={() => runPotreeTool('clipped-csv')}>
-          <i className="fas fa-download" aria-hidden />
-          Clipped CSV
-        </button>
-        <button type="button" onClick={() => runPotreeTool('clear-slice')}>
-          <i className="fas fa-broom" aria-hidden />
-          Clear Slice
-        </button>
-        <button type="button" onClick={() => runPotreeTool('natural-color')}>
-          <i className="fas fa-eye" aria-hidden />
-          Natural
-        </button>
-        <button type="button" onClick={() => runPotreeTool('elevation-color')}>
-          <i className="fas fa-mountain" aria-hidden />
-          Elevation
-        </button>
-        <button type="button" onClick={() => runPotreeTool('intensity-color')}>
-          <i className="fas fa-sun" aria-hidden />
-          Intensity
-        </button>
-        <button type="button" onClick={() => runPotreeTool('clear')}>
-          <i className="fas fa-eraser" aria-hidden />
-          Clear
-        </button>
-      </div>
+    <div className="potree-viewer-frame-shell">
       <iframe
         ref={frameRef}
         src={url}
@@ -323,6 +305,6 @@ export function PotreeViewer({ url, projectId = '', datasetId = '' }: PotreeView
       ) : null}
     </div>
   )
-}
+})
 
 export default PotreeViewer

@@ -1,5 +1,5 @@
-import { useEffect, useRef } from 'react'
-import PotreeViewer from './PotreeViewer'
+import { forwardRef, useEffect, useRef } from 'react'
+import PotreeViewer, { type PotreeViewerHandle } from './PotreeViewer'
 import './PointCloudViewer.css'
 
 type PointCloudViewerProps = {
@@ -9,7 +9,10 @@ type PointCloudViewerProps = {
   datasetId?: string
 }
 
-export default function PointCloudViewer({ url, name = 'Point Cloud', projectId = '', datasetId = '' }: PointCloudViewerProps) {
+const PointCloudViewer = forwardRef<PotreeViewerHandle, PointCloudViewerProps>(function PointCloudViewer(
+  { url, name = 'Point Cloud', projectId = '', datasetId = '' },
+  ref,
+) {
   const rootRef = useRef<HTMLElement>(null)
 
   useEffect(() => {
@@ -106,7 +109,9 @@ export default function PointCloudViewer({ url, name = 'Point Cloud', projectId 
 
   return (
     <section ref={rootRef} className="point-cloud-viewer" aria-label={`${name} 3D data viewer`}>
-      <PotreeViewer key={url} url={url} projectId={projectId} datasetId={datasetId} />
+      <PotreeViewer ref={ref} key={url} url={url} projectId={projectId} datasetId={datasetId} />
     </section>
   )
-}
+})
+
+export default PointCloudViewer
