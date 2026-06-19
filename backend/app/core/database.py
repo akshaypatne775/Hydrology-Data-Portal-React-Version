@@ -1,12 +1,27 @@
+from __future__ import annotations
+
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
-import sqlite3
 import os
+import re
 import shutil
+import sqlite3
+from typing import Any
+
+try:
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.engine import Connection, Engine, RowMapping
+    from sqlalchemy.orm import sessionmaker
+except ImportError:  # pragma: no cover - lets the legacy SQLite app boot before deps are installed.
+    create_engine = None  # type: ignore[assignment]
+    text = None  # type: ignore[assignment]
+    Connection = Any  # type: ignore[misc,assignment]
+    Engine = Any  # type: ignore[misc,assignment]
+    RowMapping = Any  # type: ignore[misc,assignment]
+    sessionmaker = None  # type: ignore[assignment]
 
 
 _DATABASE_PATH: Path | None = None
-
-
 def _env_true(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -15,12 +30,72 @@ def _database_filename() -> str:
     return "droid_cloud_dev.db" if _env_true(os.getenv("DEV_MODE")) else "droid_cloud_prod.db"
 
 
+def _project_data_dir() -> Path:
+    configured = os.getenv("LOCAL_DATA_PATH")
+    if configured:
+        return Path(configured)
+    return Path(__file__).resolve().parent.parent.parent.parent / "Project_Data"
+
+
+def _sqlite_url_from_path(path: Path, *, read_only: bool = False) -> str:
+    resolved = path.resolve().as_posix()
+    if read_only:
+        return f"sqlite:///file:{resolved}?mode=ro&uri=true"
+    return f"sqlite:///{resolved}"
+
+
+def _default_sqlite_path() -> Path:
+    return _project_data_dir() / _database_filename()
+
+
+def _default_sqlite_url(*, read_only: bool = False) -> str:
+    return _sqlite_url_from_path(_default_sqlite_path(), read_only=read_only)
+
+
+def _require_sqlalchemy() -> None:
+    if create_engine is None or sessionmaker is None or text is None:
+        raise RuntimeError(
+            "SQLAlchemy is required for PostgreSQL support. Install backend requirements first."
+        )
+
+
+def _engine(url: str, **kwargs: Any) -> Engine | None:
+    if not url:
+        return None
+    _require_sqlalchemy()
+    return create_engine(url, future=True, **kwargs)
+
+
+def _postgres_url() -> str:
+    return os.getenv("POSTGRES_DATABASE_URL", "").strip()
+
+
+def _sqlite_url() -> str:
+    return os.getenv("SQLITE_DATABASE_URL", "").strip() or _default_sqlite_url()
+
+
+def _postgres_enabled() -> bool:
+    backend = os.getenv("DB_BACKEND", "").strip().lower()
+    if backend:
+        return backend == "postgres"
+    return bool(_postgres_url())
+
+
+def _postgis_srid() -> int:
+    try:
+        return int(os.getenv("POSTGIS_SRID", "4326"))
+    except ValueError:
+        return 4326
+
+
 def configure_database(path: str | Path) -> None:
+    """Configure the legacy SQLite path without touching PostgreSQL settings."""
     global _DATABASE_PATH
     requested_path = Path(path)
     base_dir = requested_path if requested_path.suffix == "" else requested_path.parent
     _DATABASE_PATH = base_dir / _database_filename()
     _DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("SQLITE_DATABASE_URL", _sqlite_url_from_path(_DATABASE_PATH))
     legacy_live_path = base_dir / "issues.db"
     if (
         _DATABASE_PATH.name == "droid_cloud_prod.db"
@@ -32,11 +107,149 @@ def configure_database(path: str | Path) -> None:
 
 def _require_database_path() -> Path:
     if _DATABASE_PATH is None:
-        raise RuntimeError("Database path has not been configured.")
+        configured = os.getenv("SQLITE_DATABASE_URL", "").strip()
+        if configured.startswith("sqlite:///") and "file:" not in configured:
+            return Path(configured.removeprefix("sqlite:///"))
+        _DATABASE_PATH_DEFAULT = _default_sqlite_path()
+        return _DATABASE_PATH_DEFAULT
     return _DATABASE_PATH
 
 
-def get_db_connection() -> sqlite3.Connection:
+sqlite_engine = _engine(_sqlite_url(), connect_args={"timeout": 30}) if create_engine else None
+postgres_engine = _engine(_postgres_url(), pool_pre_ping=True) if create_engine and _postgres_url() else None
+SqliteSessionLocal = sessionmaker(bind=sqlite_engine, autoflush=False, autocommit=False) if sessionmaker and sqlite_engine else None
+PostgresSessionLocal = sessionmaker(bind=postgres_engine, autoflush=False, autocommit=False) if sessionmaker and postgres_engine else None
+
+
+class CompatRow:
+    def __init__(self, values: Mapping[str, Any]):
+        self._values = dict(values)
+
+    def __getitem__(self, key: str | int) -> Any:
+        if isinstance(key, int):
+            return list(self._values.values())[key]
+        return self._values[key]
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._values.values())
+
+    def keys(self) -> Iterable[str]:
+        return self._values.keys()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._values.get(key, default)
+
+    def as_dict(self) -> dict[str, Any]:
+        return dict(self._values)
+
+
+class CompatResult:
+    def __init__(self, rows: Sequence[RowMapping] | None = None, rowcount: int = -1, lastrowid: Any = None):
+        self._rows = [CompatRow(row) for row in (rows or [])]
+        self.rowcount = rowcount
+        self.lastrowid = lastrowid
+
+    def fetchone(self) -> CompatRow | None:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[CompatRow]:
+        return list(self._rows)
+
+    def __iter__(self) -> Iterator[CompatRow]:
+        return iter(self._rows)
+
+
+class PostgresCompatConnection:
+    def __init__(self, engine: Engine):
+        self._engine = engine
+        self._connection: Connection | None = None
+        self._transaction = None
+
+    def __enter__(self) -> "PostgresCompatConnection":
+        self._connection = self._engine.connect()
+        self._transaction = self._connection.begin()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        try:
+            if self._transaction is not None:
+                if exc_type is None:
+                    self._transaction.commit()
+                else:
+                    self._transaction.rollback()
+        finally:
+            if self._connection is not None:
+                self._connection.close()
+            self._connection = None
+            self._transaction = None
+
+    def _require_connection(self) -> Connection:
+        if self._connection is None:
+            self._connection = self._engine.connect()
+            self._transaction = self._connection.begin()
+        return self._connection
+
+    def execute(self, statement: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> CompatResult:
+        sql, bind_values = _translate_sql(statement, parameters)
+        result = self._require_connection().execute(text(sql), bind_values)
+        rows = result.mappings().all() if result.returns_rows else []
+        return CompatResult(rows=rows, rowcount=result.rowcount)
+
+    def commit(self) -> None:
+        if self._transaction is not None:
+            self._transaction.commit()
+            self._transaction = self._require_connection().begin()
+
+    def rollback(self) -> None:
+        if self._transaction is not None:
+            self._transaction.rollback()
+            self._transaction = self._require_connection().begin()
+
+    def close(self) -> None:
+        if self._connection is not None:
+            self._connection.close()
+        self._connection = None
+        self._transaction = None
+
+
+def _translate_sql(
+    statement: str,
+    parameters: Sequence[Any] | Mapping[str, Any] | None,
+) -> tuple[str, dict[str, Any]]:
+    sql = _normalize_sql_for_postgres(statement)
+    if parameters is None:
+        return sql, {}
+    if isinstance(parameters, Mapping):
+        return sql, dict(parameters)
+    values = list(parameters)
+    bind_values = {f"p{index}": value for index, value in enumerate(values)}
+    index = 0
+
+    def replace_placeholder(match: re.Match[str]) -> str:
+        nonlocal index
+        name = f":p{index}"
+        index += 1
+        return name
+
+    translated = re.sub(r"\?", replace_placeholder, sql)
+    return translated, bind_values
+
+
+def _normalize_sql_for_postgres(statement: str) -> str:
+    sql = statement.strip()
+    sql = re.sub(r"\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b", "SERIAL PRIMARY KEY", sql, flags=re.I)
+    sql = re.sub(r"\bREAL\b", "DOUBLE PRECISION", sql, flags=re.I)
+    sql = re.sub(r"\bTEXT\b", "TEXT", sql, flags=re.I)
+    sql = re.sub(r"\bINSERT\s+OR\s+IGNORE\b", "INSERT", sql, flags=re.I)
+    sql = sql.replace("strftime('%Y-%m-%dT%H:%M:%fZ','now')", "CURRENT_TIMESTAMP")
+    return sql
+
+
+def get_db_connection() -> sqlite3.Connection | PostgresCompatConnection:
+    if _postgres_enabled():
+        if postgres_engine is None:
+            raise RuntimeError("POSTGRES_DATABASE_URL is required when DB_BACKEND=postgres.")
+        return PostgresCompatConnection(postgres_engine)
     connection = sqlite3.connect(_require_database_path(), timeout=30)
     connection.execute("PRAGMA journal_mode=WAL;")
     connection.execute("PRAGMA synchronous=NORMAL;")
@@ -45,6 +258,151 @@ def get_db_connection() -> sqlite3.Connection:
 
 
 def ensure_tables() -> None:
+    if _postgres_enabled():
+        _ensure_postgres_tables()
+    else:
+        _ensure_sqlite_tables()
+
+
+def _ensure_postgres_tables() -> None:
+    if postgres_engine is None:
+        raise RuntimeError("POSTGRES_DATABASE_URL is required when DB_BACKEND=postgres.")
+    srid = _postgis_srid()
+    with postgres_engine.begin() as connection:
+        connection.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
+        for statement in _postgres_schema_statements(srid):
+            connection.execute(text(statement))
+
+
+def _postgres_schema_statements(srid: int) -> list[str]:
+    return [
+        """
+        CREATE TABLE IF NOT EXISTS issues (
+            id SERIAL PRIMARY KEY,
+            lat DOUBLE PRECISION,
+            lng DOUBLE PRECISION,
+            title TEXT,
+            description TEXT,
+            status TEXT DEFAULT 'open'
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user',
+            approval_status TEXT NOT NULL DEFAULT 'approved',
+            requested_role TEXT NOT NULL DEFAULT 'user',
+            approved_at TEXT,
+            can_access_catalog INTEGER NOT NULL DEFAULT 1,
+            can_upload_data INTEGER NOT NULL DEFAULT 0,
+            hidden_tabs TEXT NOT NULL DEFAULT '[]',
+            location_required INTEGER NOT NULL DEFAULT 1,
+            approval_token_hash TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS projects (
+            id TEXT PRIMARY KEY,
+            owner_user_id INTEGER NOT NULL REFERENCES users(id),
+            name TEXT NOT NULL,
+            location TEXT NOT NULL,
+            date TEXT NOT NULL,
+            status TEXT NOT NULL,
+            type TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS sessions (
+            token_hash TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            expires_at INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS dataset_crop_masks (
+            project_id TEXT NOT NULL,
+            tile_folder TEXT NOT NULL,
+            source TEXT NOT NULL,
+            points_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (project_id, tile_folder)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS spatial_layers (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            owner_user_id INTEGER NOT NULL REFERENCES users(id),
+            name TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS spatial_features (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            layer_id TEXT NOT NULL REFERENCES spatial_layers(id) ON DELETE CASCADE,
+            owner_user_id INTEGER NOT NULL REFERENCES users(id),
+            geometry_type TEXT NOT NULL,
+            geojson TEXT NOT NULL,
+            geom geometry(Geometry, {srid}),
+            plot_id TEXT NOT NULL DEFAULT '',
+            owner_name TEXT NOT NULL DEFAULT '',
+            structure_type TEXT NOT NULL DEFAULT 'Unassigned',
+            fill_color TEXT NOT NULL DEFAULT '#f59e0b',
+            stroke_color TEXT NOT NULL DEFAULT '#f59e0b',
+            source_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_spatial_layers_project ON spatial_layers(project_id)",
+        "CREATE INDEX IF NOT EXISTS idx_spatial_features_project ON spatial_features(project_id)",
+        "CREATE INDEX IF NOT EXISTS idx_spatial_features_layer ON spatial_features(layer_id)",
+        "CREATE INDEX IF NOT EXISTS idx_spatial_features_geom ON spatial_features USING GIST (geom)",
+        """
+        CREATE TABLE IF NOT EXISTS camera_views (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            owner_user_id INTEGER NOT NULL REFERENCES users(id),
+            name TEXT NOT NULL,
+            lat DOUBLE PRECISION NOT NULL,
+            lng DOUBLE PRECISION NOT NULL,
+            height DOUBLE PRECISION NOT NULL,
+            heading DOUBLE PRECISION NOT NULL,
+            pitch DOUBLE PRECISION NOT NULL,
+            roll DOUBLE PRECISION NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS activity_logs (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id),
+            ip_address TEXT NOT NULL,
+            method TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            device_label TEXT NOT NULL DEFAULT '',
+            latitude DOUBLE PRECISION,
+            longitude DOUBLE PRECISION,
+            location_accuracy DOUBLE PRECISION,
+            accessed_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_activity_logs_user_time ON activity_logs(user_id, accessed_at)",
+        "CREATE INDEX IF NOT EXISTS idx_activity_logs_accessed_at ON activity_logs(accessed_at)",
+    ]
+
+
+def _ensure_sqlite_tables() -> None:
     with get_db_connection() as connection:
         connection.execute(
             """
