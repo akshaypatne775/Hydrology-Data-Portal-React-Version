@@ -19,7 +19,7 @@ from pathlib import Path
 import sqlite3
 import json
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib.util import find_spec
 from urllib.parse import quote
 from urllib.parse import urlencode
@@ -584,6 +584,10 @@ class AdminDatasetPathMetaPayload(BaseModel):
     height_offset: float | None = None
 
 
+class AdminDatasetRenamePayload(BaseModel):
+    name: str
+
+
 class AdminUserApprovalPayload(BaseModel):
     role: str = "user"
 
@@ -598,6 +602,10 @@ class AdminUserPasswordResetPayload(BaseModel):
 
 class AdminUserUploadAccessPayload(BaseModel):
     enabled: bool = False
+
+
+class AdminUserLocationRequiredPayload(BaseModel):
+    enabled: bool = True
 
 
 class AdminUserHiddenTabsPayload(BaseModel):
@@ -1620,6 +1628,24 @@ def process_pointcloud_ept_job(
         (output_path / ".source_name.txt").write_text(file_name, encoding="utf-8")
         if source_hash:
             (output_path / ".source_hash.txt").write_text(source_hash, encoding="utf-8")
+        try:
+            asset_name = "output.copc.laz" if viewer_type == "copc" else "ept.json"
+            _write_dataset_manifest(
+                output_path,
+                {
+                    "project_id": project_id,
+                    "dataset_id": job_id,
+                    "display_name": file_name,
+                    "dataset_name": file_name,
+                    "dataset_type": "pointcloud",
+                    "source_name": file_name,
+                    "viewer_type": viewer_type,
+                    "asset_name": asset_name,
+                    "converter": converter_label,
+                },
+            )
+        except Exception:
+            pass
         _upsert_processing_job(
             project_id,
             {
@@ -2623,6 +2649,80 @@ def _dataset_status_file(project_id: str, dataset_id: str) -> Path:
     return _dataset_dir(project_id, dataset_id) / ".status.json"
 
 
+def _dataset_manifest_name() -> str:
+    return ".droid_dataset.json"
+
+
+def _manifest_target_for(path: Path) -> Path:
+    return path / _dataset_manifest_name() if path.is_dir() else path.parent / _dataset_manifest_name()
+
+
+def _read_dataset_manifest(path: Path) -> dict[str, str]:
+    manifest = path if path.name == _dataset_manifest_name() else _manifest_target_for(path)
+    if not manifest.is_file():
+        return {}
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    return {}
+
+
+def _write_dataset_manifest(path: Path, payload: dict[str, object]) -> None:
+    try:
+        target = _manifest_target_for(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        current = _read_dataset_manifest(target)
+        current.update({str(k): str(v) for k, v in payload.items() if v is not None})
+        current["updated_at"] = _now_iso()
+        target.write_text(json.dumps(current, ensure_ascii=True, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _status_manifest_payload(project_id: str, dataset_id: str, st: dict[str, str]) -> dict[str, str]:
+    return {
+        "project_id": project_id,
+        "dataset_id": dataset_id,
+        "display_name": str(st.get("dataset_name") or dataset_id),
+        "dataset_type": str(st.get("dataset_type") or ""),
+        "raw_rel_path": str(st.get("raw_rel_path") or ""),
+        "rel_path": str(st.get("rel_path") or st.get("tiles_rel_path") or st.get("cog_rel_path") or ""),
+        "source_name": str(st.get("source_name") or st.get("dataset_name") or dataset_id),
+    }
+
+
+def _write_status_manifests(project_id: str, dataset_id: str, st: dict[str, str]) -> None:
+    payload = _status_manifest_payload(project_id, dataset_id, st)
+    _write_dataset_manifest(_dataset_dir(project_id, dataset_id), payload)
+    for key in (
+        "raw_rel_path",
+        "tiles_rel_path",
+        "tileset_rel_path",
+        "vector_rel_path",
+        "model_rel_path",
+        "cog_rel_path",
+    ):
+        rel = str(st.get(key) or "").strip().replace("\\", "/").lstrip("/")
+        if not rel or ".." in rel:
+            continue
+        target = Path(LOCAL_DATA_PATH) / rel
+        if target.exists():
+            _write_dataset_manifest(target, payload)
+    tile_folder = str(st.get("tile_folder") or "").strip()
+    if tile_folder:
+        _, processed_root = get_project_dirs(project_id)
+        for target in (
+            processed_root / tile_folder,
+            processed_root / _dataset_type_folder(str(st.get("dataset_type") or "")) / tile_folder,
+            _ept_dataset_dir(project_id, tile_folder),
+        ):
+            if target.exists():
+                _write_dataset_manifest(target, payload)
+
+
 def _processing_jobs_file() -> Path:
     return Path(LOCAL_DATA_PATH) / "processing_jobs.json"
 
@@ -2900,6 +3000,7 @@ def _write_dataset_status(project_id: str, dataset_id: str, payload: dict[str, s
     status_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         status_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        _write_status_manifests(project_id, dataset_id, payload)
     except OSError:
         pass
 
@@ -3763,6 +3864,7 @@ def _require_user(request: Request) -> dict[str, object]:
                 u.approval_status,
                 u.can_access_catalog,
                 u.can_upload_data,
+                u.location_required,
                 u.hidden_tabs
             FROM sessions s
             JOIN users u ON u.id = s.user_id
@@ -3799,6 +3901,7 @@ def _require_user(request: Request) -> dict[str, object]:
         "role": str(row["role"] or "user"),
         "can_access_catalog": bool(row["can_access_catalog"]),
         "can_upload_data": bool(row["can_upload_data"]),
+        "location_required": False if str(row["role"] or "user").lower() == "admin" else bool(row["location_required"]),
         "hidden_tabs": _normalize_hidden_tabs(row["hidden_tabs"]),
         "approval_status": str(row["approval_status"] or "pending"),
     }
@@ -4190,7 +4293,7 @@ def auth_login(payload: AuthPayload, response: Response) -> dict[str, str]:
         raise HTTPException(status_code=400, detail="Invalid email")
     with get_db_connection() as connection:
         row = connection.execute(
-            "SELECT id, password_hash, role, approval_status, can_access_catalog, can_upload_data, hidden_tabs FROM users WHERE email = ?",
+            "SELECT id, password_hash, role, approval_status, can_access_catalog, can_upload_data, location_required, hidden_tabs FROM users WHERE email = ?",
             (email,),
         ).fetchone()
     if not row or not _verify_password(payload.password, str(row["password_hash"])):
@@ -4304,6 +4407,7 @@ def auth_me(request: Request) -> dict[str, object]:
         "role": str(user.get("role", "user")),
         "can_access_catalog": bool(user.get("can_access_catalog", True)),
         "can_upload_data": bool(user.get("can_upload_data", False)),
+        "location_required": False if str(user.get("role", "user")).lower() == "admin" else bool(user.get("location_required", True)),
         "hidden_tabs": _normalize_hidden_tabs(user.get("hidden_tabs", [])),
         "approval_status": str(user.get("approval_status", "approved")),
     }
@@ -4319,7 +4423,7 @@ def admin_user_activity(
     with get_db_connection() as connection:
         users = connection.execute(
             """
-            SELECT id, email, role, requested_role, approval_status, created_at, can_access_catalog, can_upload_data, hidden_tabs
+            SELECT id, email, role, requested_role, approval_status, created_at, can_access_catalog, can_upload_data, location_required, hidden_tabs
             FROM users
             ORDER BY created_at ASC
             """
@@ -4358,6 +4462,7 @@ def admin_user_activity(
                 "requested_role": str(user_row["requested_role"] or user_row["role"] or "user"),
                 "can_access_catalog": bool(user_row["can_access_catalog"]),
                 "can_upload_data": bool(user_row["can_upload_data"]),
+                "location_required": False if str(user_row["role"] or "user").lower() == "admin" else bool(user_row["location_required"]),
                 "hidden_tabs": _normalize_hidden_tabs(user_row["hidden_tabs"]),
                 "approval_status": str(user_row["approval_status"] or "pending"),
                 "status": (
@@ -4598,6 +4703,78 @@ def admin_set_user_upload_access(
         connection.commit()
     _clear_session_auth_cache()
     return {"status": "success", "user_id": user_id, "can_upload_data": enabled}
+
+
+@app.patch("/api/admin/users/{user_id}/location-required")
+def admin_set_user_location_required(
+    user_id: int,
+    payload: AdminUserLocationRequiredPayload,
+    admin: dict[str, str] = Depends(verify_admin),
+) -> dict[str, object]:
+    del admin
+    enabled = bool(payload.enabled)
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT id, role FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+        if str(row["role"] or "user").lower() == "admin":
+            enabled = False
+        connection.execute(
+            "UPDATE users SET location_required = ? WHERE id = ?",
+            (1 if enabled else 0, user_id),
+        )
+        connection.commit()
+    _clear_session_auth_cache()
+    return {"status": "success", "user_id": user_id, "location_required": enabled}
+
+
+@app.post("/api/admin/projects/{project_id}/datasets/resync")
+def admin_resync_project_datasets(
+    project_id: str,
+    request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
+) -> dict[str, str]:
+    safe_project_id = _safe_project_id(project_id)
+    _invalidate_project_files_cache(safe_project_id)
+    return {"status": "success", "project_id": safe_project_id}
+
+
+@app.post("/api/admin/projects/{project_id}/jobs/cleanup-stale")
+def admin_cleanup_stale_project_jobs(
+    project_id: str,
+    request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
+) -> dict[str, object]:
+    safe_project_id = _safe_project_id(project_id)
+    jobs = _read_processing_jobs()
+    project_jobs = jobs.get(safe_project_id, [])
+    now = datetime.now(timezone.utc)
+    cleaned: list[str] = []
+    for job in project_jobs:
+        if not isinstance(job, dict):
+            continue
+        status = str(job.get("status") or "").strip().lower()
+        if status in {"completed", "failed", "web-ready", "web ready"}:
+            continue
+        updated_raw = str(job.get("updated_at") or "")
+        try:
+            updated = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
+        except ValueError:
+            updated = now - timedelta(days=1)
+        if (now - updated).total_seconds() < 6 * 3600:
+            continue
+        job["status"] = "Failed"
+        job["stage"] = "Stale processing job stopped"
+        job["error"] = "Processing did not update for more than 6 hours. Admin cleanup marked it stale."
+        job["updated_at"] = _now_iso()
+        cleaned.append(str(job.get("job_id") or job.get("file_name") or "job"))
+    jobs[safe_project_id] = project_jobs
+    _write_processing_jobs(jobs)
+    _invalidate_project_files_cache(safe_project_id)
+    return {"status": "success", "cleaned": cleaned}
 
 
 @app.patch("/api/admin/users/{user_id}/hidden-tabs")
@@ -5621,6 +5798,30 @@ async def complete_upload(
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
         hash_marker.write_text(content_hash, encoding="utf-8")
+        (output_dir / ".source_name.txt").write_text(safe_name, encoding="utf-8")
+        _write_dataset_manifest(
+            output_dir,
+            {
+                "project_id": safe_project_id,
+                "dataset_id": ept_dataset_name,
+                "display_name": safe_name,
+                "dataset_type": "pointcloud",
+                "source_name": safe_name,
+                "raw_rel_path": out_path.relative_to(Path(LOCAL_DATA_PATH)).as_posix(),
+                "viewer_type": "pending",
+            },
+        )
+        _write_dataset_manifest(
+            out_path,
+            {
+                "project_id": safe_project_id,
+                "dataset_id": ept_dataset_name,
+                "display_name": safe_name,
+                "dataset_type": "pointcloud",
+                "source_name": safe_name,
+                "raw_rel_path": out_path.relative_to(Path(LOCAL_DATA_PATH)).as_posix(),
+            },
+        )
     except OSError:
         pass
     cache[user_cache_key] = reused_tileset_id
@@ -7458,6 +7659,7 @@ def admin_update_dataset_metadata(
     if not st:
         raise HTTPException(status_code=404, detail="Dataset status not found")
     if payload.name is not None and payload.name.strip():
+        st = _deep_rename_dataset_artifacts(safe_project_id, dataset_id, st, payload.name.strip())
         st["dataset_name"] = payload.name.strip()
     if payload.month is not None:
         st["month"] = _normalize_month(payload.month)
@@ -7478,6 +7680,29 @@ def admin_update_dataset_metadata(
     _sync_dataset_metadata_to_processing_job(safe_project_id, dataset_id, st)
     _invalidate_project_files_cache(safe_project_id)
     return {"status": "success"}
+
+
+@app.patch("/api/admin/datasets/{project_id}/{dataset_id}/rename")
+def admin_rename_dataset_by_id(
+    project_id: str,
+    dataset_id: str,
+    payload: AdminDatasetRenamePayload,
+    request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
+) -> dict[str, str]:
+    del request, admin_user
+    safe_project_id = _safe_project_id(project_id)
+    safe_dataset_id, st = _admin_dataset_status_by_key(safe_project_id, dataset_id)
+    new_name = payload.name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="Dataset name is required")
+    st = _deep_rename_dataset_artifacts(safe_project_id, safe_dataset_id, st, new_name)
+    st["dataset_name"] = new_name
+    st["updated_at"] = _now_iso()
+    _write_dataset_status(safe_project_id, safe_dataset_id, st)
+    _sync_dataset_metadata_to_processing_job(safe_project_id, safe_dataset_id, st)
+    _invalidate_project_files_cache(safe_project_id)
+    return {"status": "success", "dataset_id": safe_dataset_id, "name": new_name}
 
 
 def _admin_dataset_status_by_key(project_id: str, dataset_key: str) -> tuple[str, dict[str, str]]:
@@ -7526,6 +7751,79 @@ def _safe_remove_dataset_path(path: Path) -> int:
         return 1
     target.unlink(missing_ok=True)
     return 1
+
+
+def _safe_rename_dataset_path(path: Path, display_name: str) -> Path:
+    local_root = Path(LOCAL_DATA_PATH).resolve()
+    target = path.resolve()
+    if not target.exists() or target == local_root or not target.is_relative_to(local_root):
+        return path
+    clean_stem = _safe_export_stem(display_name).strip("-_ .")[:120] or "dataset"
+    if target.is_file():
+        prefix = ""
+        name = target.name
+        if "__" in name:
+            prefix = name.split("__", 1)[0] + "__"
+        next_path = target.with_name(f"{prefix}{clean_stem}{target.suffix}")
+    else:
+        next_path = target.with_name(clean_stem)
+    if next_path.resolve() == target:
+        return target
+    if next_path.exists():
+        next_path = target.with_name(f"{next_path.stem}-{secrets.token_hex(4)}{next_path.suffix}")
+    target.rename(next_path)
+    return next_path
+
+
+def _deep_rename_dataset_artifacts(project_id: str, dataset_id: str, st: dict[str, str], display_name: str) -> dict[str, str]:
+    updated = dict(st)
+    local_root = Path(LOCAL_DATA_PATH).resolve()
+    for key in ("raw_rel_path", "vector_rel_path", "model_rel_path", "cog_rel_path"):
+        rel = str(updated.get(key) or "").strip().replace("\\", "/").lstrip("/")
+        if not rel or ".." in rel:
+            continue
+        current = (Path(LOCAL_DATA_PATH) / rel).resolve()
+        if not current.exists() or not current.is_relative_to(local_root):
+            continue
+        renamed = _safe_rename_dataset_path(current, display_name)
+        try:
+            updated[key] = renamed.relative_to(local_root).as_posix()
+            if key == "cog_rel_path":
+                updated["cog_path"] = str(renamed)
+        except ValueError:
+            pass
+
+    tile_folder = str(updated.get("tile_folder") or "").strip()
+    if tile_folder:
+        _, processed_root = get_project_dirs(project_id)
+        for key, current in (
+            ("tiles_rel_path", Path(LOCAL_DATA_PATH) / str(updated.get("tiles_rel_path") or "")),
+            ("tileset_rel_path", Path(LOCAL_DATA_PATH) / str(updated.get("tileset_rel_path") or "")),
+        ):
+            if str(updated.get(key) or "").strip() and current.exists() and current.resolve().is_relative_to(local_root):
+                renamed = _safe_rename_dataset_path(current.resolve(), display_name)
+                try:
+                    updated[key] = renamed.relative_to(local_root).as_posix()
+                except ValueError:
+                    pass
+        for current in (
+            processed_root / tile_folder,
+            processed_root / _dataset_type_folder(str(updated.get("dataset_type") or "")) / tile_folder,
+            _ept_dataset_dir(project_id, tile_folder),
+            _legacy_ept_pointcloud_dataset_dir(project_id, tile_folder),
+            _legacy_ept_dataset_dir(project_id, tile_folder),
+        ):
+            if current.exists():
+                renamed = _safe_rename_dataset_path(current, display_name)
+                updated["tile_folder"] = renamed.name
+                try:
+                    source_marker = renamed / ".source_name.txt"
+                    if source_marker.exists() or str(updated.get("dataset_type") or "").lower() == "pointcloud":
+                        source_marker.write_text(display_name, encoding="utf-8")
+                except OSError:
+                    pass
+                break
+    return updated
 
 
 def _dataset_status_matches_rel(project_id: str, st: dict[str, str], rel_path: str) -> bool:
@@ -7595,6 +7893,7 @@ def admin_update_dataset_metadata_by_name(
     safe_dataset_name = os.path.basename(dataset_name.replace("\\", "/").strip().strip("/"))
     dataset_id, st = _admin_dataset_status_by_key(safe_project_id, safe_dataset_name)
     if payload.name is not None and payload.name.strip():
+        st = _deep_rename_dataset_artifacts(safe_project_id, dataset_id, st, payload.name.strip())
         st["dataset_name"] = payload.name.strip()
     if payload.month is not None:
         st["month"] = _normalize_month(payload.month)
@@ -7962,6 +8261,21 @@ def _dataset_extra_response_fields(st: dict[str, str]) -> dict[str, str]:
         "manual_epsg": str(st.get("manual_epsg") or ""),
         "applied_epsg": str(st.get("applied_epsg") or ""),
     }
+
+
+def _canonical_file_row(row: dict[str, str]) -> dict[str, str]:
+    dataset_id = str(row.get("dataset_id") or "").strip()
+    rel_path = str(row.get("rel_path") or row.get("raw_rel_path") or row.get("cog_rel_path") or "").strip()
+    display_name = str(row.get("display_name") or row.get("name") or dataset_id or Path(rel_path).name).strip()
+    viewer_url = str(row.get("viewer_url") or row.get("layer_url") or row.get("file_url") or "").strip()
+    canonical_key = str(row.get("canonical_key") or dataset_id or rel_path or display_name).strip()
+    row["display_name"] = display_name
+    row["name"] = str(row.get("name") or display_name)
+    row["viewer_url"] = viewer_url
+    row["asset_status"] = str(row.get("asset_status") or row.get("status") or "").strip()
+    row["canonical_key"] = canonical_key
+    row["source_rel_path"] = str(row.get("source_rel_path") or row.get("raw_rel_path") or rel_path)
+    return row
 
 
 def _ensure_project_file_access(request: Request, project_id: str) -> dict[str, str | int]:
@@ -8601,38 +8915,59 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                 listed_rel_paths.add(rel)
                 listed_rel_paths.add(rel_base)
                 continue
-            source_name = ""
+            manifest = _read_dataset_manifest(copc_file.parent)
+            source_name = str(manifest.get("source_name") or manifest.get("display_name") or manifest.get("dataset_name") or "")
             source_marker = copc_file.parent / ".source_name.txt"
             if source_marker.is_file():
                 try:
                     source_name = source_marker.read_text(encoding="utf-8").strip()
                 except OSError:
-                    source_name = ""
+                    pass
             display_name = source_name or f"{copc_file.parent.name}.laz"
-            pc_row_keys = pointcloud_keys(display_name, copc_file.parent.name)
+            dataset_id = str(manifest.get("dataset_id") or copc_file.parent.name)
+            pc_row_keys = pointcloud_keys(display_name, copc_file.parent.name, dataset_id, rel_base)
             if pc_row_keys.intersection(listed_pointcloud_keys):
                 listed_rel_paths.add(rel)
                 listed_rel_paths.add(rel_base)
                 continue
             viewer_url = _copc_viewer_url(base_url, safe_project_id, copc_file.parent.name, display_name)
+            _write_dataset_manifest(
+                copc_file.parent,
+                {
+                    **manifest,
+                    "project_id": safe_project_id,
+                    "dataset_id": dataset_id,
+                    "display_name": display_name,
+                    "dataset_name": display_name,
+                    "dataset_type": "pointcloud",
+                    "source_name": display_name,
+                    "viewer_type": "copc",
+                    "asset_name": "output.copc.laz",
+                },
+            )
             files.append(
                 {
                     "name": display_name,
+                    "display_name": display_name,
                     "kind": "Droid COPC Point Cloud",
                     "type": "PointCloud",
                     "size_bytes": str(copc_file.stat().st_size),
                     "status": jobs_by_file.get(display_name, {}).get("status", "WEB-READY"),
+                    "asset_status": jobs_by_file.get(display_name, {}).get("status", "WEB-READY"),
                     "file_url": viewer_url,
                     "layer_url": viewer_url,
+                    "viewer_url": viewer_url,
                     "copc_url": _copc_url(base_url, safe_project_id, copc_file.parent.name),
                     "viewer_type": "copc",
                     "file_path": str(copc_file.resolve()),
                     "rel_path": rel,
-                    "dataset_id": copc_file.parent.name,
+                    "dataset_id": dataset_id,
                     "dataset_type": "pointcloud",
                     "layer_type": "pointcloud",
                     "month": "",
                     "raw_rel_path": "",
+                    "source_rel_path": str(manifest.get("raw_rel_path") or ""),
+                    "canonical_key": canonical_pointcloud_key(display_name) or canonical_pointcloud_key(dataset_id) or rel_base,
                 },
             )
             listed_rel_paths.add(rel)
@@ -8662,38 +8997,59 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                 listed_rel_paths.add(rel)
                 listed_rel_paths.add(rel_base)
                 continue
-            source_name = ""
+            manifest = _read_dataset_manifest(ept_json.parent)
+            source_name = str(manifest.get("source_name") or manifest.get("display_name") or manifest.get("dataset_name") or "")
             source_marker = ept_json.parent / ".source_name.txt"
             if source_marker.is_file():
                 try:
                     source_name = source_marker.read_text(encoding="utf-8").strip()
                 except OSError:
-                    source_name = ""
+                    pass
             display_name = source_name or f"{ept_json.parent.name}.las"
-            pc_row_keys = pointcloud_keys(display_name, ept_json.parent.name)
+            dataset_id = str(manifest.get("dataset_id") or ept_json.parent.name)
+            pc_row_keys = pointcloud_keys(display_name, ept_json.parent.name, dataset_id, rel_base)
             if pc_row_keys.intersection(listed_pointcloud_keys):
                 listed_rel_paths.add(rel)
                 listed_rel_paths.add(rel_base)
                 continue
             viewer_url = _ept_viewer_url(base_url, safe_project_id, ept_json.parent.name, display_name)
+            _write_dataset_manifest(
+                ept_json.parent,
+                {
+                    **manifest,
+                    "project_id": safe_project_id,
+                    "dataset_id": dataset_id,
+                    "display_name": display_name,
+                    "dataset_name": display_name,
+                    "dataset_type": "pointcloud",
+                    "source_name": display_name,
+                    "viewer_type": "ept",
+                    "asset_name": "ept.json",
+                },
+            )
             files.append(
                 {
                     "name": display_name,
+                    "display_name": display_name,
                     "kind": "Droid EPT Point Cloud",
                     "type": "PointCloud",
                     "size_bytes": str(get_dir_size(ept_json.parent)),
                     "status": "WEB-READY",
+                    "asset_status": "WEB-READY",
                     "file_url": viewer_url,
                     "layer_url": viewer_url,
+                    "viewer_url": viewer_url,
                     "ept_url": _ept_json_url(base_url, safe_project_id, ept_json.parent.name),
                     "viewer_type": "ept",
                     "file_path": str(ept_json.resolve()),
                     "rel_path": rel,
-                    "dataset_id": ept_json.parent.name,
+                    "dataset_id": dataset_id,
                     "dataset_type": "pointcloud",
                     "layer_type": "pointcloud",
                     "month": "",
                     "raw_rel_path": "",
+                    "source_rel_path": str(manifest.get("raw_rel_path") or ""),
+                    "canonical_key": canonical_pointcloud_key(display_name) or canonical_pointcloud_key(dataset_id) or rel_base,
                 },
             )
             listed_rel_paths.add(rel)
@@ -8904,8 +9260,51 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
             )
             listed_rel_paths.add(rel)
 
-    _set_cached_project_files(safe_project_id, files)
-    return {"files": files}
+    def pointcloud_row_rank(row: dict[str, str]) -> int:
+        if str(row.get("viewer_type") or "").lower() in {"copc", "ept"}:
+            return 0
+        status = str(row.get("status") or "").strip().lower()
+        if status in {"processing", "uploaded", "queued", "running"}:
+            return 1
+        return 2
+
+    canonical_files: list[dict[str, str]] = []
+    pointcloud_best: dict[str, tuple[int, int, dict[str, str]]] = {}
+    pointcloud_order: list[str] = []
+    for index, file_row in enumerate(files):
+        row = _canonical_file_row(file_row)
+        signature = " ".join(
+            str(row.get(key) or "").lower()
+            for key in ("kind", "type", "layer_type", "dataset_type", "name", "viewer_type")
+        )
+        if "pointcloud" not in signature and "point cloud" not in signature:
+            canonical_files.append(row)
+            continue
+        keys = pointcloud_keys(
+            row.get("canonical_key"),
+            row.get("display_name"),
+            row.get("name"),
+            row.get("dataset_id"),
+            row.get("source_rel_path"),
+            row.get("raw_rel_path"),
+            row.get("rel_path"),
+            row.get("viewer_url"),
+        )
+        key = sorted(keys, key=len)[0] if keys else str(row.get("canonical_key") or row.get("rel_path") or row.get("name"))
+        rank = pointcloud_row_rank(row)
+        if key not in pointcloud_best:
+            pointcloud_best[key] = (rank, index, row)
+            pointcloud_order.append(key)
+            continue
+        old_rank, old_index, old_row = pointcloud_best[key]
+        if (rank, index) < (old_rank, old_index):
+            pointcloud_best[key] = (rank, old_index, row)
+
+    for key in pointcloud_order:
+        canonical_files.append(pointcloud_best[key][2])
+
+    _set_cached_project_files(safe_project_id, canonical_files)
+    return {"files": canonical_files}
 
 
 @app.delete("/api/projects/{project_id}/files")

@@ -11,6 +11,7 @@ import {
   resetAdminUserPassword,
   setAdminUserCatalogAccess,
   setAdminUserHiddenTabs,
+  setAdminUserLocationRequired,
   setAdminUserUploadAccess,
   type AdminUserActivity,
 } from '../../services/adminService'
@@ -166,6 +167,11 @@ export default function AdminDashboard() {
     void runUserAction(() => setAdminUserUploadAccess(user.user_id, !user.can_upload_data))
   }
 
+  const toggleLocationRequired = (user: AdminUserActivity) => {
+    if (user.role === 'admin') return
+    void runUserAction(() => setAdminUserLocationRequired(user.user_id, user.location_required === false))
+  }
+
   const resetPassword = async (user: AdminUserActivity) => {
     const password = await modal.prompt('Reset password', `Enter new password for ${user.email}. Minimum 8 characters.`)
     if (!password) return
@@ -207,6 +213,7 @@ export default function AdminDashboard() {
               <th>Last Seen</th>
               <th>Hidden Tabs</th>
               <th>User Upload</th>
+              <th>Location Access</th>
               <th>Action</th>
               <th>Approval</th>
               <th>Role</th>
@@ -215,12 +222,12 @@ export default function AdminDashboard() {
           <tbody>
             {loading && users.length === 0 ? (
               <tr>
-                <td colSpan={12}>Loading activity...</td>
+                <td colSpan={13}>Loading activity...</td>
               </tr>
             ) : null}
             {error ? (
               <tr>
-                <td colSpan={12} className="admin-panel__error">{error}</td>
+                <td colSpan={13} className="admin-panel__error">{error}</td>
               </tr>
             ) : null}
             {users.map((user) => (
@@ -296,6 +303,18 @@ export default function AdminDashboard() {
                   >
                     <i className={user.can_upload_data ? 'fa-solid fa-unlock' : 'fa-solid fa-lock'} aria-hidden />
                     {user.can_upload_data ? 'Upload On' : 'Upload Off'}
+                  </button>
+                </td>
+                <td>
+                  <button
+                    type="button"
+                    className={user.location_required === false ? 'admin-panel__upload-toggle admin-panel__upload-toggle--on' : 'admin-panel__upload-toggle admin-panel__upload-toggle--off'}
+                    onClick={() => toggleLocationRequired(user)}
+                    disabled={user.role === 'admin'}
+                    title={user.location_required === false ? 'Location gate is disabled for this user' : 'Location gate is required for this user'}
+                  >
+                    <i className={user.location_required === false ? 'fa-solid fa-location-crosshairs' : 'fa-solid fa-location-dot'} aria-hidden />
+                    {user.location_required === false ? 'Not Required' : 'Required'}
                   </button>
                 </td>
                 <td>

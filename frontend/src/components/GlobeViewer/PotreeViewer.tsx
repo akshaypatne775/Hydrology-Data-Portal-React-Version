@@ -5,6 +5,7 @@ export type PotreeToolAction =
   | 'reset-view'
   | 'cross-section'
   | 'lc-sections'
+  | 'five-meter-sections'
   | 'slice-line'
   | 'section-box'
   | 'apply-slice'
@@ -114,6 +115,7 @@ export const PotreeViewer = forwardRef<PotreeViewerHandle, PotreeViewerProps>(fu
           droidStartSectionBox?: () => unknown
           droidApplySlice?: () => unknown
           droidClearSlice?: () => unknown
+          droidGenerateFiveMeterSections?: () => unknown
           droidExportProfileCsv?: () => unknown
           droidExportClippedPointsCsv?: () => unknown
           viewer?: {
@@ -175,6 +177,20 @@ export const PotreeViewer = forwardRef<PotreeViewerHandle, PotreeViewerProps>(fu
           setToolMessage('L/C Sections dialog opened inside the point cloud viewer.')
         } else {
           setToolMessage('L/C section automation is available only on the latest point cloud viewer template.')
+        }
+        return
+      }
+
+      if (action === 'five-meter-sections') {
+        if (typeof win.droidGenerateFiveMeterSections === 'function') {
+          win.droidGenerateFiveMeterSections()
+          setToolMessage('5m underground cross-section workflow active.')
+        } else {
+          const interval = doc.getElementById('sectionIntervalInput') as HTMLInputElement | null
+          if (interval) interval.value = '5'
+          const button = doc.getElementById('alignmentButton') as HTMLButtonElement | null
+          button?.click()
+          setToolMessage('Set to 5m sections. Draw alignment and generate sections.')
         }
         return
       }

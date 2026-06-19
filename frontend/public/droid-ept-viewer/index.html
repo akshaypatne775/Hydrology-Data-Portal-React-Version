@@ -58,6 +58,12 @@
     #potree_sidebar_container,
     #potree_branding,
     #potree_map_toggle,
+    #potree_menu_toggle,
+    .potree_menu_toggle,
+    .potree_menu_button,
+    .potree-menu-toggle,
+    .hamburger,
+    [class*="hamburger"],
     #potree_map,
     #potree_languages,
     #menu_about,
@@ -210,6 +216,9 @@
       box-shadow: 0 14px 32px rgba(0, 0, 0, 0.28);
       backdrop-filter: blur(12px);
     }
+    body.droid-embedded-clean .droid-section-panel {
+      display: none !important;
+    }
     .droid-section-panel h2 {
       margin: 0;
       color: var(--droid-text);
@@ -339,7 +348,7 @@
     }
   </style>
 </head>
-<body>
+<body class="droid-embedded-clean">
   <script src="./libs/jquery/jquery-3.1.1.min.js"></script>
   <script src="./libs/spectrum/spectrum.js"></script>
   <script src="./libs/jquery-ui/jquery-ui.min.js"></script>
@@ -739,6 +748,18 @@
         });
       }
       renderSections();
+    }
+
+    function generateFiveMeterSections() {
+      const intervalInput = document.getElementById("sectionIntervalInput");
+      if (intervalInput) intervalInput.value = "5";
+      if (!activeAlignmentProfile || activeAlignmentProfile.points.length < 2) {
+        alignmentDialog.classList.add("is-visible");
+        startAlignmentDrawing();
+        showNotice("Draw 5m Alignment", "Draw the alignment, right-click to finish, then click 5m Sections again to generate cross sections every 5 meters.");
+        return;
+      }
+      generateSectionsFromAlignment();
     }
 
     function getActivePointCloudBounds() {
@@ -1156,6 +1177,7 @@
     window.droidStartSectionBox = startSectionBox;
     window.droidApplySlice = applySlice;
     window.droidClearSlice = clearSlice;
+    window.droidGenerateFiveMeterSections = generateFiveMeterSections;
     window.droidExportProfileCsv = exportProfileCsv;
     window.droidExportClippedPointsCsv = exportClippedPointsCsv;
     budgetSlider.addEventListener("input", (event) => {

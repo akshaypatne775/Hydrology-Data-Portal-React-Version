@@ -9,6 +9,7 @@ export type AdminUserActivity = {
   approval_status?: string
   can_access_catalog?: boolean
   can_upload_data?: boolean
+  location_required?: boolean
   hidden_tabs?: string[]
   status: 'Active' | 'Offline'
   current_ip: string
@@ -71,6 +72,15 @@ export async function setAdminUserUploadAccess(userId: number, enabled: boolean)
   if (!res.ok) throw new Error(`User upload access update failed (${res.status})`)
 }
 
+export async function setAdminUserLocationRequired(userId: number, enabled: boolean): Promise<void> {
+  const res = await apiRequest(`/api/admin/users/${encodeURIComponent(String(userId))}/location-required`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  })
+  if (!res.ok) throw new Error(`Location requirement update failed (${res.status})`)
+}
+
 export async function setAdminUserHiddenTabs(userId: number, hiddenTabs: string[]): Promise<void> {
   const res = await apiRequest(`/api/admin/users/${encodeURIComponent(String(userId))}/hidden-tabs`, {
     method: 'PATCH',
@@ -129,7 +139,20 @@ export async function updateAdminDatasetMetadata(
   projectId: string,
   payload: AdminDatasetMetadataPayload,
 ): Promise<void> {
-  const { dataset_id: datasetKey, ...body } = payload
+  const { dataset_id: datasetKey, name, ...rest } = payload
+  if (name?.trim()) {
+    const renameRes = await apiRequest(
+      `/api/admin/datasets/${encodeURIComponent(projectId)}/${encodeURIComponent(datasetKey)}/rename`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim() }),
+      },
+    )
+    if (!renameRes.ok) throw new Error(`Admin dataset rename failed (${renameRes.status})`)
+  }
+  const body = rest
+  if (!Object.values(body).some((value) => value !== undefined)) return
   const res = await apiRequest(`/api/admin/projects/${encodeURIComponent(projectId)}/datasets/${encodeURIComponent(datasetKey)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },

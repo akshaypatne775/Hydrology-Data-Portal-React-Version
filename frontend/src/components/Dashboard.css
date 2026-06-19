@@ -38,6 +38,36 @@
   min-height: 0;
 }
 
+.ds-dashboard--viewer-fullscreen {
+  display: flex;
+}
+
+.ds-dashboard--viewer-fullscreen .ds-sidebar,
+.ds-dashboard--viewer-fullscreen .viewer-3d-sidebar,
+.ds-dashboard--viewer-fullscreen .ds-topbar {
+  display: none !important;
+}
+
+.ds-dashboard--viewer-fullscreen .ds-main,
+.ds-dashboard--viewer-fullscreen .ds-content,
+.ds-dashboard--viewer-fullscreen .ds-map-shell {
+  flex: 1 1 auto;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+}
+
+.ds-dashboard--viewer-fullscreen .ds-content {
+  height: 100dvh;
+  padding: 0;
+}
+
+.ds-dashboard--viewer-fullscreen .ds-map-shell {
+  height: 100dvh;
+  border-radius: 0;
+  border: 0;
+}
+
 .ds-sidebar {
   display: flex;
   flex-direction: column;
@@ -1229,6 +1259,31 @@
   border-radius: 6px;
   background: rgba(14, 62, 73, 0.08);
   color: #0e3e49;
+}
+
+.ds-viewer-fullscreen-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 2rem;
+  padding: 0.4rem 0.72rem;
+  border: 1px solid rgba(14, 62, 73, 0.24);
+  border-radius: 999px;
+  background: #0e3e49;
+  color: #ffffff;
+  font-family: 'Montserrat', sans-serif;
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ds-viewer-fullscreen-toggle:hover,
+.ds-viewer-fullscreen-toggle:focus-visible {
+  background: #155766;
+  border-color: #155766;
 }
 
 @media (min-width: 1800px) {

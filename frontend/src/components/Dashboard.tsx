@@ -4,6 +4,7 @@ import { logout } from '../services/authService'
 import type { Project } from '../services/projectService'
 import { getProjectFiles, getProjectJobs } from '../services/datasetService'
 import type { ProjectFile, ProjectJob } from '../services/datasetService'
+import { updateAdminDatasetMetadata } from '../services/adminService'
 import { getPointCloudStatus } from '../services/pointCloudService'
 import { useWorkspaceContext } from '../context/WorkspaceContext'
 import { useModal } from '../context/ModalContext'
@@ -37,6 +38,7 @@ const POTREE_HEADER_TOOLS: Array<{ action: PotreeToolAction; label: string; icon
   { action: 'height', label: 'Height', icon: 'fa-solid fa-up-down' },
   { action: 'cross-section', label: 'Cross Section', icon: 'fa-solid fa-vector-square' },
   { action: 'lc-sections', label: 'L/C Sections', icon: 'fa-solid fa-route' },
+  { action: 'five-meter-sections', label: '5m Sections', icon: 'fa-solid fa-grip-lines' },
   { action: 'slice-line', label: 'Slice Line', icon: 'fa-solid fa-slash' },
   { action: 'section-box', label: 'Section Box', icon: 'fa-solid fa-cube' },
   { action: 'apply-slice', label: 'Apply Slice', icon: 'fa-solid fa-crop' },
@@ -367,6 +369,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   const [createProjectError, setCreateProjectError] = useState<string | null>(null)
   const [renamingProject, setRenamingProject] = useState(false)
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
+  const [viewerFullscreen, setViewerFullscreen] = useState(false)
   const [project3DAssets, setProject3DAssets] = useState<Project3DAsset[]>([])
   const [selected3DAsset, setSelected3DAsset] = useState<Project3DAsset | null>(null)
   const [active3DCanvasTab, setActive3DCanvasTab] = useState<'potree' | 'cesium'>('potree')
@@ -478,6 +481,12 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     return activeViewerTab === '3D' ? 'globe' : 'map'
   }, [activeId, activeViewerTab])
 
+  const isViewerWorkspace = routedViewerId === 'map' || routedViewerId === 'globe'
+
+  useEffect(() => {
+    if (!isViewerWorkspace) setViewerFullscreen(false)
+  }, [isViewerWorkspace])
+
   useEffect(() => {
     if ((activeId === 'datasets' && !canAccessDataCatalog) || hiddenClientTabs.has(activeId)) {
       setActiveId(selectedProject ? defaultProjectWorkspaceTab() : 'projects')
@@ -509,6 +518,26 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     },
     [defaultProjectWorkspaceTab, setActiveId, setSelectedProject],
   )
+
+  const rename3DAsset = useCallback(async (asset: Project3DAsset) => {
+    if (!selectedProject?.id || !asset.id) return
+    const nextName = await modal.prompt('Rename 3D asset', `Enter a new name for ${asset.name}.`, asset.name)
+    if (!nextName?.trim() || nextName.trim() === asset.name) return
+    try {
+      await updateAdminDatasetMetadata(selectedProject.id, {
+        dataset_id: asset.id,
+        name: nextName.trim(),
+      })
+      setProject3DAssets((current) => current.map((item) => (
+        item.id === asset.id ? { ...item, name: nextName.trim() } : item
+      )))
+      setSelected3DAsset((current) => (
+        current?.id === asset.id ? { ...current, name: nextName.trim() } : current
+      ))
+    } catch (err) {
+      await modal.alert('Rename failed', err instanceof Error ? err.message : 'Could not rename this 3D asset.')
+    }
+  }, [modal, selectedProject?.id])
 
   useEffect(() => {
     setSelectedProject((prev) => {
@@ -801,22 +830,25 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   return (
     <div
       className={
-        routedViewerId === 'globe'
-          ? 'ds-dashboard ds-dashboard--3d-mode'
-          : isSidebarCollapsed
-            ? 'ds-dashboard ds-dashboard--sidebar-collapsed'
-            : 'ds-dashboard'
+        [
+          'ds-dashboard',
+          routedViewerId === 'globe' ? 'ds-dashboard--3d-mode' : '',
+          isSidebarCollapsed && routedViewerId !== 'globe' ? 'ds-dashboard--sidebar-collapsed' : '',
+          viewerFullscreen && isViewerWorkspace ? 'ds-dashboard--viewer-fullscreen' : '',
+        ].filter(Boolean).join(' ')
       }
     >
-      {routedViewerId === 'globe' ? (
+      {routedViewerId === 'globe' && !viewerFullscreen ? (
         <Viewer3DSidebar
           pointClouds={projectPointClouds}
           models={project3DModels}
           selectedAsset={selected3DAsset}
+          canRename={isAdmin}
           onSelect={(asset) => {
             setSelected3DAsset(asset)
             setActive3DCanvasTab(asset.viewer)
           }}
+          onRename={(asset) => void rename3DAsset(asset)}
           onBack={() => {
             setActiveViewerTab('2D')
             setActiveId('datasets')
@@ -1132,6 +1164,17 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
                         ? 'Scenario Compare'
                         : 'Export Center'}
                   </span>
+                  {isViewerWorkspace ? (
+                    <button
+                      type="button"
+                      className="ds-viewer-fullscreen-toggle"
+                      onClick={() => setViewerFullscreen((value) => !value)}
+                      title={viewerFullscreen ? 'Exit fullscreen workspace' : 'Fullscreen workspace'}
+                    >
+                      <i className={viewerFullscreen ? 'fa-solid fa-compress' : 'fa-solid fa-expand'} aria-hidden />
+                      {viewerFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+                    </button>
+                  ) : null}
                 </div>
                 {routedViewerId === 'globe' ? (
                   <div className="ds-map-toolbar__3d-controls">

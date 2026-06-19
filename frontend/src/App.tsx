@@ -65,7 +65,7 @@ function AppRoot() {
         ) : isAdmin ? (
           <WorkspacePage />
         ) : (
-          <LocationGate>
+          <LocationGate required={user.location_required !== false}>
             <WorkspacePage />
           </LocationGate>
         )}

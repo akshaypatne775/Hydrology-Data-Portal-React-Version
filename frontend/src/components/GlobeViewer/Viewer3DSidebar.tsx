@@ -12,7 +12,9 @@ type Viewer3DSidebarProps = {
   pointClouds: Viewer3DAsset[]
   models: Viewer3DAsset[]
   selectedAsset: Viewer3DAsset | null
+  canRename?: boolean
   onSelect: (asset: Viewer3DAsset) => void
+  onRename?: (asset: Viewer3DAsset) => void
   onBack: () => void
 }
 
@@ -20,7 +22,9 @@ export default function Viewer3DSidebar({
   pointClouds,
   models,
   selectedAsset,
+  canRename = false,
   onSelect,
+  onRename,
   onBack,
 }: Viewer3DSidebarProps) {
   const uniquePointClouds = useMemo(() => unique3DAssets(pointClouds), [pointClouds])
@@ -46,15 +50,25 @@ export default function Viewer3DSidebar({
           <section key={section.id} className="viewer-3d-sidebar__section">
             <p className="viewer-3d-sidebar__section-title">{section.label}</p>
             {section.assets.map((asset) => (
-              <button
+              <div
                 key={asset.id}
-                type="button"
                 className={selectedAsset?.id === asset.id ? 'viewer-3d-sidebar__asset viewer-3d-sidebar__asset--active' : 'viewer-3d-sidebar__asset'}
-                onClick={() => onSelect(asset)}
               >
-                <i className={asset.viewer === 'potree' ? 'fas fa-cloud' : 'fas fa-cube'} aria-hidden />
-                <span>{asset.name}</span>
-              </button>
+                <button type="button" className="viewer-3d-sidebar__asset-main" onClick={() => onSelect(asset)}>
+                  <i className={asset.viewer === 'potree' ? 'fas fa-cloud' : 'fas fa-cube'} aria-hidden />
+                  <span>{asset.name}</span>
+                </button>
+                {canRename && onRename ? (
+                  <button
+                    type="button"
+                    className="viewer-3d-sidebar__asset-rename"
+                    onClick={() => onRename(asset)}
+                    title={`Rename ${asset.name}`}
+                  >
+                    <i className="fas fa-pen" aria-hidden />
+                  </button>
+                ) : null}
+              </div>
             ))}
           </section>
         ))}

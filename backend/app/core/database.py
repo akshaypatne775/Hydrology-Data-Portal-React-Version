@@ -107,6 +107,13 @@ def ensure_tables() -> None:
             connection.execute(
                 "ALTER TABLE users ADD COLUMN hidden_tabs TEXT NOT NULL DEFAULT '[]'"
             )
+        if "location_required" not in user_columns:
+            connection.execute(
+                "ALTER TABLE users ADD COLUMN location_required INTEGER NOT NULL DEFAULT 1"
+            )
+            connection.execute(
+                "UPDATE users SET location_required = 0 WHERE LOWER(COALESCE(role, 'user')) = 'admin'"
+            )
         if "approval_token_hash" not in user_columns:
             connection.execute("ALTER TABLE users ADD COLUMN approval_token_hash TEXT")
         connection.execute(

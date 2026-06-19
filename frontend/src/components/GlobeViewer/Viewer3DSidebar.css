@@ -104,12 +104,11 @@
 }
 
 .viewer-3d-sidebar__asset {
-  display: grid;
-  grid-template-columns: 1.25rem minmax(0, 1fr);
+  display: flex;
   align-items: center;
   gap: 0.5rem;
   min-height: 2.6rem;
-  padding: 0.5rem 0.65rem;
+  padding: 0.3rem;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.06);
@@ -118,14 +117,48 @@
   font-size: 0.72rem;
   font-weight: 800;
   text-align: left;
+}
+
+.viewer-3d-sidebar__asset-main {
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex: 1 1 auto;
+  min-height: 1.95rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
 }
 
-.viewer-3d-sidebar__asset span {
+.viewer-3d-sidebar__asset-main span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.viewer-3d-sidebar__asset-rename {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 1.8rem;
+  width: 1.8rem;
+  height: 1.8rem;
+  border: 1px solid rgba(14, 62, 73, 0.22);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.88);
+  color: #0e3e49;
+  cursor: pointer;
+}
+
+.viewer-3d-sidebar__asset-rename:hover {
+  background: #14b8a6;
+  color: #062a30;
 }
 
 .viewer-3d-sidebar__asset:hover,

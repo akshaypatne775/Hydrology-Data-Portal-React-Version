@@ -1,6 +1,11 @@
 import { type PropsWithChildren } from 'react'
 
-export default function LocationGate({ children }: PropsWithChildren) {
-  // Location check manually bypassed for client 
+type LocationGateProps = PropsWithChildren<{
+  required?: boolean
+}>
+
+export default function LocationGate({ children, required = true }: LocationGateProps) {
+  if (!required) return <>{children}</>
+  // Location check manually bypassed for client.
   return <>{children}</>
 }
