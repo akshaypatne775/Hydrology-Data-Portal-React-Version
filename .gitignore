@@ -78,6 +78,7 @@ reference/**/ept-hierarchy/**
 .env.*
 !.env.example
 !backend/.env.postgres.example
+backend/.postgres_dev_setup_complete
 .idea/
 .vscode/
 *.log

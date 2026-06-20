@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sqlite3
@@ -71,6 +72,14 @@ def _sqlite_path_from_url(value: str) -> Path:
     if url.startswith("sqlite:///"):
         return Path(url.removeprefix("sqlite:///"))
     raise ValueError(f"Unsupported SQLITE_DATABASE_URL. Use sqlite:///... or sqlite:///file:...?mode=ro&uri=true. Got: {url}")
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _connect_sqlite_readonly(sqlite_path: Path) -> sqlite3.Connection:
@@ -190,7 +199,19 @@ def _reset_serial_sequences(connection: Connection) -> None:
 def run_migration(sqlite_path: Path, postgres_url: str, srid: int) -> None:
     if not postgres_url:
         raise RuntimeError("POSTGRES_DATABASE_URL is required.")
+    source_stat = sqlite_path.stat()
+    source_hash = _file_sha256(sqlite_path)
+    print(
+        f"[SOURCE BASELINE] size={source_stat.st_size} "
+        f"mtime_ns={source_stat.st_mtime_ns} sha256={source_hash}"
+    )
     sqlite_connection = _connect_sqlite_readonly(sqlite_path)
+    source_counts = {
+        table_name: int(
+            sqlite_connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+        )
+        for table_name in MIGRATION_TABLES
+    }
     postgres_engine = create_engine(postgres_url, future=True, pool_pre_ping=True)
     try:
         with postgres_engine.connect() as postgres_connection:
@@ -223,7 +244,48 @@ def run_migration(sqlite_path: Path, postgres_url: str, srid: int) -> None:
                                 f"row={json.dumps(row_dict, default=str)} error={exc}"
                             ) from exc
                 _reset_serial_sequences(postgres_connection)
+                for table_name, source_count in source_counts.items():
+                    target_count = int(
+                        postgres_connection.execute(
+                            text(f"SELECT COUNT(*) FROM {table_name}")
+                        ).scalar_one()
+                    )
+                    if target_count != source_count:
+                        raise RuntimeError(
+                            f"Row-count mismatch for {table_name}: "
+                            f"SQLite={source_count}, PostgreSQL={target_count}"
+                        )
+                spatial_count = source_counts["spatial_features"]
+                valid_geom_count = int(
+                    postgres_connection.execute(
+                        text(
+                            "SELECT COUNT(*) FROM spatial_features "
+                            "WHERE geom IS NOT NULL AND ST_IsValid(geom)"
+                        )
+                    ).scalar_one()
+                )
+                if valid_geom_count != spatial_count:
+                    raise RuntimeError(
+                        "PostGIS validation failed: "
+                        f"spatial_features={spatial_count}, valid_geom={valid_geom_count}"
+                    )
+                postgis_version = postgres_connection.execute(
+                    text("SELECT postgis_full_version()")
+                ).scalar_one()
+                final_stat = sqlite_path.stat()
+                final_hash = _file_sha256(sqlite_path)
+                if (
+                    final_hash != source_hash
+                    or final_stat.st_size != source_stat.st_size
+                    or final_stat.st_mtime_ns != source_stat.st_mtime_ns
+                ):
+                    raise RuntimeError(
+                        "SQLite source changed during migration; PostgreSQL transaction was rolled back."
+                    )
                 transaction.commit()
+                print(f"[POSTGIS] {postgis_version}")
+                print("[VERIFY] All table counts and spatial geometries match.")
+                print(f"[SOURCE VERIFIED] sha256={final_hash}")
                 print("[MIGRATION COMPLETE] SQLite was opened read-only and PostgreSQL migration committed.")
             except Exception:
                 transaction.rollback()

@@ -139,7 +139,13 @@ PDAL_EXE = os.getenv(
     "PDAL_EXE",
     r"C:\Program Files\QGIS 3.22.8\bin\pdal.exe",
 ).strip()
-PROJECT_FILES_CACHE_TTL_SECONDS = float(os.getenv("PROJECT_FILES_CACHE_TTL_SECONDS", "4"))
+PROJECT_FILES_CACHE_TTL_SECONDS = float(os.getenv("PROJECT_FILES_CACHE_TTL_SECONDS", "15"))
+POTREE_NATIVE_COPC_ENABLED = os.getenv("POTREE_NATIVE_COPC_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 TIFF_TILE_BUDGET_MB = float(os.getenv("TIFF_TILE_BUDGET_MB", "100"))
 TIFF_TILE_MIN_ZOOM_LIMIT = int(os.getenv("TIFF_TILE_MIN_ZOOM_LIMIT", "14"))
 TIFF_TILE_MAX_ZOOM_LIMIT = int(os.getenv("TIFF_TILE_MAX_ZOOM_LIMIT", "19"))
@@ -1441,6 +1447,113 @@ def _run_ept_converter_once(input_las: str, output_path: Path) -> str:
     return "Untwine"
 
 
+def _copc_ept_compat_dir(copc_file: Path) -> Path:
+    return copc_file.parent.with_name(f"{copc_file.parent.name}__ept_viewer")
+
+
+def _process_copc_ept_compat_job(
+    project_id: str,
+    dataset_id: str,
+    copc_file: str,
+    output_dir: str,
+    display_name: str,
+) -> None:
+    source = Path(copc_file)
+    output = Path(output_dir)
+    try:
+        converter = _run_ept_converter_once(str(source), output)
+        (output / ".source_name.txt").write_text(display_name, encoding="utf-8")
+        (output / ".viewer_type.txt").write_text("ept", encoding="utf-8")
+        (output / ".converter.txt").write_text(f"{converter} from COPC", encoding="utf-8")
+        rel = output.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+        source_rel = source.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+        status = _read_dataset_status(project_id, dataset_id) or {}
+        status.update(
+            {
+                "status": "Web-Ready",
+                "updated_at": _now_iso(),
+                "dataset_id": dataset_id,
+                "dataset_name": display_name,
+                "display_name": display_name,
+                "source_name": display_name,
+                "dataset_type": "pointcloud",
+                "layer_type": "pointcloud",
+                "viewer_type": "ept",
+                "tile_folder": output.name,
+                "tiles_rel_path": rel,
+                "source_asset_rel_path": source_rel,
+            }
+        )
+        _write_dataset_status(project_id, dataset_id, status)
+        _write_dataset_manifest(
+            output,
+            {
+                **status,
+                "asset_name": "ept.json",
+                "source_asset_rel_path": source_rel,
+            },
+        )
+        _write_dataset_manifest(
+            source.parent,
+            {
+                "project_id": project_id,
+                "dataset_id": dataset_id,
+                "display_name": display_name,
+                "source_name": display_name,
+                "dataset_type": "pointcloud",
+                "viewer_type": "copc",
+                "asset_name": source.name,
+                "viewer_dataset_name": output.name,
+            },
+        )
+        _upsert_processing_job(
+            project_id,
+            {
+                "job_id": dataset_id,
+                "kind": "pointcloud",
+                "file_name": display_name,
+                "status": "Completed",
+                "updated_at": _now_iso(),
+                "result_url": _ept_viewer_url("", project_id, output.name, display_name),
+                "viewer_type": "ept",
+                "source_asset_rel_path": source_rel,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc)
+        _write_portal_error_log(
+            "copc_ept_compatibility",
+            message,
+            project_id=project_id,
+            dataset_id=dataset_id,
+            file_name=display_name,
+            copc_file=str(source),
+        )
+        status = _read_dataset_status(project_id, dataset_id) or {}
+        status.update(
+            {
+                "status": "Failed",
+                "updated_at": _now_iso(),
+                "error": message[:8000],
+                "stage": "COPC viewer preparation failed",
+            }
+        )
+        _write_dataset_status(project_id, dataset_id, status)
+        _upsert_processing_job(
+            project_id,
+            {
+                "job_id": dataset_id,
+                "kind": "pointcloud",
+                "file_name": display_name,
+                "status": "Failed",
+                "updated_at": _now_iso(),
+                "error": message[:8000],
+            },
+        )
+    finally:
+        _invalidate_project_files_cache(project_id)
+
+
 def _run_copc_converter_once(input_las: str, output_path: Path) -> str:
     """
     Convert LAS/LAZ to a single Cloud Optimized Point Cloud asset.
@@ -2573,6 +2686,35 @@ def _best_ept_asset(project_id: str, dataset_name: str) -> tuple[str, Path] | No
     return best[2], best[3]
 
 
+def _copc_asset_in_dir(dataset_dir: Path) -> Path | None:
+    if not dataset_dir.is_dir():
+        return None
+    preferred = dataset_dir / "output.copc.laz"
+    if preferred.is_file() and preferred.stat().st_size > 0:
+        return preferred
+    candidates = sorted(
+        (path for path in dataset_dir.glob("*.copc.laz") if path.is_file() and path.stat().st_size > 0),
+        key=lambda path: (path.stat().st_mtime, path.name.lower()),
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _best_copc_asset(project_id: str, dataset_name: str) -> tuple[str, Path] | None:
+    safe_project = _safe_project_id(project_id)
+    safe_dataset = _safe_ept_folder_name(dataset_name)
+    project_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project
+    for dataset_dir in (
+        _ept_dataset_dir(safe_project, safe_dataset),
+        _legacy_ept_pointcloud_dataset_dir(safe_project, safe_dataset),
+        _legacy_ept_dataset_dir(safe_project, safe_dataset),
+    ):
+        asset = _copc_asset_in_dir(dataset_dir)
+        if asset:
+            return asset.relative_to(project_root).as_posix(), asset
+    return None
+
+
 def _ept_json_url(base_url: str, project_id: str, dataset_name: str) -> str:
     safe_project = _safe_project_id(project_id)
     safe_dataset = _safe_ept_folder_name(dataset_name)
@@ -2583,17 +2725,26 @@ def _ept_json_url(base_url: str, project_id: str, dataset_name: str) -> str:
     )
 
 
-def _copc_url(base_url: str, project_id: str, dataset_name: str) -> str:
+def _copc_url(base_url: str, project_id: str, dataset_name: str, asset_rel_path: str = "") -> str:
     safe_project = _safe_project_id(project_id)
     safe_dataset = _safe_ept_folder_name(dataset_name)
-    rel_path = f"exports/pointclouds/{safe_dataset}/output.copc.laz"
+    rel_path = asset_rel_path.replace("\\", "/").lstrip("/")
+    if not rel_path:
+        best = _best_copc_asset(safe_project, safe_dataset)
+        rel_path = best[0] if best else f"exports/pointclouds/{safe_dataset}/output.copc.laz"
     return f"{base_url.rstrip('/')}/api/data/projects/{safe_project}/{quote(rel_path, safe='/')}"
 
 
-def _copc_viewer_url(base_url: str, project_id: str, dataset_name: str, display_name: str = "") -> str:
+def _copc_viewer_url(
+    base_url: str,
+    project_id: str,
+    dataset_name: str,
+    display_name: str = "",
+    asset_rel_path: str = "",
+) -> str:
     safe_project = _safe_project_id(project_id)
     safe_dataset = _safe_ept_folder_name(dataset_name)
-    copc_path = f"/api/data/projects/{safe_project}/exports/pointclouds/{safe_dataset}/output.copc.laz"
+    copc_path = _copc_url("", safe_project, safe_dataset, asset_rel_path)
     query = urlencode(
         {
             "copc": copc_path,
@@ -2833,13 +2984,31 @@ def _contains_pointcloud_viewer_asset(folder: Path) -> bool:
         "ept.json",
         "*/ept.json",
         "*/*/ept.json",
-        "output.copc.laz",
-        "*/output.copc.laz",
-        "*/*/output.copc.laz",
+        "*.copc.laz",
+        "*/*.copc.laz",
+        "*/*/*.copc.laz",
     ):
         if any(folder.glob(pattern)):
             return True
     return False
+
+
+def _project_copc_assets(project_id: str) -> list[Path]:
+    safe_project_id = _safe_project_id(project_id)
+    processed_root = _project_processed_root(safe_project_id)
+    roots = (
+        _project_pointcloud_root(safe_project_id),
+        _legacy_project_pointcloud_root(safe_project_id),
+        processed_root,
+    )
+    assets: dict[str, Path] = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for asset in root.rglob("*.copc.laz"):
+            if asset.is_file() and asset.stat().st_size > 0:
+                assets[str(asset.resolve()).lower()] = asset.resolve()
+    return sorted(assets.values(), key=lambda path: (path.stat().st_mtime, path.name.lower()), reverse=True)
 
 
 def _is_3d_model_dataset(folder: Path) -> bool:
@@ -4109,14 +4278,20 @@ def pointcloud_status(
                     add_candidate(child, candidates)
 
     for candidate in candidates:
-        copc_file = candidate / "output.copc.laz"
-        if copc_file.is_file():
+        copc_file = _copc_asset_in_dir(candidate)
+        if copc_file is not None and POTREE_NATIVE_COPC_ENABLED:
             source_name = source_name_for(candidate)
             return {
                 "ready": True,
                 "failed": False,
-                "tileset_url": _copc_viewer_url(base_url, safe_id, candidate.name, source_name),
-                "copc_url": _copc_url(base_url, safe_id, candidate.name),
+                "tileset_url": _copc_viewer_url(
+                    base_url, safe_id, candidate.name, source_name,
+                    copc_file.relative_to(Path(LOCAL_DATA_PATH) / "projects" / safe_id).as_posix(),
+                ),
+                "copc_url": _copc_url(
+                    base_url, safe_id, candidate.name,
+                    copc_file.relative_to(Path(LOCAL_DATA_PATH) / "projects" / safe_id).as_posix(),
+                ),
                 "viewer_type": "copc",
             }
 
@@ -4143,6 +4318,37 @@ def pointcloud_status(
                 "tileset_url": _ept_viewer_url(base_url, safe_id, candidate.name, source_name_for(candidate)),
                 "ept_url": _ept_json_url(base_url, safe_id, candidate.name),
                 "viewer_type": "ept",
+            }
+
+    for candidate in candidates:
+        copc_file = _copc_asset_in_dir(candidate)
+        if copc_file is not None:
+            compatibility_dir = _copc_ept_compat_dir(copc_file)
+            if _ept_asset_quality(compatibility_dir) >= 0:
+                source_name = source_name_for(candidate)
+                return {
+                    "ready": True,
+                    "failed": False,
+                    "tileset_url": _ept_viewer_url(
+                        base_url, safe_id, compatibility_dir.name, source_name
+                    ),
+                    "ept_url": _ept_json_url(base_url, safe_id, compatibility_dir.name),
+                    "copc_url": _copc_url(
+                        base_url, safe_id, candidate.name,
+                        copc_file.relative_to(Path(LOCAL_DATA_PATH) / "projects" / safe_id).as_posix(),
+                    ),
+                    "viewer_type": "ept",
+                    "source_asset_type": "copc",
+                }
+            return {
+                "ready": False,
+                "failed": False,
+                "error": "COPC exists and is waiting for its Potree compatibility index. Run Sync Manual Folders once.",
+                "copc_url": _copc_url(
+                    base_url, safe_id, candidate.name,
+                    copc_file.relative_to(Path(LOCAL_DATA_PATH) / "projects" / safe_id).as_posix(),
+                ),
+                "viewer_type": "pending",
             }
 
     for candidate in candidates:
@@ -6460,7 +6666,9 @@ async def upload_dataset(
 
 
 @app.post("/api/datasets/{project_id}/sync")
-def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
+def sync_manual_datasets(
+    project_id: str, request: Request, background_tasks: BackgroundTasks
+) -> dict[str, str]:
     user = verify_admin(request)
     safe_project_id = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
@@ -6501,17 +6709,86 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
         ]
         if path.is_file() and _ept_asset_quality(path.parent) >= 0
     }
-    manual_copc_dirs = {
-        path.parent
-        for path in [
-            *_project_pointcloud_root(safe_project_id).glob("*/output.copc.laz"),
-            *_legacy_project_pointcloud_root(safe_project_id).glob("*/output.copc.laz"),
-            *processed_dir.glob("*/output.copc.laz"),
-            *processed_dir.glob("*/*/output.copc.laz"),
-            *processed_dir.glob("*/*/*/output.copc.laz"),
-        ]
-        if path.is_file()
-    }
+    manual_copc_dirs = {path.parent for path in _project_copc_assets(safe_project_id)}
+    if not POTREE_NATIVE_COPC_ENABLED:
+        for copc_dir in sorted(manual_copc_dirs, key=lambda path: path.name.lower()):
+            copc_file = _copc_asset_in_dir(copc_dir)
+            if copc_file is None:
+                continue
+            compatibility_dir = _copc_ept_compat_dir(copc_file)
+            if _ept_asset_quality(compatibility_dir) >= 0:
+                manual_ept_dirs.add(compatibility_dir)
+                continue
+
+            source_rel = copc_file.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            folder_rel = copc_dir.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
+            manifest = _read_dataset_manifest(copc_dir)
+            display_name = str(
+                manifest.get("display_name")
+                or manifest.get("source_name")
+                or _read_text_marker(copc_dir / ".source_name.txt")
+                or copc_file.name
+            )
+            dataset_id = str(
+                manifest.get("dataset_id")
+                or tracked_dataset_by_key.get(folder_rel)
+                or tracked_dataset_by_key.get(copc_dir.name)
+                or f"manual-copc-{hashlib.sha1(source_rel.encode('utf-8')).hexdigest()[:12]}"
+            )
+            dataset_id = _safe_dataset_id(dataset_id)
+            existing = _read_dataset_status(safe_project_id, dataset_id) or {}
+            status = {
+                **existing,
+                "status": "Processing",
+                "stage": "Preparing COPC for the current 3D viewer",
+                "progress_percent": "0",
+                "updated_at": _now_iso(),
+                "dataset_id": dataset_id,
+                "dataset_name": display_name,
+                "display_name": display_name,
+                "source_name": display_name,
+                "dataset_type": "pointcloud",
+                "layer_type": "pointcloud",
+                "viewer_type": "pending",
+                "tile_folder": compatibility_dir.name,
+                "tiles_rel_path": compatibility_dir.relative_to(Path(LOCAL_DATA_PATH)).as_posix(),
+                "source_asset_rel_path": source_rel,
+            }
+            _write_dataset_status(safe_project_id, dataset_id, status)
+            _write_dataset_manifest(
+                copc_dir,
+                {
+                    **status,
+                    "viewer_type": "copc",
+                    "asset_name": copc_file.name,
+                    "viewer_dataset_name": compatibility_dir.name,
+                },
+            )
+            _upsert_processing_job(
+                safe_project_id,
+                {
+                    "job_id": dataset_id,
+                    "kind": "pointcloud",
+                    "file_name": display_name,
+                    "status": "Processing",
+                    "stage": "Preparing COPC viewer",
+                    "updated_at": _now_iso(),
+                    "viewer_type": "pending",
+                    "source_asset_rel_path": source_rel,
+                },
+            )
+            background_tasks.add_task(
+                _process_copc_ept_compat_job,
+                safe_project_id,
+                dataset_id,
+                str(copc_file),
+                str(compatibility_dir),
+                display_name,
+            )
+            if not existing:
+                found_new += 1
+        manual_copc_dirs = set()
+
     candidates: list[tuple[Path, str, str, str]] = [
         *[(item, "pointcloud", "pointcloud", "pointcloud_ept") for item in sorted(manual_ept_dirs, key=lambda p: p.name.lower())],
         *[(item, "pointcloud", "pointcloud", "pointcloud_copc") for item in sorted(manual_copc_dirs, key=lambda p: p.name.lower())],
@@ -7659,8 +7936,9 @@ def admin_update_dataset_metadata(
     if not st:
         raise HTTPException(status_code=404, detail="Dataset status not found")
     if payload.name is not None and payload.name.strip():
-        st = _deep_rename_dataset_artifacts(safe_project_id, dataset_id, st, payload.name.strip())
         st["dataset_name"] = payload.name.strip()
+        st["display_name"] = payload.name.strip()
+        st["source_name"] = payload.name.strip()
     if payload.month is not None:
         st["month"] = _normalize_month(payload.month)
     if payload.date is not None:
@@ -7696,8 +7974,9 @@ def admin_rename_dataset_by_id(
     new_name = payload.name.strip()
     if not new_name:
         raise HTTPException(status_code=400, detail="Dataset name is required")
-    st = _deep_rename_dataset_artifacts(safe_project_id, safe_dataset_id, st, new_name)
     st["dataset_name"] = new_name
+    st["display_name"] = new_name
+    st["source_name"] = new_name
     st["updated_at"] = _now_iso()
     _write_dataset_status(safe_project_id, safe_dataset_id, st)
     _sync_dataset_metadata_to_processing_job(safe_project_id, safe_dataset_id, st)
@@ -7893,8 +8172,9 @@ def admin_update_dataset_metadata_by_name(
     safe_dataset_name = os.path.basename(dataset_name.replace("\\", "/").strip().strip("/"))
     dataset_id, st = _admin_dataset_status_by_key(safe_project_id, safe_dataset_name)
     if payload.name is not None and payload.name.strip():
-        st = _deep_rename_dataset_artifacts(safe_project_id, dataset_id, st, payload.name.strip())
         st["dataset_name"] = payload.name.strip()
+        st["display_name"] = payload.name.strip()
+        st["source_name"] = payload.name.strip()
     if payload.month is not None:
         st["month"] = _normalize_month(payload.month)
     if payload.date is not None:
@@ -8362,7 +8642,7 @@ def _serve_project_data_file(project_id: str, file_path: str, request: Request) 
     cleaned_request_path = file_path.replace("\\", "/").lower().lstrip("/")
     if cleaned_request_path.startswith("raw/") and target_path.suffix.lower() in {".las", ".laz"}:
         raise HTTPException(status_code=404, detail="Raw point cloud download is not available")
-    if target_path.name.lower().endswith(".copc.laz") and "/exports/pointclouds/" in f"/{cleaned_request_path}":
+    if target_path.name.lower().endswith(".copc.laz"):
         return _copc_range_response(target_path, request)
     response = FileResponse(str(target_path))
     if cleaned_request_path.startswith("processed/"):
@@ -8573,13 +8853,7 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
         add_ready_pointcloud_name_keys(source_name)
         add_ready_pointcloud_name_keys(ready_ept.parent.name)
 
-    ready_copc_paths = [
-        *_project_pointcloud_root(safe_project_id).glob("*/output.copc.laz"),
-        *_legacy_project_pointcloud_root(safe_project_id).glob("*/output.copc.laz"),
-        *processed_root.glob("*/output.copc.laz"),
-        *processed_root.glob("*/*/output.copc.laz"),
-        *processed_root.glob("*/*/*/output.copc.laz"),
-    ]
+    ready_copc_paths = _project_copc_assets(safe_project_id)
     for ready_copc in ready_copc_paths:
         if not ready_copc.is_file() or (ready_copc.parent / ".conversion_error.txt").is_file():
             continue
@@ -8899,14 +9173,11 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
             )
             listed_rel_paths.add(rel)
 
-        copc_paths = [
-            *_project_pointcloud_root(safe_project_id).glob("*/output.copc.laz"),
-            *_legacy_project_pointcloud_root(safe_project_id).glob("*/output.copc.laz"),
-            *processed_root.glob("*/output.copc.laz"),
-            *processed_root.glob("*/*/output.copc.laz"),
-            *processed_root.glob("*/*/*/output.copc.laz"),
-        ]
+        copc_paths = _project_copc_assets(safe_project_id)
         for copc_file in sorted({p.resolve() for p in copc_paths}, key=lambda p: (p.parent.stat().st_mtime, p.parent.name.lower()), reverse=True):
+            compatibility_dir = _copc_ept_compat_dir(copc_file)
+            if not POTREE_NATIVE_COPC_ENABLED and _ept_asset_quality(compatibility_dir) >= 0:
+                continue
             rel = copc_file.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
             rel_base = copc_file.parent.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
             if rel in listed_rel_paths or rel_base in listed_rel_paths:
@@ -8923,14 +9194,27 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     source_name = source_marker.read_text(encoding="utf-8").strip()
                 except OSError:
                     pass
-            display_name = source_name or f"{copc_file.parent.name}.laz"
+            display_name = source_name or copc_file.name
             dataset_id = str(manifest.get("dataset_id") or copc_file.parent.name)
+            project_asset_rel = copc_file.relative_to(
+                Path(LOCAL_DATA_PATH) / "projects" / safe_project_id
+            ).as_posix()
             pc_row_keys = pointcloud_keys(display_name, copc_file.parent.name, dataset_id, rel_base)
             if pc_row_keys.intersection(listed_pointcloud_keys):
                 listed_rel_paths.add(rel)
                 listed_rel_paths.add(rel_base)
                 continue
-            viewer_url = _copc_viewer_url(base_url, safe_project_id, copc_file.parent.name, display_name)
+            viewer_url = (
+                _copc_viewer_url(
+                    base_url,
+                    safe_project_id,
+                    copc_file.parent.name,
+                    display_name,
+                    project_asset_rel,
+                )
+                if POTREE_NATIVE_COPC_ENABLED
+                else ""
+            )
             _write_dataset_manifest(
                 copc_file.parent,
                 {
@@ -8942,7 +9226,8 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "dataset_type": "pointcloud",
                     "source_name": display_name,
                     "viewer_type": "copc",
-                    "asset_name": "output.copc.laz",
+                    "asset_name": copc_file.name,
+                    "asset_rel_path": project_asset_rel,
                 },
             )
             files.append(
@@ -8952,12 +9237,15 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "kind": "Droid COPC Point Cloud",
                     "type": "PointCloud",
                     "size_bytes": str(copc_file.stat().st_size),
-                    "status": jobs_by_file.get(display_name, {}).get("status", "WEB-READY"),
-                    "asset_status": jobs_by_file.get(display_name, {}).get("status", "WEB-READY"),
+                    "status": "WEB-READY" if POTREE_NATIVE_COPC_ENABLED else "Processing",
+                    "asset_status": "WEB-READY" if POTREE_NATIVE_COPC_ENABLED else "Processing",
+                    "stage": "Preparing COPC viewer" if not POTREE_NATIVE_COPC_ENABLED else "",
                     "file_url": viewer_url,
                     "layer_url": viewer_url,
                     "viewer_url": viewer_url,
-                    "copc_url": _copc_url(base_url, safe_project_id, copc_file.parent.name),
+                    "copc_url": _copc_url(
+                        base_url, safe_project_id, copc_file.parent.name, project_asset_rel
+                    ),
                     "viewer_type": "copc",
                     "file_path": str(copc_file.resolve()),
                     "rel_path": rel,
@@ -9269,8 +9557,8 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
         return 2
 
     canonical_files: list[dict[str, str]] = []
-    pointcloud_best: dict[str, tuple[int, int, dict[str, str]]] = {}
-    pointcloud_order: list[str] = []
+    pointcloud_groups: list[dict[str, object]] = []
+    ignored_identity_keys = {"ept", "copc", "pointcloud", "point-cloud", "pc", "output", "index", "las", "laz"}
     for index, file_row in enumerate(files):
         row = _canonical_file_row(file_row)
         signature = " ".join(
@@ -9280,28 +9568,46 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
         if "pointcloud" not in signature and "point cloud" not in signature:
             canonical_files.append(row)
             continue
-        keys = pointcloud_keys(
-            row.get("canonical_key"),
-            row.get("display_name"),
-            row.get("name"),
-            row.get("dataset_id"),
-            row.get("source_rel_path"),
-            row.get("raw_rel_path"),
-            row.get("rel_path"),
-            row.get("viewer_url"),
-        )
-        key = sorted(keys, key=len)[0] if keys else str(row.get("canonical_key") or row.get("rel_path") or row.get("name"))
-        rank = pointcloud_row_rank(row)
-        if key not in pointcloud_best:
-            pointcloud_best[key] = (rank, index, row)
-            pointcloud_order.append(key)
+        keys = {
+            key for key in pointcloud_keys(
+                row.get("canonical_key"),
+                row.get("display_name"),
+                row.get("name"),
+                row.get("dataset_id"),
+                row.get("source_rel_path"),
+                row.get("raw_rel_path"),
+                row.get("rel_path"),
+            )
+            if len(key) >= 3 and key not in ignored_identity_keys
+        }
+        matching = [group for group in pointcloud_groups if keys.intersection(group["keys"])]
+        if not matching:
+            pointcloud_groups.append({"keys": set(keys), "rows": [(index, row)]})
             continue
-        old_rank, old_index, old_row = pointcloud_best[key]
-        if (rank, index) < (old_rank, old_index):
-            pointcloud_best[key] = (rank, old_index, row)
+        primary = matching[0]
+        primary["keys"].update(keys)
+        primary["rows"].append((index, row))
+        for extra in matching[1:]:
+            primary["keys"].update(extra["keys"])
+            primary["rows"].extend(extra["rows"])
+            pointcloud_groups.remove(extra)
 
-    for key in pointcloud_order:
-        canonical_files.append(pointcloud_best[key][2])
+    for group in pointcloud_groups:
+        ranked_rows = sorted(
+            group["rows"],
+            key=lambda item: (pointcloud_row_rank(item[1]), item[0]),
+        )
+        winner = dict(ranked_rows[0][1])
+        for _, candidate in ranked_rows[1:]:
+            for field, value in candidate.items():
+                if not str(winner.get(field) or "").strip() and str(value or "").strip():
+                    winner[field] = value
+        if str(winner.get("viewer_url") or "").strip():
+            winner["status"] = "WEB-READY"
+            winner["asset_status"] = "WEB-READY"
+            winner["layer_type"] = "pointcloud"
+            winner["dataset_type"] = "pointcloud"
+        canonical_files.append(_canonical_file_row(winner))
 
     _set_cached_project_files(safe_project_id, canonical_files)
     return {"files": canonical_files}

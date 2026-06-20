@@ -7,9 +7,7 @@ set "BACKEND_DIR=%ROOT%\backend"
 set "FRONTEND_DIR=%ROOT%\frontend"
 set "PROJECT_DATA_DIR=%ROOT%\Project_Data"
 set "PYTHON_EXE=%BACKEND_DIR%\venv\Scripts\python.exe"
-set "PROD_DB=%PROJECT_DATA_DIR%\droid_cloud_prod.db"
 set "DEV_DB=%PROJECT_DATA_DIR%\droid_cloud_dev.db"
-set "LEGACY_DB=%PROJECT_DATA_DIR%\issues.db"
 popd
 
 color 0B
@@ -42,21 +40,11 @@ if not exist "%PYTHON_EXE%" (
 
 if not exist "%PROJECT_DATA_DIR%" mkdir "%PROJECT_DATA_DIR%"
 
-if not exist "%PROD_DB%" if exist "%LEGACY_DB%" (
-  echo [INFO] First-time migration: copying legacy issues.db to droid_cloud_prod.db...
-  copy /Y "%LEGACY_DB%" "%PROD_DB%" >nul
-)
-
-if exist "%PROD_DB%" (
-  echo [INFO] Creating fresh dev DB snapshot from live droid_cloud_prod.db...
-  "%PYTHON_EXE%" -c "import pathlib, sqlite3; src=pathlib.Path(r'%PROD_DB%'); dst=pathlib.Path(r'%DEV_DB%'); dst.parent.mkdir(parents=True, exist_ok=True); s=sqlite3.connect(str(src)); d=sqlite3.connect(str(dst)); s.backup(d); s.close(); d.close(); print('Dev DB snapshot ready:', dst)"
-  if errorlevel 1 (
-    echo [ERROR] Failed to snapshot live DB into dev DB.
-    pause
-    exit /b 1
-  )
-) else (
-  echo [WARN] Live DB not found. Dev backend will create a fresh droid_cloud_dev.db.
+if not exist "%DEV_DB%" (
+  echo [ERROR] Dev migration source is missing: "%DEV_DB%"
+  echo [INFO] Live database will not be read or copied by the PostgreSQL Dev launcher.
+  pause
+  exit /b 1
 )
 
 where npm >nul 2>&1
@@ -66,15 +54,47 @@ if errorlevel 1 (
   exit /b 1
 )
 
+powershell -NoProfile -Command "try { $r=Invoke-RestMethod -Uri 'http://127.0.0.1:8001/api/version' -TimeoutSec 2; if($r.dev_mode -eq 'true'){exit 0} } catch {}; exit 1" >nul 2>&1
+if errorlevel 1 goto START_DEV_BACKEND
+echo [INFO] Reusing healthy Dev FastAPI backend on http://127.0.0.1:8001
+goto CHECK_DEV_FRONTEND
+
+:START_DEV_BACKEND
+powershell -NoProfile -Command "if(Get-NetTCPConnection -LocalPort 8001 -State Listen -ErrorAction SilentlyContinue){exit 0}else{exit 1}" >nul 2>&1
+if not errorlevel 1 goto DEV_BACKEND_PORT_ERROR
 echo [INFO] Starting Dev FastAPI backend on http://127.0.0.1:8001
 start "Droid Dev Backend 8001" "%ComSpec%" /k call "%~dp0_Run_Dev_Backend_8001.bat"
 
+:CHECK_DEV_FRONTEND
+powershell -NoProfile -Command "try { $r=Invoke-RestMethod -Uri 'http://127.0.0.1:5173/api/version' -TimeoutSec 2; if($r.dev_mode -eq 'true'){exit 0} } catch {}; exit 1" >nul 2>&1
+if errorlevel 1 goto START_DEV_FRONTEND
+echo [INFO] Reusing healthy Dev React frontend on http://localhost:5173
+goto DEV_READY
+
+:START_DEV_FRONTEND
+powershell -NoProfile -Command "if(Get-NetTCPConnection -LocalPort 5173 -State Listen -ErrorAction SilentlyContinue){exit 0}else{exit 1}" >nul 2>&1
+if not errorlevel 1 goto DEV_FRONTEND_PORT_ERROR
 echo [INFO] Starting Dev React frontend on http://localhost:5173
 start "Droid Dev Frontend 5173" /D "%FRONTEND_DIR%" "%ComSpec%" /k "set VITE_BACKEND_PORT=8001&&call npm run dev"
+goto DEV_READY
+
+:DEV_BACKEND_PORT_ERROR
+echo [ERROR] Port 8001 is occupied by another or unhealthy process.
+echo [FIX] Close that process and run this Dev launcher again.
+pause
+exit /b 1
+
+:DEV_FRONTEND_PORT_ERROR
+echo [ERROR] Port 5173 is occupied by another or unhealthy process.
+echo [FIX] Close that process and run this Dev launcher again.
+pause
+exit /b 1
+
+:DEV_READY
 
 echo.
 echo [READY] Dev world started.
-echo        Backend:  127.0.0.1:8001  DB: Project_Data\droid_cloud_dev.db
+echo        Backend:  127.0.0.1:8001  DB: PostgreSQL/PostGIS droid_master_suite_dev
 echo        Frontend: localhost:5173
 echo.
 pause

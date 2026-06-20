@@ -281,14 +281,15 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
             fileType === 'cad' ? 'CAD' :
               type === 'Reports' ? 'Reports' :
           undefined
+  const preferredViewerUrl = file.viewer_url || file.layer_url || file.file_url
   const rawLayerUrl =
     layerType === 'Reports'
       ? toSameOriginBackendUrl(file.file_url)
       : layerType === '3DModel'
-      ? toSameOriginBackendUrl(file.layer_url) || `${API_BASE}/data/${file.rel_path.replace(/\/$/, '')}/tileset.json`
-      : (file.layer_url || '').toLowerCase().endsWith('tileset.json')
+      ? toSameOriginBackendUrl(preferredViewerUrl) || `${API_BASE}/data/${file.rel_path.replace(/\/$/, '')}/tileset.json`
+      : (preferredViewerUrl || '').toLowerCase().endsWith('tileset.json')
         ? `${API_BASE}/data/${file.rel_path.replace(/\/tileset\.json$/i, '').replace(/\/$/, '')}/{z}/{x}/{y}.png`
-        : toSameOriginBackendUrl(file.layer_url)
+        : toSameOriginBackendUrl(preferredViewerUrl)
   const layerUrl = layerType === 'pointcloud' && rawLayerUrl && isRawPointCloudUrl(rawLayerUrl) ? '' : rawLayerUrl
   const parseBounds = (value?: string): [number, number, number, number] | undefined => {
     if (!value) return undefined
@@ -368,6 +369,7 @@ function datasetMergeKey(
 ): string {
   const stableId = row.datasetId || row.relPath || row.cogRelPath || row.layerUrl || row.filePath || row.fileName
   if (isPointCloudRow(row)) {
+    if (row.datasetId) return `pointcloud:id:${row.datasetId}`
     const canonicalName = normalizedPointCloudName(row.fileName || String(stableId))
     return `pointcloud:${canonicalName || String(stableId).toLowerCase()}`
   }
@@ -509,7 +511,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
 
   const loadRows = useCallback(async (currentProjectId: string, cacheKey: string, cancelledRef: () => boolean) => {
     try {
-      const [jobs, files] = await Promise.all([getProjectJobs(currentProjectId, true), getProjectFiles(currentProjectId, true)])
+      const [jobs, files] = await Promise.all([getProjectJobs(currentProjectId), getProjectFiles(currentProjectId)])
       if (cancelledRef()) return
       const fileRows = files
         .filter((file) => file.kind !== 'Raw Survey Data' && file.kind !== 'Generated Grid Export')

@@ -21,7 +21,32 @@ except ImportError:  # pragma: no cover - lets the legacy SQLite app boot before
     sessionmaker = None  # type: ignore[assignment]
 
 
+def _load_database_environment() -> None:
+    """Load the local backend environment before SQLAlchemy engines are created."""
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    if not env_path.is_file():
+        return
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(env_path, override=False)
+        return
+    except ImportError:
+        pass
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+_load_database_environment()
+
+
 _DATABASE_PATH: Path | None = None
+
+
 def _env_true(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -191,9 +216,16 @@ class PostgresCompatConnection:
 
     def execute(self, statement: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> CompatResult:
         sql, bind_values = _translate_sql(statement, parameters)
+        returns_generated_id = bool(
+            re.match(r"^\s*INSERT\s+INTO\s+(issues|users|activity_logs)\b", sql, flags=re.I)
+            and not re.search(r"\bRETURNING\b", sql, flags=re.I)
+        )
+        if returns_generated_id:
+            sql = f"{sql.rstrip().rstrip(';')} RETURNING id"
         result = self._require_connection().execute(text(sql), bind_values)
         rows = result.mappings().all() if result.returns_rows else []
-        return CompatResult(rows=rows, rowcount=result.rowcount)
+        lastrowid = rows[0].get("id") if returns_generated_id and rows else None
+        return CompatResult(rows=rows, rowcount=result.rowcount, lastrowid=lastrowid)
 
     def commit(self) -> None:
         if self._transaction is not None:
@@ -367,6 +399,36 @@ def _postgres_schema_statements(srid: int) -> list[str]:
         "CREATE INDEX IF NOT EXISTS idx_spatial_features_project ON spatial_features(project_id)",
         "CREATE INDEX IF NOT EXISTS idx_spatial_features_layer ON spatial_features(layer_id)",
         "CREATE INDEX IF NOT EXISTS idx_spatial_features_geom ON spatial_features USING GIST (geom)",
+        f"""
+        CREATE OR REPLACE FUNCTION droid_sync_spatial_feature_geom()
+        RETURNS trigger AS $$
+        DECLARE
+            payload jsonb;
+            geometry_payload jsonb;
+        BEGIN
+            IF NEW.geojson IS NULL OR btrim(NEW.geojson) = '' THEN
+                NEW.geom = NULL;
+                RETURN NEW;
+            END IF;
+            payload = NEW.geojson::jsonb;
+            IF payload->>'type' = 'Feature' THEN
+                geometry_payload = payload->'geometry';
+            ELSIF payload->>'type' = 'FeatureCollection' THEN
+                geometry_payload = payload->'features'->0->'geometry';
+            ELSE
+                geometry_payload = payload;
+            END IF;
+            NEW.geom = ST_SetSRID(ST_GeomFromGeoJSON(geometry_payload::text), {srid});
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+        """,
+        "DROP TRIGGER IF EXISTS trg_spatial_features_sync_geom ON spatial_features",
+        """
+        CREATE TRIGGER trg_spatial_features_sync_geom
+        BEFORE INSERT OR UPDATE OF geojson ON spatial_features
+        FOR EACH ROW EXECUTE FUNCTION droid_sync_spatial_feature_geom()
+        """,
         """
         CREATE TABLE IF NOT EXISTS camera_views (
             id TEXT PRIMARY KEY,

@@ -78,6 +78,14 @@ export type ProjectFile = {
   file_path: string
   rel_path: string
   raw_rel_path?: string
+  display_name?: string
+  viewer_url?: string
+  viewer_type?: 'copc' | 'ept' | string
+  copc_url?: string
+  ept_url?: string
+  asset_status?: string
+  canonical_key?: string
+  source_rel_path?: string
 }
 
 export type DatasetMetadata = {

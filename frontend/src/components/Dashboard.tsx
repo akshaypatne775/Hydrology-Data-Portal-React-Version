@@ -256,7 +256,7 @@ function set3DAssetOnce(assets: Map<string, Project3DAsset>, asset: Project3DAss
 function project3DAssetsFromFiles(files: ProjectFile[]): Project3DAsset[] {
   const assets = new Map<string, Project3DAsset>()
   for (const file of files) {
-    const rawUrl = String(file.layer_url || file.file_url || '').trim()
+    const rawUrl = String(file.viewer_url || file.layer_url || file.file_url || '').trim()
     const url = toSameOriginBackendUrl(rawUrl) || rawUrl
     if (!url) continue
     const signature = [
@@ -562,8 +562,8 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
       }
     }
     void Promise.all([
-      getProjectFiles(selectedProject.id, true),
-      getProjectJobs(selectedProject.id, true),
+      getProjectFiles(selectedProject.id),
+      getProjectJobs(selectedProject.id),
     ])
       .then(async ([files, jobs]) => {
         if (cancelled) return
