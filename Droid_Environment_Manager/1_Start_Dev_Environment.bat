@@ -41,10 +41,8 @@ if not exist "%PYTHON_EXE%" (
 if not exist "%PROJECT_DATA_DIR%" mkdir "%PROJECT_DATA_DIR%"
 
 if not exist "%DEV_DB%" (
-  echo [ERROR] Dev migration source is missing: "%DEV_DB%"
-  echo [INFO] Live database will not be read or copied by the PostgreSQL Dev launcher.
-  pause
-  exit /b 1
+  echo [WARN] Legacy Dev SQLite migration source is missing: "%DEV_DB%"
+  echo [INFO] Continuing because Dev now uses PostgreSQL/PostGIS.
 )
 
 where npm >nul 2>&1
@@ -93,9 +91,28 @@ exit /b 1
 :DEV_READY
 
 echo.
+echo [INFO] Waiting for Dev backend and frontend health checks...
+powershell -NoProfile -Command "$deadline=(Get-Date).AddSeconds(60); do { $backend=$false; $frontend=$false; try { $b=Invoke-RestMethod -Uri 'http://127.0.0.1:8001/api/version' -TimeoutSec 2; $backend=($b.dev_mode -eq 'true') } catch {}; try { $f=Invoke-RestMethod -Uri 'http://127.0.0.1:5173/api/version' -TimeoutSec 2; $frontend=($f.dev_mode -eq 'true') } catch {}; if($backend -and $frontend){exit 0}; Start-Sleep -Seconds 2 } while((Get-Date) -lt $deadline); exit 1"
+if errorlevel 1 goto DEV_START_FAILED
+
+echo.
 echo [READY] Dev world started.
 echo        Backend:  127.0.0.1:8001  DB: PostgreSQL/PostGIS droid_master_suite_dev
 echo        Frontend: localhost:5173
 echo.
+start "" "http://localhost:5173/"
+echo [INFO] Dev portal opened in your default browser.
+echo.
 pause
 endlocal
+exit /b 0
+
+:DEV_START_FAILED
+echo.
+echo [ERROR] Dev services did not become healthy within 60 seconds.
+echo [CHECK] Review the Droid Dev Backend 8001 and Droid Dev Frontend 5173 windows.
+echo [SAFE] Live 8000/4173 services were not changed.
+echo.
+pause
+endlocal
+exit /b 1

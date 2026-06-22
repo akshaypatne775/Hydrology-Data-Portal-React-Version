@@ -447,8 +447,8 @@ function normalizedPointCloudName(name: string): string {
     .split('/')
     .pop()!
     .replace(/\.(copc\.laz|las|laz|json)$/i, '')
-    .replace(/^(ept|copc|pointcloud|point-cloud|pc)[_\-\s]+/i, '')
-    .replace(/[_\-\s]+(ept|copc|pointcloud|point-cloud|pc)$/i, '')
+    .replace(/^(?:ept|copc|pointcloud|point-cloud|pc)(?=[0-9._\-\s])[\W_]*/i, '')
+    .replace(/[\W_]*(?:ept|copc|pointcloud|point-cloud|pc)$/i, '')
     .replace(/[-_][a-f0-9]{8,}$/i, '')
     .replace(/[^a-z0-9]+/g, '')
 }

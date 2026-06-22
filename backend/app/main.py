@@ -1551,6 +1551,11 @@ def _process_copc_ept_compat_job(
             },
         )
     finally:
+        queue_marker = output.parent / f".{output.name}.queued"
+        try:
+            queue_marker.unlink(missing_ok=True)
+        except OSError:
+            pass
         _invalidate_project_files_cache(project_id)
 
 
@@ -1641,12 +1646,37 @@ def process_pointcloud(input_las: str, output_dir: str, dataset_name: str) -> di
                 (output_path / ".crs_note.txt").write_text(prepared_note, encoding="utf-8")
             (output_path / ".viewer_type.txt").write_text("copc", encoding="utf-8")
             (output_path / ".converter.txt").write_text(converter_label, encoding="utf-8")
-            conversion_result = {
-                "asset_type": "copc",
-                "asset_path": str(output_path / "output.copc.laz"),
-                "asset_name": "output.copc.laz",
-                "converter": converter_label,
-            }
+            if POTREE_NATIVE_COPC_ENABLED:
+                conversion_result = {
+                    "asset_type": "copc",
+                    "asset_path": str(output_path / "output.copc.laz"),
+                    "asset_name": "output.copc.laz",
+                    "converter": converter_label,
+                    "viewer_dataset_name": output_path.name,
+                }
+            else:
+                compatibility_path = output_path.with_name(f"{output_path.name}__ept_viewer")
+                try:
+                    ept_converter = _run_ept_converter_once(converter_input, compatibility_path)
+                except RuntimeError as compatibility_exc:
+                    raise OSError(
+                        "COPC was created successfully, but its Potree compatibility index failed. "
+                        f"The original COPC was preserved: {compatibility_exc}"
+                    ) from compatibility_exc
+                if prepared_note:
+                    (compatibility_path / ".crs_note.txt").write_text(prepared_note, encoding="utf-8")
+                (compatibility_path / ".viewer_type.txt").write_text("ept", encoding="utf-8")
+                (compatibility_path / ".converter.txt").write_text(
+                    f"{ept_converter} compatibility index for PDAL COPC", encoding="utf-8"
+                )
+                conversion_result = {
+                    "asset_type": "ept",
+                    "asset_path": str(compatibility_path / "ept.json"),
+                    "asset_name": "ept.json",
+                    "converter": f"{converter_label} + {ept_converter} viewer index",
+                    "viewer_dataset_name": compatibility_path.name,
+                    "copc_asset_path": str(output_path / "output.copc.laz"),
+                }
         except RuntimeError as exc:
             copc_error = str(exc)
             print(f"COPC primary conversion failed; falling back to Untwine EPT: {copc_error}")
@@ -1738,23 +1768,33 @@ def process_pointcloud_ept_job(
         conversion = process_pointcloud(input_las, output_dir, dataset_name)
         converter_label = conversion.get("converter", "Point Cloud")
         viewer_type = conversion.get("asset_type", "ept")
+        viewer_dataset_name = conversion.get("viewer_dataset_name", dataset_name)
+        viewer_output_path = Path(conversion.get("asset_path", output_dir)).parent
         (output_path / ".source_name.txt").write_text(file_name, encoding="utf-8")
+        (viewer_output_path / ".source_name.txt").write_text(file_name, encoding="utf-8")
         if source_hash:
             (output_path / ".source_hash.txt").write_text(source_hash, encoding="utf-8")
+            (viewer_output_path / ".source_hash.txt").write_text(source_hash, encoding="utf-8")
         try:
-            asset_name = "output.copc.laz" if viewer_type == "copc" else "ept.json"
+            asset_name = conversion.get("asset_name") or ("output.copc.laz" if viewer_type == "copc" else "ept.json")
+            manifest_payload = {
+                "project_id": project_id,
+                "dataset_id": job_id,
+                "display_name": file_name,
+                "dataset_name": file_name,
+                "dataset_type": "pointcloud",
+                "source_name": file_name,
+                "viewer_type": viewer_type,
+                "asset_name": asset_name,
+                "converter": converter_label,
+                "viewer_dataset_name": viewer_dataset_name,
+            }
+            _write_dataset_manifest(viewer_output_path, manifest_payload)
             _write_dataset_manifest(
                 output_path,
                 {
-                    "project_id": project_id,
-                    "dataset_id": job_id,
-                    "display_name": file_name,
-                    "dataset_name": file_name,
-                    "dataset_type": "pointcloud",
-                    "source_name": file_name,
-                    "viewer_type": viewer_type,
-                    "asset_name": asset_name,
-                    "converter": converter_label,
+                    **manifest_payload,
+                    "viewer_type": "copc" if (output_path / "output.copc.laz").is_file() else viewer_type,
                 },
             )
         except Exception:
@@ -1767,7 +1807,7 @@ def process_pointcloud_ept_job(
                 "file_name": file_name,
                 "status": "Completed",
                 "updated_at": _now_iso(),
-                "result_url": _pointcloud_viewer_url("", project_id, dataset_name, file_name, viewer_type),
+                "result_url": _pointcloud_viewer_url("", project_id, viewer_dataset_name, file_name, viewer_type),
                 "converter": converter_label,
                 "viewer_type": viewer_type,
             },
@@ -4218,8 +4258,8 @@ def pointcloud_status(
         raw = text.lower()
         canonical = stem
         canonical = canonical.replace(safe_id.lower(), "")
-        canonical = re.sub(r"^(ept|copc|pointcloud|point-cloud|pc)[_\-\s]+", "", canonical, flags=re.IGNORECASE)
-        canonical = re.sub(r"[_\-\s]+(ept|copc|pointcloud|point-cloud|pc)$", "", canonical, flags=re.IGNORECASE)
+        canonical = re.sub(r"^(?:ept|copc|pointcloud|point-cloud|pc)(?=[0-9._\-\s])[\W_]*", "", canonical, flags=re.IGNORECASE)
+        canonical = re.sub(r"[\W_]*(?:ept|copc|pointcloud|point-cloud|pc)$", "", canonical, flags=re.IGNORECASE)
         canonical = re.sub(r"[-_][a-f0-9]{8,}$", "", canonical, flags=re.IGNORECASE)
         canonical = re.sub(r"[^a-z0-9]+", "", canonical)
         return {key for key in {raw, stem, canonical} if key}
@@ -4245,6 +4285,19 @@ def pointcloud_status(
         add_candidate(_ept_dataset_dir(safe_id, safe_tileset_id), candidates)
         add_candidate(_legacy_ept_pointcloud_dataset_dir(safe_id, safe_tileset_id), candidates)
         add_candidate(_legacy_ept_dataset_dir(safe_id, safe_tileset_id), candidates)
+        status = _read_dataset_status(safe_id, safe_tileset_id)
+        if status:
+            tile_folder = str(status.get("tile_folder") or "").strip()
+            if tile_folder:
+                add_candidate(_ept_dataset_dir(safe_id, tile_folder), candidates)
+                add_candidate(_legacy_ept_pointcloud_dataset_dir(safe_id, tile_folder), candidates)
+                add_candidate(_legacy_ept_dataset_dir(safe_id, tile_folder), candidates)
+            for rel_key in ("tiles_rel_path", "source_asset_rel_path"):
+                rel_value = str(status.get(rel_key) or "").replace("\\", "/").strip("/")
+                if not rel_value or ".." in rel_value:
+                    continue
+                status_path = Path(LOCAL_DATA_PATH) / rel_value
+                add_candidate(status_path if status_path.is_dir() else status_path.parent, candidates)
         for job_id in job_match_candidates(tileset_id):
             safe_job_id = _safe_ept_folder_name(job_id)
             add_candidate(_ept_dataset_dir(safe_id, safe_job_id), candidates)
@@ -5961,14 +6014,25 @@ async def complete_upload(
 
     copc_file = output_dir / "output.copc.laz"
     ept_json = output_dir / "ept.json"
-    cached_viewer_type = "copc" if copc_file.is_file() else ""
+    compatibility_dir = output_dir.with_name(f"{output_dir.name}__ept_viewer")
+    compatibility_ready = _ept_asset_quality(compatibility_dir) >= 0
+    cached_viewer_type = (
+        "copc"
+        if copc_file.is_file() and POTREE_NATIVE_COPC_ENABLED
+        else "ept"
+        if copc_file.is_file() and compatibility_ready
+        else ""
+    )
+    cached_viewer_dataset_name = compatibility_dir.name if cached_viewer_type == "ept" else ept_dataset_name
     if cached_viewer_type and existing_hash == content_hash:
         try:
             (output_dir / ".source_name.txt").write_text(safe_name, encoding="utf-8")
             (output_dir / ".viewer_type.txt").write_text(cached_viewer_type, encoding="utf-8")
         except OSError:
             pass
-        cached_viewer_url = _pointcloud_viewer_url(str(request.base_url), safe_project_id, ept_dataset_name, safe_name, cached_viewer_type)
+        cached_viewer_url = _pointcloud_viewer_url(
+            str(request.base_url), safe_project_id, cached_viewer_dataset_name, safe_name, cached_viewer_type
+        )
         _upsert_processing_job(
             safe_project_id,
             {
@@ -5977,7 +6041,9 @@ async def complete_upload(
                 "file_name": safe_name,
                 "status": "Completed",
                 "updated_at": _now_iso(),
-                "result_url": _pointcloud_viewer_url("", safe_project_id, ept_dataset_name, safe_name, cached_viewer_type),
+                "result_url": _pointcloud_viewer_url(
+                    "", safe_project_id, cached_viewer_dataset_name, safe_name, cached_viewer_type
+                ),
                 "viewer_type": cached_viewer_type,
             },
         )
@@ -5991,15 +6057,14 @@ async def complete_upload(
             "project_id": safe_project_id,
             "target_tileset_url": cached_viewer_url,
             "copc_url": _copc_url(str(request.base_url), safe_project_id, ept_dataset_name) if cached_viewer_type == "copc" else "",
-            "ept_url": _ept_json_url(str(request.base_url), safe_project_id, ept_dataset_name) if cached_viewer_type == "ept" else "",
+            "ept_url": _ept_json_url(
+                str(request.base_url), safe_project_id, cached_viewer_dataset_name
+            ) if cached_viewer_type == "ept" else "",
             "viewer_type": cached_viewer_type,
             "tileset_id": ept_dataset_name,
         }
     if ept_json.is_file() and existing_hash == content_hash:
-        print(
-            "Found existing EPT point cloud for same content, but COPC is now the primary output. "
-            "Reprocessing so PDAL COPC can be attempted before Untwine fallback."
-        )
+        print("Existing legacy EPT found; rebuilding the paired COPC and viewer index for this content.")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -6056,12 +6121,22 @@ async def complete_upload(
 
     return {
         "status": "success",
-        "message": "File merged. COPC point cloud processing started in background; Untwine EPT is fallback.",
+        "message": "File merged. COPC storage and Potree viewer index processing started in background.",
         "tileset_url": "PENDING",
         "project_id": safe_project_id,
-        "target_tileset_url": _copc_viewer_url(str(request.base_url), safe_project_id, ept_dataset_name, safe_name),
+        "target_tileset_url": (
+            _copc_viewer_url(str(request.base_url), safe_project_id, ept_dataset_name, safe_name)
+            if POTREE_NATIVE_COPC_ENABLED
+            else _ept_viewer_url(
+                str(request.base_url), safe_project_id, f"{ept_dataset_name}__ept_viewer", safe_name
+            )
+        ),
         "copc_url": _copc_url(str(request.base_url), safe_project_id, ept_dataset_name),
-        "ept_url": _ept_json_url(str(request.base_url), safe_project_id, ept_dataset_name),
+        "ept_url": _ept_json_url(
+            str(request.base_url),
+            safe_project_id,
+            ept_dataset_name if POTREE_NATIVE_COPC_ENABLED else f"{ept_dataset_name}__ept_viewer",
+        ),
         "viewer_type": "pending",
         "tileset_id": ept_dataset_name,
     }
@@ -6777,14 +6852,21 @@ def sync_manual_datasets(
                     "source_asset_rel_path": source_rel,
                 },
             )
-            background_tasks.add_task(
-                _process_copc_ept_compat_job,
-                safe_project_id,
-                dataset_id,
-                str(copc_file),
-                str(compatibility_dir),
-                display_name,
+            queue_marker = compatibility_dir.parent / f".{compatibility_dir.name}.queued"
+            marker_is_fresh = (
+                queue_marker.is_file()
+                and time.time() - queue_marker.stat().st_mtime < 6 * 60 * 60
             )
+            if not marker_is_fresh:
+                queue_marker.write_text(_now_iso(), encoding="utf-8")
+                background_tasks.add_task(
+                    _process_copc_ept_compat_job,
+                    safe_project_id,
+                    dataset_id,
+                    str(copc_file),
+                    str(compatibility_dir),
+                    display_name,
+                )
             if not existing:
                 found_new += 1
         manual_copc_dirs = set()
@@ -8805,8 +8887,8 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
         text = Path(text.replace("\\", "/")).name
         stem = Path(text).stem.lower()
         stem = stem.replace(safe_project_id.lower(), "")
-        stem = re.sub(r"^(ept|copc|pointcloud|point-cloud|pc)[_\-\s]+", "", stem, flags=re.IGNORECASE)
-        stem = re.sub(r"[_\-\s]+(ept|copc|pointcloud|point-cloud|pc)$", "", stem, flags=re.IGNORECASE)
+        stem = re.sub(r"^(?:ept|copc|pointcloud|point-cloud|pc)(?=[0-9._\-\s])[\W_]*", "", stem, flags=re.IGNORECASE)
+        stem = re.sub(r"[\W_]*(?:ept|copc|pointcloud|point-cloud|pc)$", "", stem, flags=re.IGNORECASE)
         stem = re.sub(r"[-_][a-f0-9]{8,}$", "", stem, flags=re.IGNORECASE)
         stem = re.sub(r"[^a-z0-9]+", "", stem)
         return stem
