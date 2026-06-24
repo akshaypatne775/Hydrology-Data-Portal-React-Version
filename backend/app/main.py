@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import base64
 import csv
 import hashlib
@@ -46,7 +46,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 import laspy
 import numpy as np
 from PIL import Image
-from pydantic import BaseModel
 from rio_tiler import colormap as rio_colormap
 from rio_tiler.io import Reader
 
@@ -412,247 +411,54 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 
 
-class IssuePayload(BaseModel):
-    lat: float
-    lng: float
-    title: str
-    description: str
-    status: str = "open"
-
-
-class Issue(IssuePayload):
-    id: int
-
-
-class SpatialFeaturePayload(BaseModel):
-    layer_id: str = ""
-    layer_name: str = "Drawn Shapes"
-    geojson: dict[str, object]
-    plot_id: str = ""
-    owner_name: str = ""
-    structure_type: str = "Unassigned"
-    source_type: str = "drawn"
-
-
-class SpatialFeaturePatchPayload(BaseModel):
-    geojson: dict[str, object] | None = None
-    plot_id: str | None = None
-    owner_name: str | None = None
-    structure_type: str | None = None
-
-
-class PointCloudProcessPayload(BaseModel):
-    filename: str
-    project_id: str = "default-project"
-
-
-class PointCloudSliceBoxPayload(BaseModel):
-    center: list[float]
-    rotation: list[float] = []
-    dimensions: list[float]
-
-
-class PointCloudSliceExportPayload(BaseModel):
-    name: str = "slice-export"
-    box: PointCloudSliceBoxPayload
-    source_asset: str = ""
-    viewer_type: str = ""
-
-
-class AdminManualBulkImportTask(BaseModel):
-    source_folder: str
-    kind: str  # las | ortho | dtm | dsm
-
-
-class AdminManualBulkImportPayload(BaseModel):
-    project_id: str = ""
-    tasks: list[AdminManualBulkImportTask]
-    max_parallel: int = 2
-
-
-class AdminLocateFolderPayload(BaseModel):
-    initial_path: str = ""
-    kind: str = ""
-    mode: str = "folder"
-
-
-class ClientErrorLogPayload(BaseModel):
-    area: str = "frontend"
-    message: str
-    url: str = ""
-    stack: str = ""
-    project_id: str = ""
-    dataset_id: str = ""
-    extra: dict[str, object] | None = None
-
-
-class CompleteUploadPayload(BaseModel):
-    filename: str
-    totalChunks: int
-    project_id: str = "default-project"
-
-
-class CompleteDatasetUploadPayload(BaseModel):
-    filename: str
-    totalChunks: int
-    project_id: str = "default-project"
-    dataset_type: str = ""
-    month: str = ""
-    created_at: str = ""
-    epsg: str = ""
-
-
-class AuthPayload(BaseModel):
-    email: str
-    password: str
-
-
-class ProjectCreatePayload(BaseModel):
-    name: str
-    location: str
-    date: str
-    status: str
-    type: str
-
-
-class ProjectUpdatePayload(BaseModel):
-    name: str = ""
-
-
-class ProjectOut(BaseModel):
-    id: str
-    name: str
-    location: str
-    date: str
-    status: str
-    type: str
-
-
-class ProcessDatasetOut(BaseModel):
-    status: str
-    message: str
-    project_id: str
-    dataset_id: str
-    dataset_name: str
-    cog_path: str
-    cog_tile_url_template: str
-
-
-class FileDeletePayload(BaseModel):
-    rel_path: str
-
-
-class CropMaskPayload(BaseModel):
-    points: list[list[float]]
-
-
-class ProfilePayload(BaseModel):
-    dataset_id: str
-    points: list[list[float]]
-    samples: int = 120
-    corridor_width_m: float = 1.0
-
-
-class VolumePayload(BaseModel):
-    dataset_id: str
-    points: list[list[float]] = []
-    circle_center: list[float] = []
-    circle_radius_m: float = 0.0
-    base_elevation: float | None = None
-
-
-class CrossSectionPayload(BaseModel):
-    project_id: str = ""
-    dataset_id: str = ""
-    dtm_file_path: str = ""
-    line: dict[str, object] | None = None
-    coordinates: list[list[float]] = []
-    samples: int = 180
-
-
-class CompareVolumePayload(BaseModel):
-    dataset_ids: list[str] = []
-
-
-class ContourGeneratePayload(BaseModel):
-    dataset_id: str = ""
-    source_tif: str = ""
-    interval: float = 5.0
-
-
-class DatasetMetaPayload(BaseModel):
-    dataset_id: str
-    month: str = ""
-    dataset_type: str = ""
-
-
-class DatasetOwnerPathMetaPayload(BaseModel):
-    height_offset: float | None = None
-
-
-class AdminProjectPatchPayload(BaseModel):
-    name: str | None = None
-    location: str | None = None
-    date: str | None = None
-    status: str | None = None
-    type: str | None = None
-
-
-class AdminDatasetMetaPayload(BaseModel):
-    dataset_id: str
-    name: str | None = None
-    date: str | None = None
-    status: str | None = None
-    dataset_type: str | None = None
-    month: str | None = None
-    height_offset: float | None = None
-
-
-class AdminDatasetPathMetaPayload(BaseModel):
-    name: str | None = None
-    date: str | None = None
-    status: str | None = None
-    dataset_type: str | None = None
-    month: str | None = None
-    height_offset: float | None = None
-
-
-class AdminDatasetRenamePayload(BaseModel):
-    name: str
-
-
-class AdminUserApprovalPayload(BaseModel):
-    role: str = "user"
-
-
-class AdminUserRolePayload(BaseModel):
-    role: str
-
-
-class AdminUserPasswordResetPayload(BaseModel):
-    password: str
-
-
-class AdminUserUploadAccessPayload(BaseModel):
-    enabled: bool = False
-
-
-class AdminUserLocationRequiredPayload(BaseModel):
-    enabled: bool = True
-
-
-class AdminUserHiddenTabsPayload(BaseModel):
-    hidden_tabs: list[str] = []
-
-
-class CameraViewPayload(BaseModel):
-    name: str
-    lat: float
-    lng: float
-    height: float
-    heading: float
-    pitch: float
-    roll: float = 0.0
+from app.models.admin import (  # noqa: E402
+    AdminBulkDeleteItem,
+    AdminBulkDeletePayload,
+    AdminDatasetMetaPayload,
+    AdminDatasetPathMetaPayload,
+    AdminDatasetRenamePayload,
+    AdminLocateFolderPayload,
+    AdminManualBulkImportPayload,
+    AdminManualBulkImportTask,
+    AdminProjectPatchPayload,
+    AdminUserApprovalPayload,
+    AdminUserHiddenTabsPayload,
+    AdminUserLocationRequiredPayload,
+    AdminUserPasswordResetPayload,
+    AdminUserRolePayload,
+    AdminUserUploadAccessPayload,
+)
+from app.models.analysis import (
+    CompareVolumePayload,
+    CrossSectionPayload,
+    ProfilePayload,
+    VolumePayload,
+)
+from app.models.auth import AuthPayload
+from app.models.datasets import (
+    CompleteDatasetUploadPayload,
+    CompleteUploadPayload,
+    ContourGeneratePayload,
+    CropMaskPayload,
+    DatasetMetaPayload,
+    DatasetOwnerPathMetaPayload,
+    FileDeletePayload,
+    ProcessDatasetOut,
+)
+from app.models.issues import Issue, IssuePayload
+from app.models.misc import ClientErrorLogPayload
+from app.models.pointclouds import (
+    PointCloudProcessPayload,
+    PointCloudSliceBoxPayload,
+    PointCloudSliceExportPayload,
+)
+from app.models.projects import (
+    CameraViewPayload,
+    ProjectCreatePayload,
+    ProjectOut,
+    ProjectUpdatePayload,
+)
+from app.models.spatial import SpatialFeaturePatchPayload, SpatialFeaturePayload
 
 
 def _safe_pointcloud_basename(filename: str) -> str:
@@ -10201,6 +10007,43 @@ def delete_catalog_asset(project_id: str, asset_id: str, request: Request) -> di
     if not safe_asset_id or ".." in safe_asset_id:
         raise HTTPException(status_code=400, detail="Invalid asset id")
     return _purge_catalog_dataset(safe_project_id, safe_asset_id)
+
+
+@app.post("/api/projects/{project_id}/bulk-delete-datasets")
+def bulk_delete_project_datasets(
+    project_id: str,
+    payload: AdminBulkDeletePayload,
+    request: Request,
+) -> dict[str, object]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    deleted: list[str] = []
+    errors: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in payload.items or []:
+        keys = [
+            str(item.dataset_id or "").strip(),
+            str(item.file_name or "").strip(),
+            Path(str(item.rel_path or "").strip()).stem if str(item.rel_path or "").strip() else "",
+        ]
+        for key in keys:
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            try:
+                _purge_catalog_dataset(safe_project_id, key)
+                deleted.append(key)
+            except HTTPException as exc:
+                errors.append({"key": key, "error": str(exc.detail)})
+            except Exception as exc:  # noqa: BLE001
+                errors.append({"key": key, "error": str(exc)[:400]})
+            break
+    if catalog_service.catalog_db_enabled():
+        catalog_service.prune_missing_assets(safe_project_id, LOCAL_DATA_PATH)
+        catalog_service.bump_revision(safe_project_id)
+    _invalidate_project_files_cache(safe_project_id)
+    return {"status": "success", "deleted": deleted, "errors": errors, "deleted_count": len(deleted)}
 
 
 @app.delete("/api/projects/{project_id}/files")
