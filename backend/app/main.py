@@ -58,6 +58,19 @@ from app.utils.spatial_import import (
 )
 from app.services.raster import convert_tif_to_cog, run_rasterio_tiler
 
+
+# --- PHASE 5 EXTRACTED SERVICES ---
+from app.core.security import (_hash_password, _verify_password, _sign_session_token, _unsign_session_token, _token_hash)
+from app.core.middleware import (Debug404Middleware, ActivityTrackingMiddleware, ProtectedDataPathMiddleware)
+from app.dependencies import (_require_user, _get_optional_user, _require_admin, verify_admin, _require_upload_user, _client_ip_for_limit, _enforce_rate_limit)
+from app.services.auth_service import (_create_pending_user, _approval_url, _send_owner_sms, _send_email)
+from app.services.project_service import (get_project_dirs, get_project_dataset_type_dirs, _delete_project_storage, _ensure_project_owner, _is_admin_user_id)
+from app.services.dataset_service import (_infer_dataset_type, _normalize_dataset_type, _raster_layer_type, _read_dataset_status, _write_dataset_status, _read_dataset_manifest, _write_dataset_manifest, _status_manifest_payload, _write_status_manifests, _sync_dataset_metadata_to_processing_job, _delete_dataset_artifacts, admin_delete_dataset_by_name, _deep_rename_dataset_artifacts)
+from app.services.upload_service import (_upload_session_dir, _dataset_upload_session_dir, _ensure_disk_space_for_bytes, _merge_upload_chunks)
+from app.services.analysis_service import (_sample_raster, _interpolate_profile_points, _profile_summary, _volume_for_raster, _dtm_volume_between, _circle_points, _pixel_area_m2)
+from app.services.grid_export_service import (_csv_grid_generator, _dxf_grid_generator, _generate_grid_export_background, _csv_grid_rows, _dxf_grid_rows, _validate_grid_export_request, _grid_export_is_current)
+from app.services.spatial_feature_service import (_ensure_spatial_layer, _insert_spatial_feature, _spatial_row_to_dict, _normalize_spatial_feature_geojson, _can_manage_spatial_feature)
+from app.services.bulk_import_service import (_browse_server_folder, _bulk_scan_files, _admin_manual_bulk_import_background, _prepare_admin_manual_bulk_import, _queue_admin_manual_bulk_import)
 # --- POINT CLOUD SERVICES ---
 from app.services.pointcloud.ept_service import _prepare_las_for_ept, _run_ept_converter_once, process_pointcloud_ept_job, _ept_error_needs_las_bbox_repair, _repair_las_bounding_box, _looks_like_lon_lat_bounds, _utm_epsg_for_lon_lat
 from app.services.pointcloud.copc_service import _run_copc_converter_once, _process_copc_ept_compat_job, _copc_ept_compat_dir, _best_copc_asset, _copc_asset_in_dir
@@ -172,111 +185,10 @@ if find_spec("multipart") is None:
     )
 
 
-class Debug404Middleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
-        if response.status_code == 404 and request.url.path.startswith("/data/"):
-            rel = request.url.path.replace("/data/", "", 1).lstrip("/")
-            expected_path = Path(LOCAL_DATA_PATH) / rel
-            print(
-                f"[DEBUG 404] Frontend requested: {request.url.path} | "
-                f"looked for: {expected_path.resolve()} | exists: {expected_path.exists()}",
-                flush=True,
-            )
-        return response
 
 
-class ActivityTrackingMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
-        if request.url.path in {"/api/auth/logout", "/api/version", "/health"}:
-            return response
-        try:
-            user = _get_optional_user(request)
-            forwarded_for = request.headers.get("x-forwarded-for", "")
-            forwarded_ip = forwarded_for.split(",", 1)[0].strip()
-            ip_address = forwarded_ip or (request.client.host if request.client else "unknown")
-            device_label = request.headers.get("x-droid-device", "").strip()[:160]
-            lat_raw = request.headers.get("x-droid-lat", "").strip()
-            lng_raw = request.headers.get("x-droid-lng", "").strip()
-            accuracy_raw = request.headers.get("x-droid-location-accuracy", "").strip()
-            latitude = float(lat_raw) if lat_raw else None
-            longitude = float(lng_raw) if lng_raw else None
-            location_accuracy = float(accuracy_raw) if accuracy_raw else None
-            with get_db_connection() as connection:
-                connection.execute(
-                    """
-                    INSERT INTO activity_logs (
-                        user_id, ip_address, method, endpoint, device_label,
-                        latitude, longitude, location_accuracy, accessed_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        int(user["id"]) if user else None,
-                        ip_address,
-                        request.method,
-                        request.url.path,
-                        device_label,
-                        latitude,
-                        longitude,
-                        location_accuracy,
-                        _now_iso(),
-                    ),
-                )
-                connection.commit()
-        except Exception as exc:  # noqa: BLE001
-            print(f"Activity tracking failed: {exc}")
-        return response
 
 
-class ProtectedDataPathMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path.replace("\\", "/").lower()
-        if path.startswith("/api/titiler/") or path.startswith("/api/dji-terra/") or path.startswith("/api/ortho-cog/"):
-            source_url = request.query_params.get("url")
-            if source_url:
-                try:
-                    local_root = Path(LOCAL_DATA_PATH).resolve()
-                    target = _local_data_path_from_user_value(source_url)
-                    if target != local_root and not target.is_relative_to(local_root):
-                        return Response(status_code=403)
-                except Exception:  # noqa: BLE001
-                    return Response(status_code=403)
-        user_upload_path = (
-            path.startswith("/api/upload")
-            or path.startswith("/api/complete-upload")
-            or path.startswith("/api/complete-dataset-upload")
-            or path == "/api/process-dataset"
-            or path == "/api/process-pointcloud"
-            or path == "/api/dataset-metadata"
-        )
-        admin_only_upload = (
-            "metadata-probe" in path
-            or re.match(r"^/api/datasets/[^/]+/(sync|open-manual-folder)$", path) is not None
-            or ("manual" in path and ("folder" in path or "sync" in path))
-        )
-        protected_upload = user_upload_path or admin_only_upload
-        if protected_upload and request.method.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
-            try:
-                user = _require_user(request)
-                is_admin = str(user.get("role", "")).lower() == "admin"
-                can_upload = bool(user.get("can_upload_data", False))
-                if admin_only_upload and not is_admin:
-                    return Response(status_code=403)
-                if user_upload_path and not (is_admin or can_upload):
-                    return Response(status_code=403)
-            except HTTPException:
-                return Response(status_code=403)
-        if path.startswith("/data/") and ("/raw/" in path or path.endswith(".pdf")):
-            # Raw assets and PDFs must be served through authenticated /api endpoints
-            # so project paths are not exposed in the browser.
-            try:
-                _require_user(request)
-            except HTTPException:
-                return Response(status_code=404)
-            return Response(status_code=404)
-        return await call_next(request)
 
 
 app.add_middleware(ProtectedDataPathMiddleware)
@@ -399,68 +311,10 @@ def _normalize_epsg_input(value: str | None) -> str:
     return f"EPSG:{clean}"
 
 
-def _infer_dataset_type(name: str) -> str:
-    lowered = name.lower()
-    suffix = Path(lowered).suffix
-    if "dtm" in lowered or "dem" in lowered:
-        return "dtm"
-    if "dsm" in lowered:
-        return "dsm"
-    if "ortho" in lowered:
-        return "ortho"
-    if suffix == ".csv":
-        return "csv"
-    if suffix == ".zip":
-        return "3dmodel"
-    if suffix in (".kml", ".geojson"):
-        return "vector"
-    if suffix == ".dwg":
-        return "cad"
-    if suffix == ".pdf":
-        return "reports"
-    if suffix in (".tif", ".tiff"):
-        return "ortho"
-    if suffix in (".las", ".laz"):
-        return "pointcloud"
-    return "dataset"
 
 
-def _raster_layer_type(dataset_type: str, name: str = "") -> str:
-    normalized = _normalize_dataset_type(dataset_type, name)
-    if normalized == "dtm":
-        return "DTM"
-    if normalized == "dsm":
-        return "DSM"
-    if normalized == "ortho":
-        return "Ortho"
-    return "cog"
 
 
-def _normalize_dataset_type(value: str, fallback_name: str = "") -> str:
-    normalized = (value or "").strip().lower().replace(" ", "")
-    aliases = {
-        "orthomosaic": "ortho",
-        "ortho": "ortho",
-        "dtm": "dtm",
-        "dem": "dtm",
-        "dsm": "dsm",
-        "pointcloud": "pointcloud",
-        "3dmodel": "3dmodel",
-        "3dtiles": "3dmodel",
-        "cesium3dtiles": "3dmodel",
-        "las": "pointcloud",
-        "laz": "pointcloud",
-        "csv": "csv",
-        "vector": "vector",
-        "kml": "vector",
-        "geojson": "vector",
-        "cad": "cad",
-        "dwg": "cad",
-        "pdf": "reports",
-        "report": "reports",
-        "reports": "reports",
-    }
-    return aliases.get(normalized) or _infer_dataset_type(fallback_name)
 
 
 def _normalize_month(value: str) -> str:
@@ -813,37 +667,10 @@ async def ortho_cog_tile(
     )
 
 
-def _upload_session_dir(filename: str, total_chunks: int, project_id: str) -> Path:
-    """Stable temp folder for one logical upload (same as frontend chunk sequence)."""
-    safe_name = _safe_pointcloud_basename(filename)
-    digest = hashlib.sha256(
-        f"{project_id}\0{safe_name}\0{total_chunks}".encode("utf-8"),
-    ).hexdigest()
-    return Path(LOCAL_DATA_PATH) / "uploads" / "chunks" / digest
 
 
-def _dataset_upload_session_dir(filename: str, total_chunks: int, project_id: str) -> Path:
-    """Stable temp folder for one large raster dataset upload."""
-    safe_name = _safe_dataset_upload_basename(filename)
-    digest = hashlib.sha256(
-        f"dataset\0{project_id}\0{safe_name}\0{total_chunks}".encode("utf-8"),
-    ).hexdigest()
-    return Path(LOCAL_DATA_PATH) / "uploads" / "dataset_chunks" / digest
 
 
-def _ensure_disk_space_for_bytes(path_on_volume: Path, required_extra: int) -> None:
-    """Fail fast if volume cannot hold required_extra bytes (with headroom)."""
-    path_on_volume.mkdir(parents=True, exist_ok=True)
-    usage = shutil.disk_usage(path_on_volume)
-    if usage.free < required_extra + DISK_HEADROOM_BYTES:
-        raise HTTPException(
-            status_code=507,
-            detail=(
-                "Insufficient disk space for this upload. "
-                f"Need at least {required_extra + DISK_HEADROOM_BYTES} bytes free "
-                f"(including {DISK_HEADROOM_BYTES} bytes headroom)."
-            ),
-        )
 
 
 
@@ -1578,15 +1405,6 @@ def _safe_project_id(project_id: str) -> str:
     return project_id
 
 
-def get_project_dirs(project_id: str) -> tuple[Path, Path]:
-    """Per-project raw uploads and Python Rasterio XYZ output under Project_Data/projects."""
-    safe = _safe_project_id(project_id)
-    project_dir = Path(LOCAL_DATA_PATH) / "projects" / safe
-    raw_dir = project_dir / "raw"
-    processed_dir = project_dir / "processed"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    processed_dir.mkdir(parents=True, exist_ok=True)
-    return raw_dir, processed_dir
 
 
 def _dataset_type_folder(dataset_type: str) -> str:
@@ -1596,14 +1414,6 @@ def _dataset_type_folder(dataset_type: str) -> str:
     return "other"
 
 
-def get_project_dataset_type_dirs(project_id: str, dataset_type: str) -> tuple[Path, Path]:
-    raw_root, processed_root = get_project_dirs(project_id)
-    folder = _dataset_type_folder(dataset_type)
-    raw_dir = raw_root / folder
-    processed_dir = processed_root / folder
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    processed_dir.mkdir(parents=True, exist_ok=True)
-    return raw_dir, processed_dir
 
 
 def _safe_tileset_id(tileset_id: str) -> str:
@@ -1806,70 +1616,12 @@ def _manifest_target_for(path: Path) -> Path:
     return path / _dataset_manifest_name() if path.is_dir() else path.parent / _dataset_manifest_name()
 
 
-def _read_dataset_manifest(path: Path) -> dict[str, str]:
-    manifest = path if path.name == _dataset_manifest_name() else _manifest_target_for(path)
-    if not manifest.is_file():
-        return {}
-    try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            return {str(k): str(v) for k, v in data.items()}
-    except (OSError, json.JSONDecodeError, TypeError):
-        return {}
-    return {}
 
 
-def _write_dataset_manifest(path: Path, payload: dict[str, object]) -> None:
-    try:
-        target = _manifest_target_for(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        current = _read_dataset_manifest(target)
-        current.update({str(k): str(v) for k, v in payload.items() if v is not None})
-        current["updated_at"] = _now_iso()
-        target.write_text(json.dumps(current, ensure_ascii=True, indent=2), encoding="utf-8")
-    except OSError:
-        pass
 
 
-def _status_manifest_payload(project_id: str, dataset_id: str, st: dict[str, str]) -> dict[str, str]:
-    return {
-        "project_id": project_id,
-        "dataset_id": dataset_id,
-        "display_name": str(st.get("dataset_name") or dataset_id),
-        "dataset_type": str(st.get("dataset_type") or ""),
-        "raw_rel_path": str(st.get("raw_rel_path") or ""),
-        "rel_path": str(st.get("rel_path") or st.get("tiles_rel_path") or st.get("cog_rel_path") or ""),
-        "source_name": str(st.get("source_name") or st.get("dataset_name") or dataset_id),
-    }
 
 
-def _write_status_manifests(project_id: str, dataset_id: str, st: dict[str, str]) -> None:
-    payload = _status_manifest_payload(project_id, dataset_id, st)
-    _write_dataset_manifest(_dataset_dir(project_id, dataset_id), payload)
-    for key in (
-        "raw_rel_path",
-        "tiles_rel_path",
-        "tileset_rel_path",
-        "vector_rel_path",
-        "model_rel_path",
-        "cog_rel_path",
-    ):
-        rel = str(st.get(key) or "").strip().replace("\\", "/").lstrip("/")
-        if not rel or ".." in rel:
-            continue
-        target = Path(LOCAL_DATA_PATH) / rel
-        if target.exists():
-            _write_dataset_manifest(target, payload)
-    tile_folder = str(st.get("tile_folder") or "").strip()
-    if tile_folder:
-        _, processed_root = get_project_dirs(project_id)
-        for target in (
-            processed_root / tile_folder,
-            processed_root / _dataset_type_folder(str(st.get("dataset_type") or "")) / tile_folder,
-            _ept_dataset_dir(project_id, tile_folder),
-        ):
-            if target.exists():
-                _write_dataset_manifest(target, payload)
 
 
 def _processing_jobs_file() -> Path:
@@ -2127,72 +1879,10 @@ def _remove_project_processing_jobs(project_id: str) -> None:
         _write_processing_jobs(jobs)
 
 
-def _sync_dataset_metadata_to_processing_job(project_id: str, dataset_id: str, st: dict[str, str]) -> None:
-    jobs = _read_processing_jobs()
-    current = jobs.get(project_id, [])
-    matched = False
-    for item in current:
-        if item.get("job_id") != dataset_id:
-            continue
-        matched = True
-        item["file_name"] = str(st.get("dataset_name") or item.get("file_name") or dataset_id)
-        item["status"] = str(st.get("status") or item.get("status") or "Completed")
-        item["updated_at"] = str(st.get("updated_at") or _now_iso())
-        for key in (
-            "height_offset",
-            "dataset_type",
-            "month",
-            "raw_rel_path",
-            "tiles_rel_path",
-            "tileset_rel_path",
-            "cog_path",
-            "cog_rel_path",
-            "rescale_min",
-            "rescale_max",
-            "bounds_wgs84",
-        ):
-            if key in st:
-                item[key] = str(st.get(key) or "")
-        break
-    if not matched:
-        current.insert(
-            0,
-            {
-                "job_id": dataset_id,
-                "kind": str(st.get("dataset_type") or "dataset"),
-                "file_name": str(st.get("dataset_name") or dataset_id),
-                "status": str(st.get("status") or "Completed"),
-                "updated_at": str(st.get("updated_at") or _now_iso()),
-                "height_offset": str(st.get("height_offset") or ""),
-                "dataset_type": str(st.get("dataset_type") or ""),
-            },
-        )
-    jobs[project_id] = current[:200]
-    _write_processing_jobs(jobs)
 
 
-def _write_dataset_status(project_id: str, dataset_id: str, payload: dict[str, str]) -> None:
-    status_path = _dataset_status_file(project_id, dataset_id)
-    status_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        status_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
-        _write_status_manifests(project_id, dataset_id, payload)
-    except OSError:
-        pass
-    catalog_service.mirror_dataset_status(project_id, dataset_id, payload)
 
 
-def _read_dataset_status(project_id: str, dataset_id: str) -> dict[str, str] | None:
-    status_path = _dataset_status_file(project_id, dataset_id)
-    if not status_path.is_file():
-        return None
-    try:
-        data = json.loads(status_path.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            return {str(k): str(v) for k, v in data.items()}
-    except (OSError, json.JSONDecodeError):
-        return None
-    return None
 
 
 def _pointcloud_slice_exports_root(project_id: str, dataset_id: str) -> Path:
@@ -2410,162 +2100,14 @@ def _safe_spatial_id(value: str, label: str = "id") -> str:
     return clean
 
 
-def _normalize_spatial_feature_geojson(raw: dict[str, object]) -> tuple[dict[str, object], str]:
-    if not isinstance(raw, dict):
-        raise HTTPException(status_code=400, detail="Invalid GeoJSON")
-    geo_type = str(raw.get("type") or "")
-    if geo_type == "Feature":
-        geometry = raw.get("geometry")
-        if not isinstance(geometry, dict):
-            raise HTTPException(status_code=400, detail="GeoJSON Feature geometry is required")
-        feature = dict(raw)
-        props = feature.get("properties")
-        feature["properties"] = props if isinstance(props, dict) else {}
-        geometry_type = str(geometry.get("type") or "")
-    else:
-        geometry = raw
-        geometry_type = geo_type
-        feature = {"type": "Feature", "properties": {}, "geometry": geometry}
-    if geometry_type not in {"Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon"}:
-        raise HTTPException(status_code=400, detail="Unsupported geometry type")
-    return feature, geometry_type
 
 
-def _can_manage_spatial_feature(user: dict[str, object], feature_owner_user_id: int) -> bool:
-    return str(user.get("role", "")).lower() == "admin" or int(user["id"]) == int(feature_owner_user_id)
 
 
-def _spatial_row_to_dict(row: sqlite3.Row, user: dict[str, object] | None = None) -> dict[str, object]:
-    try:
-        geojson_data = json.loads(str(row["geojson"]))
-    except (TypeError, json.JSONDecodeError):
-        geojson_data = {"type": "Feature", "properties": {}, "geometry": None}
-    owner_user_id = int(row["owner_user_id"])
-    can_manage = _can_manage_spatial_feature(user, owner_user_id) if user else True
-    return {
-        "id": str(row["id"]),
-        "project_id": str(row["project_id"]),
-        "layer_id": str(row["layer_id"]),
-        "owner_user_id": owner_user_id,
-        "geometry_type": str(row["geometry_type"]),
-        "geojson": geojson_data,
-        "plot_id": str(row["plot_id"] or ""),
-        "owner_name": str(row["owner_name"] or ""),
-        "structure_type": str(row["structure_type"] or "Unassigned"),
-        "fill_color": str(row["fill_color"] or "#f59e0b"),
-        "stroke_color": str(row["stroke_color"] or "#f59e0b"),
-        "source_type": str(row["source_type"] or ""),
-        "can_edit": can_manage,
-        "can_delete": can_manage,
-        "created_at": str(row["created_at"] or ""),
-        "updated_at": str(row["updated_at"] or ""),
-    }
 
 
-def _ensure_spatial_layer(
-    connection: sqlite3.Connection,
-    project_id: str,
-    user_id: int,
-    layer_id: str,
-    layer_name: str,
-    source_type: str,
-) -> str:
-    if layer_id:
-        safe_layer_id = _safe_spatial_id(layer_id, "layer_id")
-        row = connection.execute(
-            "SELECT id FROM spatial_layers WHERE id = ? AND project_id = ?",
-            (safe_layer_id, project_id),
-        ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Spatial layer not found")
-        return safe_layer_id
-
-    clean_name = (layer_name or "Drawn Shapes").strip()[:180] or "Drawn Shapes"
-    existing = connection.execute(
-        """
-        SELECT id FROM spatial_layers
-        WHERE project_id = ? AND name = ? AND source_type = ?
-        ORDER BY created_at ASC
-        LIMIT 1
-        """,
-        (project_id, clean_name, source_type),
-    ).fetchone()
-    if existing:
-        return str(existing["id"])
-
-    new_layer_id = f"layer_{secrets.token_hex(8)}"
-    now = _now_iso()
-    connection.execute(
-        """
-        INSERT INTO spatial_layers (
-            id, project_id, owner_user_id, name, source_type, created_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (new_layer_id, project_id, user_id, clean_name, source_type, now, now),
-    )
-    return new_layer_id
 
 
-def _insert_spatial_feature(
-    connection: sqlite3.Connection,
-    project_id: str,
-    user_id: int,
-    layer_id: str,
-    geojson_data: dict[str, object],
-    plot_id: str,
-    owner_name: str,
-    structure_type: str,
-    source_type: str,
-    user_context: dict[str, object] | None = None,
-) -> dict[str, object]:
-    feature, geometry_type = _normalize_spatial_feature_geojson(geojson_data)
-    clean_structure = normalize_structure_type(structure_type)
-    colors = style_for_structure(clean_structure)
-    now = _now_iso()
-    feature_id = f"spatial_{secrets.token_hex(8)}"
-    properties = feature.get("properties")
-    if not isinstance(properties, dict):
-        properties = {}
-    properties.update(
-        {
-            "plotId": plot_id,
-            "ownerName": owner_name,
-            "structureType": clean_structure,
-        },
-    )
-    feature["properties"] = properties
-    connection.execute(
-        """
-        INSERT INTO spatial_features (
-            id, project_id, layer_id, owner_user_id, geometry_type, geojson,
-            plot_id, owner_name, structure_type, fill_color, stroke_color,
-            source_type, created_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            feature_id,
-            project_id,
-            layer_id,
-            user_id,
-            geometry_type,
-            json.dumps(feature, ensure_ascii=True),
-            plot_id[:120],
-            owner_name[:180],
-            clean_structure,
-            colors["fill_color"],
-            colors["stroke_color"],
-            source_type,
-            now,
-            now,
-        ),
-    )
-    row = connection.execute(
-        "SELECT * FROM spatial_features WHERE id = ?",
-        (feature_id,),
-    ).fetchone()
-    return _spatial_row_to_dict(row, user_context)
 
 
 def _is_valid_tile_dataset(folder: Path) -> bool:
@@ -2695,138 +2237,22 @@ def _normalize_hidden_tabs(value: object) -> list[str]:
     return clean
 
 
-def _hash_password(password: str) -> str:
-    if len(password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
-    salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
-    return f"pbkdf2_sha256${salt.hex()}${digest.hex()}"
 
 
-def _verify_password(password: str, stored: str) -> bool:
-    try:
-        algo, salt_hex, digest_hex = stored.split("$", 2)
-        if algo != "pbkdf2_sha256":
-            return False
-        salt = bytes.fromhex(salt_hex)
-        expected = bytes.fromhex(digest_hex)
-    except (ValueError, TypeError):
-        return False
-    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
-    return hmac.compare_digest(actual, expected)
 
 
-def _sign_session_token(raw_token: str) -> str:
-    sig = hmac.new(SESSION_SIGNING_SECRET, raw_token.encode("utf-8"), hashlib.sha256).digest()
-    return f"{raw_token}.{base64.urlsafe_b64encode(sig).decode('utf-8').rstrip('=')}"
 
 
-def _unsign_session_token(signed_token: str) -> str | None:
-    try:
-        raw, sig = signed_token.rsplit(".", 1)
-    except ValueError:
-        return None
-    expected = _sign_session_token(raw).rsplit(".", 1)[1]
-    if not hmac.compare_digest(sig, expected):
-        return None
-    return raw
 
 
-def _token_hash(raw_token: str) -> str:
-    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
 
-def _send_owner_sms(message: str) -> None:
-    sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
-    token = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
-    from_number = os.getenv("TWILIO_FROM_NUMBER", "").strip()
-    to_number = os.getenv("ADMIN_ALERT_PHONE", ADMIN_ALERT_PHONE).strip()
-    if not (sid and token and from_number and to_number):
-        print(f"[SMS pending configuration] {message}")
-        return
-    payload = urlencode({"From": from_number, "To": to_number, "Body": message}).encode("utf-8")
-    req = UrlRequest(
-        f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
-        data=payload,
-        method="POST",
-    )
-    auth = base64.b64encode(f"{sid}:{token}".encode("utf-8")).decode("ascii")
-    req.add_header("Authorization", f"Basic {auth}")
-    try:
-        with urlopen(req, timeout=8) as response:
-            response.read()
-    except URLError as exc:
-        print(f"SMS send failed: {exc}")
 
 
-def _send_email(to_email: str, subject: str, body: str) -> None:
-    host = os.getenv("SMTP_HOST", "").strip()
-    port = int(os.getenv("SMTP_PORT", "587"))
-    username = os.getenv("SMTP_USERNAME", "").strip()
-    password = os.getenv("SMTP_PASSWORD", "").strip().replace(" ", "")
-    from_email = os.getenv("SMTP_FROM_EMAIL", username or OWNER_APPROVAL_EMAIL).strip()
-    if not (host and from_email):
-        print(f"[Email pending configuration] To: {to_email}\nSubject: {subject}\n{body}")
-        return
-    msg = EmailMessage()
-    msg["From"] = from_email
-    msg["To"] = to_email
-    msg["Subject"] = subject
-    msg.set_content(body)
-    try:
-        with smtplib.SMTP(host, port, timeout=10) as server:
-            server.starttls()
-            if username and password:
-                server.login(username, password)
-            server.send_message(msg)
-    except OSError as exc:
-        print(f"Email send failed: {exc}")
 
 
-def _approval_url(request: Request, token: str) -> str:
-    base = str(request.base_url).rstrip("/")
-    return f"{base}/api/approvals/approve?token={quote(token)}"
 
 
-def _create_pending_user(email: str, password: str, requested_role: str, request: Request) -> dict[str, str]:
-    normalized_email = email.strip().lower()
-    if "@" not in normalized_email:
-        raise HTTPException(status_code=400, detail="Invalid email")
-    role = "admin" if requested_role == "admin" else "user"
-    password_hash = _hash_password(password)
-    created_at = _now_iso()
-    approval_token = secrets.token_urlsafe(40)
-    approval_hash = _token_hash(approval_token)
-    try:
-        with get_db_connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO users (
-                    email, password_hash, created_at, role, approval_status,
-                    requested_role, approval_token_hash
-                )
-                VALUES (?, ?, ?, 'user', 'pending', ?, ?)
-                """,
-                (normalized_email, password_hash, created_at, role, approval_hash),
-            )
-            connection.commit()
-    except sqlite3.IntegrityError as exc:
-        raise HTTPException(status_code=409, detail="Email already registered") from exc
-
-    approve_link = _approval_url(request, approval_token)
-    _send_email(
-        OWNER_APPROVAL_EMAIL,
-        f"Droid Cloud approval request: {normalized_email}",
-        (
-            f"New {role} access request for Droid Cloud.\n\n"
-            f"Email: {normalized_email}\n"
-            f"Requested role: {role}\n"
-            f"Approve here: {approve_link}\n\n"
-            "Only approve this request if you recognize the person."
-        ),
-    )
-    _send_owner_sms(f"Droid Cloud approval request: {normalized_email} requested {role} access.")
-    return {"status": "pending", "email": normalized_email, "requested_role": role}
 
 
 def _set_session_cookie(response: Response, raw_token: str) -> None:
@@ -2847,170 +2273,22 @@ def _clear_session_auth_cache() -> None:
     _SESSION_USER_CACHE.clear()
 
 
-def _require_user(request: Request) -> dict[str, object]:
-    signed = request.cookies.get(SESSION_COOKIE_NAME)
-    if not signed:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    raw = _unsign_session_token(signed)
-    if not raw:
-        raise HTTPException(status_code=401, detail="Invalid session token")
-
-    now_ts = int(datetime.now(timezone.utc).timestamp())
-    token_hash = _token_hash(raw)
-    cached = _SESSION_USER_CACHE.get(token_hash)
-    if cached:
-        cached_until, cached_expires_at, cached_user = cached
-        if cached_until >= time.time() and cached_expires_at >= now_ts:
-            return dict(cached_user)
-        _SESSION_USER_CACHE.pop(token_hash, None)
-
-    with get_db_connection() as connection:
-        row = connection.execute(
-            """
-            SELECT
-                s.expires_at,
-                u.id AS user_id,
-                u.email,
-                u.role,
-                u.approval_status,
-                u.can_access_catalog,
-                u.can_upload_data,
-                u.location_required,
-                u.hidden_tabs
-            FROM sessions s
-            JOIN users u ON u.id = s.user_id
-            WHERE s.token_hash = ?
-            """,
-            (token_hash,),
-        ).fetchone()
-    if not row:
-        raise HTTPException(status_code=401, detail="Session expired")
-    expires_at = int(row["expires_at"])
-    if expires_at < now_ts:
-        if expires_at + SESSION_RENEW_GRACE_SECONDS < now_ts:
-            raise HTTPException(status_code=401, detail="Session expired")
-        expires_at = now_ts + SESSION_TTL_SECONDS
-        with get_db_connection() as connection:
-            connection.execute(
-                "UPDATE sessions SET expires_at = ? WHERE token_hash = ?",
-                (expires_at, token_hash),
-            )
-            connection.commit()
-    elif expires_at - now_ts < SESSION_REFRESH_THRESHOLD_SECONDS:
-        expires_at = now_ts + SESSION_TTL_SECONDS
-        with get_db_connection() as connection:
-            connection.execute(
-                "UPDATE sessions SET expires_at = ? WHERE token_hash = ?",
-                (expires_at, token_hash),
-            )
-            connection.commit()
-    if str(row["approval_status"] or "pending").lower() != "approved":
-        raise HTTPException(status_code=403, detail="Account approval is pending")
-    user = {
-        "id": int(row["user_id"]),
-        "email": str(row["email"]),
-        "role": str(row["role"] or "user"),
-        "can_access_catalog": bool(row["can_access_catalog"]),
-        "can_upload_data": bool(row["can_upload_data"]),
-        "location_required": False if str(row["role"] or "user").lower() == "admin" else bool(row["location_required"]),
-        "hidden_tabs": _normalize_hidden_tabs(row["hidden_tabs"]),
-        "approval_status": str(row["approval_status"] or "pending"),
-    }
-    _SESSION_USER_CACHE[token_hash] = (time.time() + SESSION_AUTH_CACHE_SECONDS, expires_at, dict(user))
-    return user
 
 
-def _get_optional_user(request: Request) -> dict[str, object] | None:
-    try:
-        return _require_user(request)
-    except HTTPException:
-        return None
 
 
-def _require_admin(request: Request) -> dict[str, object]:
-    user = _require_user(request)
-    if str(user.get("role", "")).lower() != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return user
 
 
-def verify_admin(request: Request) -> dict[str, object]:
-    return _require_admin(request)
 
 
-def _require_upload_user(request: Request) -> dict[str, object]:
-    user = _require_user(request)
-    is_admin = str(user.get("role", "")).lower() == "admin"
-    if not is_admin and not bool(user.get("can_upload_data", False)):
-        raise HTTPException(status_code=403, detail="Upload access required")
-    return user
 
 
-def _client_ip_for_limit(request: Request) -> str:
-    forwarded_for = request.headers.get("x-forwarded-for", "")
-    forwarded_ip = forwarded_for.split(",", 1)[0].strip()
-    return forwarded_ip or (request.client.host if request.client else "unknown")
 
 
-def _enforce_rate_limit(
-    request: Request,
-    bucket_name: str,
-    limit: int = RATE_LIMIT_HEAVY_REQUESTS,
-    window_seconds: float = RATE_LIMIT_WINDOW_SECONDS,
-) -> None:
-    # Chunked uploads legitimately send many sequential requests. Authentication,
-    # project access checks, disk limits, and completion processing still protect
-    # the upload flow; the generic heavy-request limiter must not block chunks.
-    if request.url.path in {"/api/upload-chunk", "/api/upload-dataset-chunk"}:
-        return
-    now = time.monotonic()
-    cutoff = now - window_seconds
-    ip_address = _client_ip_for_limit(request)
-    key = f"{bucket_name}:{ip_address}"
-    bucket = [stamp for stamp in _RATE_LIMIT_BUCKETS.get(key, []) if stamp >= cutoff]
-    if len(bucket) >= limit:
-        retry_after = max(1, int(window_seconds - (now - bucket[0])))
-        raise HTTPException(
-            status_code=429,
-            detail=f"Too many requests. Please try again in {retry_after} seconds.",
-            headers={"Retry-After": str(retry_after)},
-        )
-    bucket.append(now)
-    _RATE_LIMIT_BUCKETS[key] = bucket
-    if len(_RATE_LIMIT_BUCKETS) > 10_000:
-        for stale_key in list(_RATE_LIMIT_BUCKETS):
-            _RATE_LIMIT_BUCKETS[stale_key] = [
-                stamp for stamp in _RATE_LIMIT_BUCKETS[stale_key] if stamp >= cutoff
-            ]
-            if not _RATE_LIMIT_BUCKETS[stale_key]:
-                _RATE_LIMIT_BUCKETS.pop(stale_key, None)
 
 
-def _is_admin_user_id(user_id: int) -> bool:
-    with get_db_connection() as connection:
-        row = connection.execute(
-            "SELECT role FROM users WHERE id = ?",
-            (user_id,),
-        ).fetchone()
-    return bool(row and str(row["role"]).lower() == "admin")
 
 
-def _ensure_project_owner(user_id: int, project_id: str) -> None:
-    if _is_admin_user_id(user_id):
-        with get_db_connection() as connection:
-            row = connection.execute(
-                "SELECT id FROM projects WHERE id = ?",
-                (project_id,),
-            ).fetchone()
-        if row:
-            return
-    with get_db_connection() as connection:
-        row = connection.execute(
-            "SELECT id FROM projects WHERE id = ? AND owner_user_id = ?",
-            (project_id, user_id),
-        ).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Project not found")
 
 
 @app.get("/api/pointcloud-status/{project_id}")
@@ -3785,100 +3063,6 @@ def _picker_filter_for_kind(kind: str) -> str:
     return "Supported files (*.las;*.laz;*.tif;*.tiff)|*.las;*.laz;*.tif;*.tiff|All files (*.*)|*.*"
 
 
-def _browse_server_folder(initial_path: str = "", kind: str = "", mode: str = "folder") -> str:
-    if os.name != "nt":
-        raise HTTPException(
-            status_code=501,
-            detail="Server folder picker works only when the backend runs on Windows.",
-        )
-    picker_mode = str(mode or "folder").strip().lower()
-    if picker_mode not in {"folder", "file"}:
-        picker_mode = "folder"
-    initial = str(initial_path or "").strip().strip('"')
-    if initial:
-        initial_path_obj = Path(initial).expanduser()
-        if initial_path_obj.is_file():
-            initial = str(initial_path_obj.parent.resolve())
-        elif initial_path_obj.is_dir():
-            initial = str(initial_path_obj.resolve())
-        elif initial_path_obj.parent.is_dir():
-            initial = str(initial_path_obj.parent.resolve())
-        else:
-            initial = ""
-    out_file = Path(tempfile.gettempdir()) / f"droid-folder-pick-{secrets.token_hex(8)}.txt"
-    out_file_escaped = str(out_file).replace("'", "''")
-    initial_line = ""
-    if initial:
-        initial_escaped = initial.replace("'", "''")
-        initial_line = (
-            f"$d.SelectedPath = '{initial_escaped}'"
-            if picker_mode == "folder"
-            else f"$d.InitialDirectory = '{initial_escaped}'"
-        )
-    file_dialog_block = ""
-    if picker_mode == "file":
-        filter_text = _picker_filter_for_kind(kind).replace("'", "''")
-        file_dialog_block = f"""
-$d = New-Object System.Windows.Forms.OpenFileDialog
-$d.CheckFileExists = $true
-$d.Multiselect = $false
-$d.Filter = '{filter_text}'
-{initial_line}
-$r = $d.ShowDialog($owner)
-$owner.Dispose()
-if ($r -eq [System.Windows.Forms.DialogResult]::OK -and $d.FileName) {{
-    Set-Content -LiteralPath '{out_file_escaped}' -Value ([System.IO.Path]::GetDirectoryName($d.FileName)) -Encoding UTF8 -NoNewline
-}}
-"""
-    ps_script = f"""
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-[System.Windows.Forms.Application]::EnableVisualStyles()
-$owner = New-Object System.Windows.Forms.Form
-$owner.TopMost = $true
-$owner.ShowInTaskbar = $true
-$owner.Text = 'Droid Bulk Import'
-$owner.StartPosition = 'CenterScreen'
-$owner.WindowState = 'Minimized'
-$owner.Show()
-$owner.Activate() | Out-Null
-"""
-    if picker_mode == "file":
-        ps_script += file_dialog_block
-    else:
-        ps_script += f"""
-$d = New-Object System.Windows.Forms.FolderBrowserDialog
-$d.Description = 'Select bulk import source folder on this server'
-$d.ShowNewFolderButton = $true
-{initial_line}
-$r = $d.ShowDialog($owner)
-$owner.Dispose()
-if ($r -eq [System.Windows.Forms.DialogResult]::OK -and $d.SelectedPath) {{
-    Set-Content -LiteralPath '{out_file_escaped}' -Value $d.SelectedPath -Encoding UTF8 -NoNewline
-}}
-"""
-    try:
-        proc = subprocess.run(
-            ["powershell", "-NoProfile", "-STA", "-Command", ps_script],
-            timeout=600,
-        )
-    except subprocess.TimeoutExpired as exc:
-        out_file.unlink(missing_ok=True)
-        raise HTTPException(status_code=408, detail="Folder picker timed out") from exc
-    try:
-        if proc.returncode != 0 and not out_file.is_file():
-            raise HTTPException(status_code=500, detail="Folder picker failed to open on this Windows machine")
-        if not out_file.is_file():
-            raise HTTPException(status_code=400, detail="No folder selected")
-        folder = out_file.read_text(encoding="utf-8").strip()
-        if not folder:
-            raise HTTPException(status_code=400, detail="No folder selected")
-        resolved = Path(folder).expanduser().resolve()
-        if not resolved.is_dir():
-            raise HTTPException(status_code=400, detail="Selected folder is not accessible")
-        return str(resolved)
-    finally:
-        out_file.unlink(missing_ok=True)
 
 
 @app.post("/api/admin/locate-folder")
@@ -4047,17 +3231,6 @@ def admin_advanced_delete_user(
     return {"status": "success", "deleted_projects": len(project_ids)}
 
 
-def _delete_project_storage(project_id: str) -> None:
-    safe_project_id = _safe_project_id(project_id)
-    local_root = Path(LOCAL_DATA_PATH).resolve()
-    for target in (
-        local_root / "projects" / safe_project_id,
-        local_root / "datasets" / safe_project_id,
-        local_root / "pointclouds" / safe_project_id,
-    ):
-        resolved = target.resolve()
-        if resolved.exists() and local_root in resolved.parents:
-            shutil.rmtree(resolved, ignore_errors=True)
 
 
 @app.get("/api/admin/override/project/{project_id}")
@@ -5773,292 +4946,12 @@ def sync_manual_datasets(
     }
 
 
-def _bulk_scan_files(source_dir: Path, kind: str) -> list[Path]:
-    safe_kind = str(kind or "").strip().lower()
-    if safe_kind == "las":
-        exts = {".las", ".laz"}
-    elif safe_kind in {"ortho", "dtm", "dsm"}:
-        exts = {".tif", ".tiff"}
-    else:
-        return []
-    files = [p for p in source_dir.iterdir() if p.is_file() and p.suffix.lower() in exts]
-    return sorted(files, key=lambda p: p.name.lower())
 
 
-async def _admin_manual_bulk_import_background(
-    *,
-    project_id: str,
-    tasks: list[AdminManualBulkImportTask],
-    max_parallel: int,
-) -> None:
-    safe_project_id = _safe_project_id(project_id)
-    semaphore = asyncio.Semaphore(max(1, min(int(max_parallel or 2), 6)))
-
-    async def run_one_pointcloud(source_file: Path) -> None:
-        async with semaphore:
-            raw_dir, _ = get_project_dirs(safe_project_id)
-            safe_name = _safe_pointcloud_basename(source_file.name)
-            dataset_id = _safe_tileset_id(f"{re.sub(r'[^A-Za-z0-9._-]+', '-', Path(safe_name).stem)[:40]}-{secrets.token_hex(6)}")
-            raw_target = raw_dir / f"{safe_project_id}__{dataset_id}__{safe_name}"
-            output_dir = _ept_dataset_dir(safe_project_id, dataset_id)
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-            _upsert_processing_job(
-                safe_project_id,
-                {
-                    "job_id": dataset_id,
-                    "kind": "pointcloud",
-                    "file_name": safe_name,
-                    "status": "Processing",
-                    "stage": "Copying source file into project",
-                    "progress_percent": "8",
-                    "eta_seconds": "",
-                    "updated_at": _now_iso(),
-                },
-            )
-            _invalidate_project_files_cache(safe_project_id)
-
-            try:
-                shutil.copy2(source_file, raw_target)
-            except OSError as exc:
-                _upsert_processing_job(
-                    safe_project_id,
-                    {
-                        "job_id": dataset_id,
-                        "kind": "pointcloud",
-                        "file_name": safe_name,
-                        "status": "Failed",
-                        "stage": "Copy failed",
-                        "progress_percent": "100",
-                        "error": f"Copy failed: {exc}"[:8000],
-                        "updated_at": _now_iso(),
-                    },
-                )
-                _invalidate_project_files_cache(safe_project_id)
-                return
-
-            raw_rel = raw_target.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
-            _upsert_processing_job(
-                safe_project_id,
-                {
-                    "job_id": dataset_id,
-                    "kind": "pointcloud",
-                    "file_name": safe_name,
-                    "status": "Processing",
-                    "stage": "Source copied, starting COPC conversion",
-                    "progress_percent": "12",
-                    "eta_seconds": "",
-                    "raw_rel_path": raw_rel,
-                    "updated_at": _now_iso(),
-                },
-            )
-            _invalidate_project_files_cache(safe_project_id)
-            await asyncio.to_thread(
-                process_pointcloud_ept_job,
-                str(raw_target),
-                str(output_dir),
-                dataset_id,
-                safe_project_id,
-                dataset_id,
-                safe_name,
-                "",
-            )
-
-    async def run_one_raster(source_file: Path, dataset_type: str) -> None:
-        async with semaphore:
-            normalized_type = _normalize_dataset_type(dataset_type, source_file.name)
-            raw_dir, processed_dir = get_project_dataset_type_dirs(safe_project_id, normalized_type)
-            safe_name = _safe_dataset_upload_basename(source_file.name)
-            ext = source_file.suffix.lower()
-            dataset_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(safe_name).stem).strip("-") or "dataset"
-            dataset_id = _safe_dataset_id(f"{dataset_stem[:40]}-{secrets.token_hex(6)}")
-            tile_output_folder = _safe_dataset_id(f"{dataset_stem[:56]}-{secrets.token_hex(4)}")
-            input_path = raw_dir / f"{tile_output_folder}{ext}"
-            output_tile_dir = processed_dir / tile_output_folder
-            output_tile_dir.mkdir(parents=True, exist_ok=True)
-
-            _upsert_processing_job(
-                safe_project_id,
-                {
-                    "job_id": dataset_id,
-                    "kind": "dataset",
-                    "file_name": safe_name,
-                    "status": "Processing",
-                    "stage": "Copying source raster into project",
-                    "progress_percent": "8",
-                    "updated_at": _now_iso(),
-                },
-            )
-            _invalidate_project_files_cache(safe_project_id)
-
-            try:
-                shutil.copy2(source_file, input_path)
-            except OSError as exc:
-                _upsert_processing_job(
-                    safe_project_id,
-                    {
-                        "job_id": dataset_id,
-                        "kind": "dataset",
-                        "file_name": safe_name,
-                        "status": "Failed",
-                        "stage": "Copy failed",
-                        "progress_percent": "100",
-                        "error": f"Copy failed: {exc}"[:8000],
-                        "updated_at": _now_iso(),
-                    },
-                )
-                _invalidate_project_files_cache(safe_project_id)
-                return
-
-            raw_rel = input_path.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
-            pending_cog_path = (output_tile_dir / f"{tile_output_folder}.cog.tif").resolve()
-            _write_dataset_status(
-                safe_project_id,
-                dataset_id,
-                {
-                    "status": "Uploading",
-                    "updated_at": _now_iso(),
-                    "dataset_id": dataset_id,
-                    "dataset_name": safe_name,
-                    "tile_folder": tile_output_folder,
-                    "dataset_type": normalized_type,
-                    "layer_type": _raster_layer_type(normalized_type, safe_name),
-                    "month": "",
-                    "created_at": "",
-                    "raw_rel_path": raw_rel,
-                    "processed_size_bytes": str(input_path.stat().st_size),
-                    "processed_size": _format_size_bytes(input_path.stat().st_size),
-                    "cog_path": str(pending_cog_path),
-                    "manual_epsg": "",
-                    "applied_epsg": "",
-                },
-            )
-            _upsert_processing_job(
-                safe_project_id,
-                {
-                    "job_id": dataset_id,
-                    "kind": "dataset",
-                    "file_name": safe_name,
-                    "status": "Processing",
-                    "stage": "Source copied, starting COG conversion",
-                    "progress_percent": "12",
-                    "raw_rel_path": raw_rel,
-                    "updated_at": _now_iso(),
-                },
-            )
-            _invalidate_project_files_cache(safe_project_id)
-            await process_dataset_background(
-                safe_project_id,
-                dataset_id,
-                str(input_path),
-                safe_name,
-                str(output_tile_dir),
-                tile_output_folder,
-                "",
-            )
-
-    try:
-        scheduled: list[asyncio.Task[None]] = []
-        for task in tasks:
-            source = Path(str(task.source_folder or "")).expanduser().resolve()
-            if not source.is_dir():
-                continue
-            kind = str(task.kind or "").strip().lower()
-            files = _bulk_scan_files(source, kind)
-            if not files:
-                continue
-            if kind == "las":
-                for file_path in files:
-                    scheduled.append(asyncio.create_task(run_one_pointcloud(file_path)))
-            elif kind in {"ortho", "dtm", "dsm"}:
-                for file_path in files:
-                    scheduled.append(asyncio.create_task(run_one_raster(file_path, kind)))
-        if scheduled:
-            await asyncio.gather(*scheduled)
-    finally:
-        _invalidate_project_files_cache(safe_project_id)
 
 
-def _prepare_admin_manual_bulk_import(
-    tasks: list[AdminManualBulkImportTask],
-) -> tuple[list[AdminManualBulkImportTask], list[dict[str, object]], int]:
-    cleaned: list[AdminManualBulkImportTask] = []
-    preview: list[dict[str, object]] = []
-    file_count = 0
-    for item in tasks:
-        kind = str(item.kind or "").strip().lower()
-        if kind not in {"las", "ortho", "dtm", "dsm"}:
-            continue
-        folder = str(item.source_folder or "").strip().strip('"')
-        if not folder:
-            continue
-        source = Path(folder).expanduser()
-        if not source.is_dir():
-            preview.append(
-                {
-                    "kind": kind,
-                    "source_folder": folder,
-                    "status": "missing",
-                    "file_count": 0,
-                    "message": "Folder not found on server",
-                }
-            )
-            continue
-        files = _bulk_scan_files(source.resolve(), kind)
-        preview.append(
-            {
-                "kind": kind,
-                "source_folder": str(source.resolve()),
-                "status": "ready" if files else "empty",
-                "file_count": len(files),
-                "message": (
-                    f"Found {len(files)} file(s)"
-                    if files
-                    else f"No matching {kind.upper()} files in folder"
-                ),
-            }
-        )
-        if not files:
-            continue
-        cleaned.append(AdminManualBulkImportTask(source_folder=str(source.resolve()), kind=kind))
-        file_count += len(files)
-    return cleaned, preview, file_count
 
 
-def _queue_admin_manual_bulk_import(
-    *,
-    project_id: str,
-    payload: AdminManualBulkImportPayload,
-    request: Request,
-    background_tasks: BackgroundTasks,
-) -> dict[str, object]:
-    user = verify_admin(request)
-    safe_project_id = _safe_project_id(project_id)
-    _ensure_project_owner(int(user["id"]), safe_project_id)
-
-    cleaned, preview, file_count = _prepare_admin_manual_bulk_import(payload.tasks or [])
-    if not cleaned:
-        detail = "No importable files found. Check folder path and selected type."
-        if preview:
-            detail = "; ".join(
-                f"{row['source_folder']} ({row['message']})" for row in preview if isinstance(row.get("message"), str)
-            ) or detail
-        raise HTTPException(status_code=400, detail=detail)
-
-    background_tasks.add_task(
-        _admin_manual_bulk_import_background,
-        project_id=safe_project_id,
-        tasks=cleaned,
-        max_parallel=payload.max_parallel,
-    )
-    return {
-        "status": "success",
-        "message": f"Queued {file_count} file(s) from {len(cleaned)} folder task(s).",
-        "project_id": safe_project_id,
-        "task_count": len(cleaned),
-        "file_count": file_count,
-        "preview": preview,
-    }
 
 
 @app.post("/api/datasets/{project_id}/open-manual-folder")
@@ -6454,84 +5347,14 @@ def _grid_export_raster_path(project_id: str, dataset_id: str) -> tuple[Path, di
     return _dataset_source_path(project_id, dataset_id), st
 
 
-def _validate_grid_export_request(dataset_path: Path, interval: float) -> tuple[int, int, int]:
-    if not math.isfinite(interval) or interval <= 0:
-        raise HTTPException(status_code=400, detail="Grid interval must be greater than zero.")
-    rasterio, _ = _require_rasterio()
-    with rasterio.open(str(dataset_path)) as dataset:
-        if dataset.count < 1:
-            raise HTTPException(status_code=400, detail="Raster has no elevation band.")
-        if dataset.crs and dataset.crs.is_geographic:
-            raise HTTPException(
-                status_code=400,
-                detail="Grid export needs a projected CRS in meters. Please use the projected DTM/DSM.",
-            )
-        width = abs(float(dataset.bounds.right) - float(dataset.bounds.left))
-        height = abs(float(dataset.bounds.top) - float(dataset.bounds.bottom))
-    x_count = int(math.floor(width / interval)) + 1
-    y_count = int(math.floor(height / interval)) + 1
-    point_count = max(0, x_count) * max(0, y_count)
-    return x_count, y_count, point_count
 
 
-def _csv_grid_generator(dataset_path: Path, interval: float):
-    rasterio, _ = _require_rasterio()
-    with rasterio.open(str(dataset_path)) as dataset:
-        bounds = dataset.bounds
-        nodata = dataset.nodata
-        batch_size = 5000
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["X", "Y", "Z"])
-        yield output.getvalue()
-
-        for y in _grid_coordinate_range(bounds.top, bounds.bottom, interval, descending=True):
-            batch: list[tuple[float, float]] = []
-            for x in _grid_coordinate_range(bounds.left, bounds.right, interval):
-                batch.append((x, y))
-                if len(batch) >= batch_size:
-                    yield _csv_grid_rows(dataset, nodata, batch)
-                    batch = []
-            if batch:
-                yield _csv_grid_rows(dataset, nodata, batch)
 
 
-def _csv_grid_rows(dataset, nodata, batch: list[tuple[float, float]]) -> str:
-    output = io.StringIO()
-    writer = csv.writer(output)
-    for coord, sample in zip(batch, dataset.sample(batch, masked=True)):
-        z = _grid_sample_value(sample, nodata)
-        if z is not None:
-            writer.writerow([coord[0], coord[1], z])
-    return output.getvalue()
 
 
-def _dxf_grid_generator(dataset_path: Path, interval: float):
-    rasterio, _ = _require_rasterio()
-    yield "0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n6\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n"
-    with rasterio.open(str(dataset_path)) as dataset:
-        bounds = dataset.bounds
-        nodata = dataset.nodata
-        batch_size = 5000
-        for y in _grid_coordinate_range(bounds.top, bounds.bottom, interval, descending=True):
-            batch: list[tuple[float, float]] = []
-            for x in _grid_coordinate_range(bounds.left, bounds.right, interval):
-                batch.append((x, y))
-                if len(batch) >= batch_size:
-                    yield _dxf_grid_rows(dataset, nodata, batch)
-                    batch = []
-            if batch:
-                yield _dxf_grid_rows(dataset, nodata, batch)
-    yield "0\nENDSEC\n0\nEOF\n"
 
 
-def _dxf_grid_rows(dataset, nodata, batch: list[tuple[float, float]]) -> str:
-    parts: list[str] = []
-    for coord, sample in zip(batch, dataset.sample(batch, masked=True)):
-        z = _grid_sample_value(sample, nodata)
-        if z is not None:
-            parts.append(f"0\nPOINT\n8\nDROID_GRID\n10\n{coord[0]}\n20\n{coord[1]}\n30\n{z}\n")
-    return "".join(parts)
 
 
 def _grid_export_output_path(
@@ -6555,22 +5378,6 @@ def _write_grid_export_metadata(
         pass
 
 
-def _grid_export_is_current(output_path: Path, dataset_path: Path, interval: float, export_format: str) -> bool:
-    if not output_path.is_file() or output_path.stat().st_size <= 0:
-        return False
-    metadata_path = output_path.with_suffix(f"{output_path.suffix}.json")
-    if not metadata_path.is_file():
-        return output_path.stat().st_mtime_ns >= dataset_path.stat().st_mtime_ns
-    try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
-        return False
-    return (
-        str(metadata.get("source_path") or "") == str(dataset_path.resolve())
-        and str(metadata.get("source_mtime_ns") or "") == str(dataset_path.stat().st_mtime_ns)
-        and str(metadata.get("format") or "").lower() == export_format
-        and math.isclose(float(metadata.get("interval") or 0), float(interval), rel_tol=0.0, abs_tol=1e-9)
-    )
 
 
 def _generate_grid_export_file(
@@ -6656,202 +5463,16 @@ def _require_rasterio():
     return rasterio, rio_transform
 
 
-def _sample_raster(dataset_path: Path, lat: float, lng: float) -> float:
-    rasterio, rio_transform = _require_rasterio()
-    with rasterio.open(str(dataset_path)) as src:
-        xs, ys = rio_transform("EPSG:4326", src.crs, [lng], [lat]) if src.crs else ([lng], [lat])
-        row, col = src.index(xs[0], ys[0])
-        if row < 0 or col < 0 or row >= src.height or col >= src.width:
-            raise HTTPException(status_code=400, detail="Point is outside raster bounds")
-        value = next(src.sample([(xs[0], ys[0])], masked=True))[0]
-        if getattr(value, "mask", False):
-            raise HTTPException(status_code=404, detail="No elevation value at this point")
-        if value is None or not math.isfinite(float(value)):
-            raise HTTPException(status_code=404, detail="No elevation value at this point")
-        return float(value)
 
 
-def _interpolate_profile_points(points: list[list[float]], samples: int) -> list[dict[str, float]]:
-    clean = _normalize_crop_points(points) if len(points) >= 3 else []
-    if not clean:
-        clean = []
-        for pair in points:
-            if len(pair) >= 2:
-                clean.append([float(pair[0]), float(pair[1])])
-    if len(clean) < 2:
-        raise HTTPException(status_code=400, detail="At least 2 profile points required")
-    segment_lengths: list[float] = []
-    total = 0.0
-    for idx in range(1, len(clean)):
-        a = LLatLng(clean[idx - 1][0], clean[idx - 1][1])
-        b = LLatLng(clean[idx][0], clean[idx][1])
-        dist = a.distance_to(b)
-        segment_lengths.append(dist)
-        total += dist
-    count = max(2, min(int(samples or 120), 500))
-    targets = [total * i / (count - 1) for i in range(count)]
-    out: list[dict[str, float]] = []
-    seg_start_dist = 0.0
-    seg_idx = 0
-    for target in targets:
-        while seg_idx < len(segment_lengths) - 1 and target > seg_start_dist + segment_lengths[seg_idx]:
-            seg_start_dist += segment_lengths[seg_idx]
-            seg_idx += 1
-        seg_len = segment_lengths[seg_idx] or 1.0
-        t = (target - seg_start_dist) / seg_len
-        lat_a, lng_a = clean[seg_idx]
-        lat_b, lng_b = clean[seg_idx + 1]
-        out.append({
-            "lat": lat_a + (lat_b - lat_a) * t,
-            "lng": lng_a + (lng_b - lng_a) * t,
-            "distance_m": target,
-        })
-    return out
 
 
-def _profile_summary(values: list[dict[str, object]], corridor_width_m: float) -> dict[str, float | None]:
-    valid = [
-        {
-            "distance_m": float(row["distance_m"]),
-            "elevation": float(row["elevation"]),
-        }
-        for row in values
-        if row.get("elevation") is not None
-    ]
-    if not valid:
-        return {
-            "length_m": None,
-            "min_elevation": None,
-            "max_elevation": None,
-            "avg_elevation": None,
-            "start_elevation": None,
-            "end_elevation": None,
-            "elevation_change": None,
-            "elevation_gain": None,
-            "elevation_loss": None,
-            "volume_above_min_m3": None,
-            "corridor_width_m": max(0.1, min(float(corridor_width_m or 1.0), 1000.0)),
-        }
-
-    elevations = [row["elevation"] for row in valid]
-    min_elev = min(elevations)
-    gain = 0.0
-    loss = 0.0
-    volume_above_min = 0.0
-    width = max(0.1, min(float(corridor_width_m or 1.0), 1000.0))
-    for prev, curr in zip(valid, valid[1:]):
-        diff = curr["elevation"] - prev["elevation"]
-        if diff > 0:
-            gain += diff
-        else:
-            loss += abs(diff)
-        segment_len = max(0.0, curr["distance_m"] - prev["distance_m"])
-        avg_height_above_min = ((prev["elevation"] - min_elev) + (curr["elevation"] - min_elev)) / 2
-        volume_above_min += segment_len * width * avg_height_above_min
-
-    return {
-        "length_m": max(row["distance_m"] for row in valid),
-        "min_elevation": min_elev,
-        "max_elevation": max(elevations),
-        "avg_elevation": sum(elevations) / len(elevations),
-        "start_elevation": valid[0]["elevation"],
-        "end_elevation": valid[-1]["elevation"],
-        "elevation_change": valid[-1]["elevation"] - valid[0]["elevation"],
-        "elevation_gain": gain,
-        "elevation_loss": loss,
-        "volume_above_min_m3": volume_above_min,
-        "corridor_width_m": width,
-    }
 
 
-def _circle_points(center: list[float], radius_m: float, segments: int = 96) -> list[list[float]]:
-    if len(center) < 2:
-        raise HTTPException(status_code=400, detail="Circle center is required")
-    lat = float(center[0])
-    lng = float(center[1])
-    radius = max(0.1, float(radius_m))
-    lat_rad = math.radians(lat)
-    meters_per_deg_lat = 111320.0
-    meters_per_deg_lng = max(1.0, 111320.0 * math.cos(lat_rad))
-    points: list[list[float]] = []
-    for idx in range(max(16, segments)):
-        angle = (2 * math.pi * idx) / max(16, segments)
-        points.append([
-            lat + (math.sin(angle) * radius) / meters_per_deg_lat,
-            lng + (math.cos(angle) * radius) / meters_per_deg_lng,
-        ])
-    return points
 
 
-def _pixel_area_m2(src) -> float:
-    if src.crs and getattr(src.crs, "is_geographic", False):
-        center_lat = (src.bounds.top + src.bounds.bottom) / 2
-        meters_per_deg_lng = 111320.0 * math.cos(math.radians(center_lat))
-        return abs(src.transform.a * meters_per_deg_lng * src.transform.e * 111320.0)
-    return abs(src.transform.a * src.transform.e)
 
 
-def _volume_for_raster(path: Path, points: list[list[float]], base_elevation: float | None) -> dict[str, object]:
-    rasterio, rio_transform = _require_rasterio()
-    from rasterio.features import geometry_mask  # type: ignore
-    import numpy as np  # type: ignore
-
-    with rasterio.open(str(path)) as src:
-        arr = src.read(1, masked=True).astype("float64")
-        valid = ~np.ma.getmaskarray(arr)
-        scope = "overall"
-        if points:
-            clean = _normalize_crop_points(points)
-            lngs = [p[1] for p in clean]
-            lats = [p[0] for p in clean]
-            xs, ys = rio_transform("EPSG:4326", src.crs, lngs, lats) if src.crs else (lngs, lats)
-            geom = {"type": "Polygon", "coordinates": [[list(pair) for pair in zip(xs, ys)]]}
-            inside = geometry_mask([geom], out_shape=(src.height, src.width), transform=src.transform, invert=True)
-            valid = valid & inside
-            scope = "selection"
-        if not np.any(valid):
-            raise HTTPException(status_code=404, detail="No valid DTM cells found for volume")
-
-        values = np.asarray(arr.filled(np.nan))[valid]
-        values = values[np.isfinite(values)]
-        if values.size == 0:
-            raise HTTPException(status_code=404, detail="No valid DTM elevation values found for volume")
-
-        base = float(base_elevation) if base_elevation is not None else float(np.min(values))
-        pixel_area = _pixel_area_m2(src)
-        heights = values - base
-        fill = float(np.sum(np.where(heights > 0, heights, 0)) * pixel_area)
-        cut = float(np.sum(np.where(heights < 0, -heights, 0)) * pixel_area)
-        net = fill - cut
-        area_m2 = float(values.size * pixel_area)
-        min_elev = float(np.min(values))
-        max_elev = float(np.max(values))
-        avg_elev = float(np.mean(values))
-        bins = []
-        if max_elev > min_elev:
-            hist, edges = np.histogram(values, bins=min(12, max(3, int(math.sqrt(values.size) // 2))))
-            for idx, count in enumerate(hist):
-                low = float(edges[idx])
-                high = float(edges[idx + 1])
-                mid_height = max(((low + high) / 2) - base, 0)
-                bins.append({
-                    "label": f"{low:.2f}-{high:.2f} m",
-                    "volume": float(count * pixel_area * mid_height),
-                })
-    return {
-        "scope": scope,
-        "base_elevation": base,
-        "min_elevation": min_elev,
-        "max_elevation": max_elev,
-        "avg_elevation": avg_elev,
-        "area_m2": area_m2,
-        "fill_volume_m3": fill,
-        "cut_volume_m3": cut,
-        "net_volume_m3": net,
-        "cell_count": int(values.size),
-        "bins": bins,
-        "unit": "m3",
-    }
 
 
 class LLatLng:
@@ -6895,44 +5516,6 @@ def _read_volume_csv(path: Path) -> list[dict[str, object]]:
     return rows
 
 
-def _dtm_volume_between(project_id: str, prev_id: str, next_id: str) -> dict[str, object]:
-    rasterio, _ = _require_rasterio()
-    import numpy as np  # type: ignore
-    prev_path = _dataset_source_path(project_id, prev_id)
-    next_path = _dataset_source_path(project_id, next_id)
-    cache_payload = {
-        "kind": "dtm_volume",
-        "prev": _file_fingerprint(prev_path),
-        "next": _file_fingerprint(next_path),
-    }
-    cache = _cache_path(project_id, "volume", cache_payload)
-    cached = _read_cache(cache)
-    if cached:
-        return cached
-    with rasterio.open(str(prev_path)) as a, rasterio.open(str(next_path)) as b:
-        if a.width != b.width or a.height != b.height or a.transform != b.transform:
-            raise HTTPException(status_code=400, detail="DTM rasters must have matching grid for volume fallback")
-        arr_a = a.read(1, masked=True).astype("float64")
-        arr_b = b.read(1, masked=True).astype("float64")
-        diff = arr_b - arr_a
-        valid = ~diff.mask if hasattr(diff, "mask") else np.isfinite(diff)
-        pixel_area = abs(a.transform.a * a.transform.e)
-        cut = float(np.sum(np.where(diff < 0, -diff, 0)[valid]) * pixel_area)
-        fill = float(np.sum(np.where(diff > 0, diff, 0)[valid]) * pixel_area)
-        net = fill - cut
-        area = float(np.sum(valid) * pixel_area)
-    result: dict[str, object] = {
-        "month": "",
-        "label": f"{prev_id} to {next_id}",
-        "volume": net,
-        "cut": cut,
-        "fill": fill,
-        "net": net,
-        "area": area,
-        "source": "dtm",
-    }
-    _write_cache(cache, result)
-    return result
 
 
 @app.get("/api/datasets/{project_id}/{dataset_name}/bounds")
@@ -7183,55 +5766,6 @@ def _safe_rename_dataset_path(path: Path, display_name: str) -> Path:
     return next_path
 
 
-def _deep_rename_dataset_artifacts(project_id: str, dataset_id: str, st: dict[str, str], display_name: str) -> dict[str, str]:
-    updated = dict(st)
-    local_root = Path(LOCAL_DATA_PATH).resolve()
-    for key in ("raw_rel_path", "vector_rel_path", "model_rel_path", "cog_rel_path"):
-        rel = str(updated.get(key) or "").strip().replace("\\", "/").lstrip("/")
-        if not rel or ".." in rel:
-            continue
-        current = (Path(LOCAL_DATA_PATH) / rel).resolve()
-        if not current.exists() or not current.is_relative_to(local_root):
-            continue
-        renamed = _safe_rename_dataset_path(current, display_name)
-        try:
-            updated[key] = renamed.relative_to(local_root).as_posix()
-            if key == "cog_rel_path":
-                updated["cog_path"] = str(renamed)
-        except ValueError:
-            pass
-
-    tile_folder = str(updated.get("tile_folder") or "").strip()
-    if tile_folder:
-        _, processed_root = get_project_dirs(project_id)
-        for key, current in (
-            ("tiles_rel_path", Path(LOCAL_DATA_PATH) / str(updated.get("tiles_rel_path") or "")),
-            ("tileset_rel_path", Path(LOCAL_DATA_PATH) / str(updated.get("tileset_rel_path") or "")),
-        ):
-            if str(updated.get(key) or "").strip() and current.exists() and current.resolve().is_relative_to(local_root):
-                renamed = _safe_rename_dataset_path(current.resolve(), display_name)
-                try:
-                    updated[key] = renamed.relative_to(local_root).as_posix()
-                except ValueError:
-                    pass
-        for current in (
-            processed_root / tile_folder,
-            processed_root / _dataset_type_folder(str(updated.get("dataset_type") or "")) / tile_folder,
-            _ept_dataset_dir(project_id, tile_folder),
-            _legacy_ept_pointcloud_dataset_dir(project_id, tile_folder),
-            _legacy_ept_dataset_dir(project_id, tile_folder),
-        ):
-            if current.exists():
-                renamed = _safe_rename_dataset_path(current, display_name)
-                updated["tile_folder"] = renamed.name
-                try:
-                    source_marker = renamed / ".source_name.txt"
-                    if source_marker.exists() or str(updated.get("dataset_type") or "").lower() == "pointcloud":
-                        source_marker.write_text(display_name, encoding="utf-8")
-                except OSError:
-                    pass
-                break
-    return updated
 
 
 def _dataset_status_matches_rel(project_id: str, st: dict[str, str], rel_path: str) -> bool:
@@ -7268,31 +5802,6 @@ def _find_dataset_status_for_rel(project_id: str, rel_path: str) -> tuple[str, d
     return None
 
 
-def _delete_dataset_artifacts(project_id: str, dataset_id: str, st: dict[str, str]) -> int:
-    removed = 0
-    if catalog_service.catalog_db_enabled():
-        removed += catalog_service.delete_asset_artifacts(
-            project_id,
-            dataset_id,
-            local_data_path=LOCAL_DATA_PATH,
-        )
-    for key in ("raw_rel_path", "tiles_rel_path", "tileset_rel_path", "vector_rel_path", "model_rel_path", "cog_rel_path"):
-        rel = str(st.get(key) or "").strip().replace("\\", "/").lstrip("/")
-        if rel and ".." not in rel:
-            removed += _safe_remove_dataset_path(Path(LOCAL_DATA_PATH) / rel)
-    tile_folder = str(st.get("tile_folder") or "").strip()
-    if tile_folder:
-        _, processed_root = get_project_dirs(project_id)
-        for candidate in (
-            processed_root / tile_folder,
-            processed_root / _dataset_type_folder(str(st.get("dataset_type") or "")) / tile_folder,
-        ):
-            if candidate.exists():
-                removed += _safe_remove_dataset_path(candidate)
-    _safe_remove_dataset_path(_dataset_dir(project_id, dataset_id))
-    _remove_processing_job(project_id, dataset_id)
-    _invalidate_project_files_cache(project_id)
-    return removed
 
 
 @app.put("/api/admin/projects/{project_id}/datasets/{dataset_name:path}")
@@ -7328,48 +5837,6 @@ def admin_update_dataset_metadata_by_name(
     return {"status": "success", "dataset_id": dataset_id}
 
 
-@app.delete("/api/admin/projects/{project_id}/datasets/{dataset_name:path}")
-def admin_delete_dataset_by_name(
-    project_id: str,
-    dataset_name: str,
-    request: Request,
-    admin_user: dict[str, str | int] = Depends(verify_admin),
-) -> dict[str, str | int]:
-    safe_project_id = _safe_project_id(project_id)
-    safe_dataset_name = os.path.basename(dataset_name.replace("\\", "/").strip().strip("/"))
-    result = _purge_catalog_dataset(safe_project_id, safe_dataset_name)
-    if int(result.get("removed_paths", 0)) <= 0:
-        local_root = Path(LOCAL_DATA_PATH).resolve()
-        removed = 0
-        processed_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "processed"
-        raw_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "raw"
-        candidate_paths = [
-            processed_root / safe_dataset_name,
-            processed_root / "pointclouds" / safe_dataset_name,
-            processed_root / "3dmodel" / safe_dataset_name,
-            raw_root / safe_dataset_name,
-            raw_root / f"{safe_project_id}__{safe_dataset_name}",
-            Path(LOCAL_DATA_PATH) / "pointclouds" / safe_project_id / safe_dataset_name,
-        ]
-        normalized_target = _safe_export_stem(safe_dataset_name).lower()
-        for root in (processed_root, processed_root / "pointclouds", processed_root / "3dmodel", raw_root):
-            if not root.is_dir():
-                continue
-            for child in root.iterdir():
-                if _safe_export_stem(child.name).lower() == normalized_target:
-                    candidate_paths.append(child)
-        for candidate in candidate_paths:
-            resolved = candidate.resolve()
-            if resolved.exists() and local_root in resolved.parents:
-                removed += _safe_remove_dataset_path(resolved)
-        if removed == 0 and not catalog_service.catalog_db_enabled():
-            raise HTTPException(status_code=404, detail="Dataset not found")
-        result["removed_paths"] = int(result.get("removed_paths", 0)) + removed
-    return {
-        "status": "success",
-        "dataset_id": safe_dataset_name,
-        "removed_paths": int(result.get("removed_paths", 0)),
-    }
 
 
 @app.get("/api/analysis/{project_id}/elevation")

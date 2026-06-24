@@ -7,7 +7,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from app.core.database import get_db_connection
 
@@ -895,6 +895,45 @@ def prune_missing_assets(project_id: str, local_data_path: str) -> int:
     return removed
 
 
+def _build_pointcloud_viewer_url(
+    *,
+    project_id: str,
+    asset_id: str,
+    display_name: str,
+    paths: dict[str, Any],
+    primary_rel_path: str,
+    viewer: dict[str, Any],
+) -> str:
+    existing = str(
+        viewer.get("layer_url")
+        or viewer.get("viewer_url")
+        or viewer.get("result_url")
+        or viewer.get("tileset_url")
+        or ""
+    ).strip()
+    if existing and "/droid-ept-viewer/" in existing:
+        return existing
+    copc_rel = str(paths.get("copc") or primary_rel_path or "").strip().replace("\\", "/").lstrip("/")
+    if copc_rel.lower().endswith(".copc.laz"):
+        copc_api = copc_rel if copc_rel.startswith("api/") else f"api/data/{copc_rel}"
+    elif copc_rel:
+        copc_api = f"api/data/{copc_rel.rstrip('/')}/output.copc.laz"
+    else:
+        copc_api = f"api/data/projects/{project_id}/exports/pointclouds/{asset_id}/output.copc.laz"
+    if not copc_api.startswith("/"):
+        copc_api = f"/{copc_api}"
+    params = urlencode(
+        {
+            "copc": copc_api,
+            "project": project_id,
+            "dataset": asset_id or display_name,
+            "name": display_name,
+        },
+        quote_via=quote,
+    )
+    return f"/droid-ept-viewer/index.html?{params}"
+
+
 def _asset_to_file_row(asset: dict[str, Any], base_url: str, project_id: str) -> dict[str, str]:
     paths = _json_loads(asset.get("paths_json"))
     viewer = _json_loads(asset.get("viewer_json"))
@@ -934,6 +973,15 @@ def _asset_to_file_row(asset: dict[str, Any], base_url: str, project_id: str) ->
             type_fields["layer_type"],
             rescale_min,
             rescale_max,
+        )
+    elif type_fields["dataset_type"] == "pointcloud" or str(asset_type).lower() == "pointcloud":
+        layer_url = _build_pointcloud_viewer_url(
+            project_id=project_id,
+            asset_id=str(asset.get("id") or ""),
+            display_name=display_name,
+            paths=paths,
+            primary_rel_path=rel_path,
+            viewer=viewer,
         )
     file_url = str(viewer.get("file_url") or "")
     download_url = str(viewer.get("download_url") or file_url)
@@ -995,6 +1043,8 @@ def _asset_to_file_row(asset: dict[str, Any], base_url: str, project_id: str) ->
         "download_url": download_url,
         "layer_url": layer_url,
         "viewer_url": layer_url,
+        "copc_url": str(paths.get("copc") or viewer.get("copc_url") or ""),
+        "ept_url": str(paths.get("ept") or viewer.get("ept_url") or ""),
         "file_path": file_path,
         "rel_path": rel_path,
         "raw_rel_path": str(paths.get("raw") or ""),

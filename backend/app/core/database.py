@@ -295,6 +295,15 @@ def get_db_connection() -> sqlite3.Connection | PostgresCompatConnection:
     return connection
 
 
+def get_db() -> Iterator[sqlite3.Connection | PostgresCompatConnection]:
+    """FastAPI Dependency for database connections."""
+    connection = get_db_connection()
+    try:
+        yield connection
+    finally:
+        connection.close()
+
+
 def ensure_tables() -> None:
     if _postgres_enabled():
         _ensure_postgres_tables()
