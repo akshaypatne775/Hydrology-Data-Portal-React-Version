@@ -56,7 +56,7 @@ from app.utils.spatial_import import (
     parse_spatial_upload,
     style_for_structure,
 )
-from app.utils.raster_tiler import convert_tif_to_cog, run_rasterio_tiler
+from app.services.raster import convert_tif_to_cog, run_rasterio_tiler
 from app.utils.analysis_utils import sample_cross_section
 
 # ---------------------------------------------------------------------------
