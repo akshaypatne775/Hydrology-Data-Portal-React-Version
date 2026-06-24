@@ -4,12 +4,21 @@ import { useWorkspaceContext } from '../../context/WorkspaceContext'
 import { useAuthContext } from '../../context/AuthContext'
 import { useModal } from '../../context/ModalContext'
 import { API_BASE, toSameOriginBackendUrl } from '../../lib/apiBase'
-import { forceDeleteAdminDataset, updateAdminDatasetMetadata } from '../../services/adminService'
+import { buildRasterTileUrl, isRasterDatasetType, isRasterDirectDownloadUrl } from '../../lib/rasterTileUrl'
+import {
+  isPointCloudViewerUrl,
+  isRawPointCloudUrl,
+  normalizePointCloudViewerUrl,
+  normalizedPointCloudName,
+} from '../../lib/pointCloudViewerUrl'
+import { adminLocateFolder, adminManualBulkImport, forceDeleteAdminDataset, updateAdminDatasetMetadata, type AdminManualBulkImportTask } from '../../services/adminService'
 import { logClientError } from '../../services/errorLogService'
 import { getPointCloudStatus } from '../../services/pointCloudService'
 import {
   deleteProjectFile,
+  deleteCatalogAsset,
   exportDatasetGrid,
+  getCatalogRevision,
   getProjectFiles,
   getProjectJobs,
   generateContours,
@@ -23,7 +32,7 @@ import './DatasetsPanel.css'
 
 const ALLOWED_EXTENSIONS = new Set(['las', 'laz', 'tif', 'tiff', 'csv', 'zip', 'kml', 'geojson', 'dwg', 'pdf'])
 type DatasetType = 'Ortho' | 'DTM' | 'DSM' | 'Point Cloud' | '3D Model' | 'CSV' | 'Vector' | 'CAD' | 'Reports'
-type DatasetStatus = 'Raw' | 'Processing' | 'Web-Ready'
+type DatasetStatus = 'Raw' | 'Processing' | 'Web-Ready' | 'Failed'
 
 type DatasetRow = {
   id: string
@@ -32,6 +41,7 @@ type DatasetRow = {
   size: string
   status: DatasetStatus
   stage?: string
+  errorMessage?: string
   progressPercent?: number
   etaText?: string
   uploadDate?: string
@@ -103,8 +113,17 @@ function formatDisplayDate(dateValue?: string): string {
 }
 
 function normalizeJobStatus(status: string): DatasetStatus {
-  if (status.toLowerCase() === 'web-ready' || status.toUpperCase() === 'WEB-READY') return 'Web-Ready'
-  return status === 'Completed' ? 'Web-Ready' : 'Processing'
+  const lowered = status.trim().toLowerCase()
+  if (lowered === 'web-ready' || status.toUpperCase() === 'WEB-READY' || lowered === 'completed') return 'Web-Ready'
+  if (lowered === 'failed' || lowered === 'error') return 'Failed'
+  return 'Processing'
+}
+
+function shortStageLabel(stage?: string, error?: string): string | undefined {
+  const text = String(stage || error || '').trim()
+  if (!text) return undefined
+  if (text.length <= 72) return text
+  return `${text.slice(0, 69)}...`
 }
 
 function normalizeProgressPercent(value?: string | number): number | undefined {
@@ -265,18 +284,21 @@ function displayProjectFileSize(file: ProjectFile): string {
   return formatSize(file.size_bytes)
 }
 
-function mapProjectFile(file: ProjectFile): DatasetRow {
-  const fileType = String(file.type).toLowerCase()
-  const type = datasetTypeFromBackend(file.dataset_type) ||
+function mapProjectFile(file: ProjectFile, projectId: string): DatasetRow {
+  const fileType = String(file.type || file.dataset_type || '').toLowerCase()
+  const type = datasetTypeFromBackend(file.dataset_type || file.type) ||
     (file.kind === 'Reports' || fileType === 'pdf' ? 'Reports' :
-    (file.type === '3DModel' ? '3D Model' : fileType === 'vector' ? 'Vector' : fileType === 'cad' ? 'CAD' : inferDatasetType(file.name))
+    (fileType === '3dmodel' || file.type === '3DModel' ? '3D Model' : fileType === 'vector' ? 'Vector' : fileType === 'cad' ? 'CAD' : inferDatasetType(file.name))
     )
   const backendLayerType = String(file.layer_type || '')
   const layerType =
     ['Ortho', 'DTM', 'DSM'].includes(backendLayerType) ? backendLayerType as 'Ortho' | 'DTM' | 'DSM' :
+    fileType === 'ortho' ? 'Ortho' :
+    fileType === 'dtm' ? 'DTM' :
+    fileType === 'dsm' ? 'DSM' :
     file.type === 'cog' ? (['Ortho', 'DTM', 'DSM'].includes(type) ? type as 'Ortho' | 'DTM' | 'DSM' : 'cog') :
       fileType === 'pointcloud' ? 'pointcloud' :
-        file.type === '3DModel' ? '3DModel' :
+        fileType === '3dmodel' || file.type === '3DModel' ? '3DModel' :
           fileType === 'vector' ? 'Vector' :
             fileType === 'cad' ? 'CAD' :
               type === 'Reports' ? 'Reports' :
@@ -290,7 +312,38 @@ function mapProjectFile(file: ProjectFile): DatasetRow {
       : (preferredViewerUrl || '').toLowerCase().endsWith('tileset.json')
         ? `${API_BASE}/data/${file.rel_path.replace(/\/tileset\.json$/i, '').replace(/\/$/, '')}/{z}/{x}/{y}.png`
         : toSameOriginBackendUrl(preferredViewerUrl)
-  const layerUrl = layerType === 'pointcloud' && rawLayerUrl && isRawPointCloudUrl(rawLayerUrl) ? '' : rawLayerUrl
+  let layerUrl = layerType === 'pointcloud' && rawLayerUrl && isRawPointCloudUrl(rawLayerUrl) ? '' : rawLayerUrl
+  const isRasterLayer = Boolean(
+    layerType &&
+    (['cog', 'Ortho', 'DTM', 'DSM'].includes(String(layerType)) ||
+      isRasterDatasetType(file.dataset_type || file.type)),
+  )
+  if (isRasterLayer) {
+    const tileUrl = buildRasterTileUrl({
+      url: rawLayerUrl,
+      layerType,
+      datasetType: file.dataset_type || file.type,
+      cogPath: file.cog_path,
+      cogRelPath: file.cog_rel_path,
+      datasetId: file.dataset_id,
+      cacheKey: file.updated_at || file.cog_rel_path,
+      rescaleMin: file.rescale_min,
+      rescaleMax: file.rescale_max,
+    })
+    if (tileUrl) {
+      layerUrl = tileUrl
+    } else if (isRasterDirectDownloadUrl(layerUrl)) {
+      layerUrl = ''
+    }
+  }
+  if (layerType === 'pointcloud' && layerUrl) {
+    layerUrl = normalizePointCloudViewerUrl(
+      layerUrl,
+      projectId,
+      String(file.dataset_id || file.rel_path || file.name),
+      String(file.name || file.dataset_id || 'Point Cloud'),
+    ) || layerUrl
+  }
   const parseBounds = (value?: string): [number, number, number, number] | undefined => {
     if (!value) return undefined
     try {
@@ -395,74 +448,97 @@ function isSameDatasetRow(left: DatasetRow, right: DatasetRow): boolean {
   ].some((key) => Boolean(key) && leftKeys.has(key))
 }
 
-function isRawPointCloudUrl(url: string): boolean {
-  const normalized = url.trim().toLowerCase().split(/[?#]/, 1)[0] || ''
-  return /\.(las|laz)$/i.test(normalized) && !normalized.endsWith('.copc.laz')
+function pointCloudCatalogRank(row: Pick<DatasetRow, 'fileName' | 'layerUrl' | 'status' | 'size'>): number {
+  const url = String(row.layerUrl || '').toLowerCase()
+  if (url.includes('copc=') || url.endsWith('.copc.laz')) return 0
+  if (row.status === 'Web-Ready' && url && !isRawPointCloudUrl(url)) return 1
+  if (row.status === 'Failed') return 8
+  if (/\.(las|laz)$/i.test(row.fileName) && (!row.layerUrl || isRawPointCloudUrl(row.layerUrl))) return 9
+  return 5
 }
 
-function isPointCloudViewerUrl(url: string): boolean {
-  const normalized = url.trim().toLowerCase().split(/[?#]/, 1)[0] || ''
-  return normalized.includes('/droid-ept-viewer/') || normalized.endsWith('/ept.json') || normalized.endsWith('.copc.laz')
-}
-
-function eptApiUrlToViewerUrl(eptUrl: string, projectId: string, datasetId: string, displayName: string): string {
-  const normalizedEptUrl = toSameOriginBackendUrl(eptUrl) || eptUrl
-  const params = new URLSearchParams({
-    ept: normalizedEptUrl,
-    project: projectId,
-    dataset: datasetId || normalizedPointCloudName(displayName),
-    name: displayName,
-  })
-  return `/droid-ept-viewer/index.html?${params.toString()}`
-}
-
-function copcApiUrlToViewerUrl(copcUrl: string, projectId: string, datasetId: string, displayName: string): string {
-  const normalizedCopcUrl = toSameOriginBackendUrl(copcUrl) || copcUrl
-  const params = new URLSearchParams({
-    copc: normalizedCopcUrl,
-    project: projectId,
-    dataset: datasetId || normalizedPointCloudName(displayName),
-    name: displayName,
-  })
-  return `/droid-ept-viewer/index.html?${params.toString()}`
-}
-
-function normalizePointCloudViewerUrl(url: string | undefined, projectId: string, datasetId: string, displayName: string): string {
-  const sameOriginUrl = toSameOriginBackendUrl(url) || ''
-  if (!sameOriginUrl || isRawPointCloudUrl(sameOriginUrl)) return ''
-  if (sameOriginUrl.toLowerCase().split(/[?#]/, 1)[0]?.endsWith('.copc.laz')) {
-    return copcApiUrlToViewerUrl(sameOriginUrl, projectId, datasetId, displayName)
+function mergeCatalogRowFields(winner: DatasetRow, candidate: DatasetRow): DatasetRow {
+  const next = { ...winner }
+  if (!next.layerUrl && candidate.layerUrl) next.layerUrl = candidate.layerUrl
+  if (!next.datasetId && candidate.datasetId) next.datasetId = candidate.datasetId
+  if ((!next.size || next.size === '--') && candidate.size && candidate.size !== '--') next.size = candidate.size
+  if (!next.relPath && candidate.relPath) next.relPath = candidate.relPath
+  if (!next.filePath && candidate.filePath) next.filePath = candidate.filePath
+  if (!next.uploadDateRaw && candidate.uploadDateRaw) {
+    next.uploadDateRaw = candidate.uploadDateRaw
+    next.uploadDate = candidate.uploadDate
   }
-  if (sameOriginUrl.toLowerCase().split(/[?#]/, 1)[0]?.endsWith('/ept.json')) {
-    return eptApiUrlToViewerUrl(sameOriginUrl, projectId, datasetId, displayName)
+  if (candidate.status === 'Web-Ready' && winner.status !== 'Web-Ready') {
+    next.status = candidate.status
   }
-  return isPointCloudViewerUrl(sameOriginUrl) ? sameOriginUrl : ''
+  return next
 }
 
-function normalizedPointCloudName(name: string): string {
-  return name
-    .trim()
-    .toLowerCase()
-    .replace(/\\/g, '/')
-    .split('/')
-    .pop()!
-    .replace(/\.(copc\.laz|las|laz|json)$/i, '')
-    .replace(/^(?:ept|copc|pointcloud|point-cloud|pc)(?=[0-9._\-\s])[\W_]*/i, '')
-    .replace(/[\W_]*(?:ept|copc|pointcloud|point-cloud|pc)$/i, '')
-    .replace(/[-_][a-f0-9]{8,}$/i, '')
-    .replace(/[^a-z0-9]+/g, '')
+function finalizeCatalogRows(rows: DatasetRow[]): DatasetRow[] {
+  const passthrough: DatasetRow[] = []
+  const groups = new Map<string, DatasetRow[]>()
+
+  for (const row of rows) {
+    if (!isPointCloudRow(row)) {
+      passthrough.push(row)
+      continue
+    }
+    const key = normalizedPointCloudName(row.fileName) || row.datasetId || row.id
+    if (!key || key.length < 3) {
+      passthrough.push(row)
+      continue
+    }
+    const group = groups.get(key) || []
+    group.push(row)
+    groups.set(key, group)
+  }
+
+  const deduped: DatasetRow[] = [...passthrough]
+  for (const group of groups.values()) {
+    const sorted = [...group].sort((left, right) => pointCloudCatalogRank(left) - pointCloudCatalogRank(right))
+    let winner = sorted[0]
+    for (const candidate of sorted.slice(1)) {
+      winner = mergeCatalogRowFields(winner, candidate)
+    }
+    if (pointCloudCatalogRank(winner) >= 9 && group.some((row) => pointCloudCatalogRank(row) <= 1)) {
+      continue
+    }
+    deduped.push(winner)
+  }
+
+  return deduped.sort((a, b) => {
+    const aProcessing = a.status === 'Processing' ? 0 : 1
+    const bProcessing = b.status === 'Processing' ? 0 : 1
+    if (aProcessing !== bProcessing) return aProcessing - bProcessing
+    return String(b.uploadDateRaw || b.fileName).localeCompare(String(a.uploadDateRaw || a.fileName))
+  })
 }
 
 function buildActiveLayer(projectId: string, row: DatasetRow) {
-  if (!row.layerType || !row.layerUrl) return null
-  if (isPointCloudLayer(row.layerType) && isRawPointCloudUrl(row.layerUrl)) return null
+  if (!row.layerType) return null
+  if (isPointCloudLayer(row.layerType) && isRawPointCloudUrl(row.layerUrl || '')) return null
   if (row.layerType === 'Reports') return null
+  let url = row.layerUrl || ''
+  if (isTwoDLayer(row.layerType) || String(row.layerType).toLowerCase() === 'cog') {
+    url = buildRasterTileUrl({
+      url: row.layerUrl,
+      layerType: row.layerType,
+      datasetType: row.datasetType || toBackendDatasetType(row.type),
+      cogPath: row.cogPath,
+      cogRelPath: row.cogRelPath,
+      datasetId: row.datasetId,
+      cacheKey: row.uploadDateRaw || row.cogRelPath,
+      rescaleMin: row.rescaleMin,
+      rescaleMax: row.rescaleMax,
+    }) || (isRasterDirectDownloadUrl(url) ? '' : url)
+  }
+  if (!url) return null
   return {
     id: `${projectId}:${row.datasetId || row.fileName}`,
     projectId,
     name: row.fileName,
     layerType: row.layerType,
-    url: row.layerUrl,
+    url,
     datasetId: row.datasetId,
     datasetType: row.datasetType || toBackendDatasetType(row.type),
     month: row.month,
@@ -479,7 +555,7 @@ function buildActiveLayer(projectId: string, row: DatasetRow) {
 
 export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   const { tasks, startDatasetUpload, startPointCloudUpload } = useUploadContext()
-  const { setActiveId, setActiveViewerTab, upsertLayer, removeLayer } = useWorkspaceContext()
+  const { setActiveId, setActiveViewerTab, upsertLayer, removeLayer, setPending3DOpen } = useWorkspaceContext()
   const { isAdmin, user } = useAuthContext()
   const canUploadData = isAdmin || user?.can_upload_data === true
   const modal = useModal()
@@ -496,40 +572,92 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   const [generatingContours, setGeneratingContours] = useState<Record<string, boolean>>({})
   const [exportingGrid, setExportingGrid] = useState<Record<string, string>>({})
   const [exportToast, setExportToast] = useState<{ title: string; body: string } | null>(null)
+  const [manualBulkFolder, setManualBulkFolder] = useState('')
+  const [manualBulkKind, setManualBulkKind] = useState<AdminManualBulkImportTask['kind']>('las')
+  const [manualBulkQueue, setManualBulkQueue] = useState<AdminManualBulkImportTask[]>([])
+  const [manualBulkRunning, setManualBulkRunning] = useState(false)
+  const [locatingManualFolder, setLocatingManualFolder] = useState(false)
+  const [locatingManualFile, setLocatingManualFile] = useState(false)
   const [uploadForm, setUploadForm] = useState<UploadFormState>({
     name: '',
     type: 'Point Cloud',
     date: new Date().toISOString().slice(0, 10),
     epsg: '',
   })
+  const loadGenerationRef = useRef(0)
+  const catalogRevisionRef = useRef<number | null>(null)
 
   const activeTasks = useMemo(
     () => tasks.filter((task) => task.projectId === projectId && task.state !== 'success'),
     [projectId, tasks],
   )
+  const recentSuccessTasks = useMemo(
+    () => tasks.filter((task) => task.projectId === projectId && task.state === 'success'),
+    [projectId, tasks],
+  )
   const primaryTask = activeTasks.find((task) => task.state === 'uploading' || task.state === 'processing') || activeTasks[0]
+  const manualBulkProcessingRows = useMemo(
+    () => datasets.filter((row) => row.status === 'Processing' || row.status === 'Failed'),
+    [datasets],
+  )
+  const hasLiveProcessing = manualBulkProcessingRows.some((row) => row.status === 'Processing')
+  const manualBulkProcessingSummary = useMemo(() => {
+    const active = manualBulkProcessingRows.filter((row) => row.status === 'Processing')
+    const failed = manualBulkProcessingRows.filter((row) => row.status === 'Failed').length
+    const ready = datasets.filter((row) => row.status === 'Web-Ready').length
+    const knownProgress = active
+      .map((row) => row.progressPercent)
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+    const averageProgress = knownProgress.length
+      ? knownProgress.reduce((sum, value) => sum + value, 0) / knownProgress.length
+      : undefined
+    return {
+      activeCount: active.length,
+      failedCount: failed,
+      readyCount: ready,
+      averageProgress,
+    }
+  }, [datasets, manualBulkProcessingRows])
 
-  const loadRows = useCallback(async (currentProjectId: string, cacheKey: string, cancelledRef: () => boolean) => {
+  const loadRows = useCallback(async (currentProjectId: string, cancelledRef: () => boolean, forceRefresh = false) => {
+    const generation = ++loadGenerationRef.current
     try {
-      const [jobs, files] = await Promise.all([getProjectJobs(currentProjectId), getProjectFiles(currentProjectId)])
-      if (cancelledRef()) return
+      const [jobs, files] = await Promise.all([
+        getProjectJobs(currentProjectId, forceRefresh),
+        getProjectFiles(currentProjectId, forceRefresh),
+      ])
+      if (cancelledRef() || generation !== loadGenerationRef.current) return
       const fileRows = files
         .filter((file) => file.kind !== 'Raw Survey Data' && file.kind !== 'Generated Grid Export')
-        .map(mapProjectFile)
+        .map((file) => mapProjectFile(file, currentProjectId))
       const fileDatasetIds = new Set(fileRows.map((row) => row.datasetId).filter(Boolean))
       const jobRows: DatasetRow[] = jobs
         .filter((job: ProjectJob) => !fileDatasetIds.has(job.job_id))
-        .map((job: ProjectJob) => ({
-          id: `job-${job.job_id}`,
-          fileName: job.file_name,
-          type: inferDatasetType(job.file_name),
-          size: '--',
-          status: normalizeJobStatus(job.status),
-          stage: job.stage || undefined,
-          progressPercent: normalizeProgressPercent(job.progress_percent),
-          etaText: formatEtaLabel(job.eta_seconds),
-          datasetId: job.job_id,
-        }))
+        .map((job: ProjectJob) => {
+          const inferredType = datasetTypeFromBackend(job.dataset_type) || inferDatasetType(job.file_name)
+          const normalizedJobType = String(job.dataset_type || job.kind || '').toLowerCase()
+          const layerType =
+            normalizedJobType === 'ortho' ? 'Ortho' :
+            normalizedJobType === 'dtm' ? 'DTM' :
+            normalizedJobType === 'dsm' ? 'DSM' :
+            normalizedJobType === 'pointcloud' ? 'pointcloud' :
+            normalizedJobType === '3dmodel' ? '3DModel' :
+            undefined
+          return {
+            id: `job-${job.job_id}`,
+            fileName: job.file_name,
+            type: inferredType,
+            size: '--',
+            status: normalizeJobStatus(job.status),
+            stage: shortStageLabel(job.stage, job.error),
+            errorMessage: job.error || undefined,
+            progressPercent: normalizeProgressPercent(job.progress_percent),
+            etaText: formatEtaLabel(job.eta_seconds),
+            datasetId: job.job_id,
+            layerType,
+            datasetType: job.dataset_type || job.kind,
+          }
+        })
       const mergedMap = new Map<string, DatasetRow>()
       ;[...fileRows, ...jobRows].forEach((row) => {
         const key = datasetMergeKey(row)
@@ -538,12 +666,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
           mergedMap.set(key, row)
         }
       })
-      const mergedRows = [...mergedMap.values()].sort((a, b) => {
-        const aProcessing = a.status === 'Processing' ? 0 : 1
-        const bProcessing = b.status === 'Processing' ? 0 : 1
-        if (aProcessing !== bProcessing) return aProcessing - bProcessing
-        return String(b.uploadDateRaw || b.fileName).localeCompare(String(a.uploadDateRaw || a.fileName))
-      })
+      const mergedRows = finalizeCatalogRows([...mergedMap.values()])
       setDatasets(mergedRows)
       mergedRows
         .filter((row) => row.status === 'Web-Ready')
@@ -551,38 +674,56 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
           const layer = buildActiveLayer(currentProjectId, row)
           if (layer) upsertLayer(layer)
         })
-      window.sessionStorage.setItem(cacheKey, JSON.stringify(mergedRows))
     } catch {
-      if (!cancelledRef()) setDatasets([])
+      // Keep last good rows on transient network errors.
     } finally {
-      if (!cancelledRef()) setLoadingRows(false)
+      if (!cancelledRef() && generation === loadGenerationRef.current) setLoadingRows(false)
     }
   }, [upsertLayer])
 
   useEffect(() => {
     if (!projectId) return
-    const cacheKey = `datasets:rows:v3:${projectId}`
     let cancelled = false
     setLoadingRows(true)
-    try {
-      const raw = window.sessionStorage.getItem(cacheKey)
-      if (raw) {
-        const cachedRows = JSON.parse(raw) as DatasetRow[]
-        setDatasets(cachedRows.filter((row) => !isPointCloudRow(row) || Boolean(row.layerUrl)))
+    void loadRows(projectId, () => cancelled, true)
+    const pollRevision = async () => {
+      try {
+        const revision = await getCatalogRevision(projectId)
+        if (cancelled) return
+        const previous = catalogRevisionRef.current
+        catalogRevisionRef.current = revision
+        if (previous !== null && revision !== previous) {
+          invalidateProjectDataCache(projectId)
+          await loadRows(projectId, () => cancelled, true)
+        }
+      } catch {
+        // ignore revision poll errors
       }
-    } catch {
-      // ignore cache parse issues
     }
-    void loadRows(projectId, cacheKey, () => cancelled)
+    void pollRevision()
     const poll = window.setInterval(() => {
-      invalidateProjectDataCache(projectId)
-      void loadRows(projectId, cacheKey, () => cancelled)
-    }, activeTasks.length ? 3000 : 10000)
+      void pollRevision()
+    }, activeTasks.length || hasLiveProcessing || manualBulkRunning ? 2000 : 15000)
     return () => {
       cancelled = true
       window.clearInterval(poll)
     }
-  }, [activeTasks.length, loadRows, projectId])
+  }, [activeTasks.length, hasLiveProcessing, loadRows, manualBulkRunning, projectId])
+
+  useEffect(() => {
+    if (!projectId || (!hasLiveProcessing && !manualBulkRunning)) return
+    let cancelled = false
+    const refresh = () => {
+      invalidateProjectDataCache(projectId)
+      void loadRows(projectId, () => cancelled, true)
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 2000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [hasLiveProcessing, loadRows, manualBulkRunning, projectId])
 
   useEffect(() => {
     if (!projectId) return
@@ -600,12 +741,33 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
           etaText: task.etaText,
           datasetId: task.datasetId,
         } as DatasetRow))
+      const handoff = recentSuccessTasks
+        .filter((task) => task.datasetId)
+        .map((task) => ({
+          id: `dataset-${task.datasetId}`,
+          fileName: task.fileName,
+          type: datasetTypeFromBackend(task.datasetType) || inferDatasetType(task.fileName),
+          size: '--',
+          status: 'Processing',
+          stage: task.stage || 'Finalizing',
+          progressPercent: 100,
+          etaText: 'Done',
+          datasetId: task.datasetId,
+        } as DatasetRow))
+        .filter((row) => {
+          const ready = prev.some(
+            (existing) =>
+              existing.datasetId === row.datasetId &&
+              existing.status === 'Web-Ready',
+          )
+          return !ready
+        })
       const readyPointCloudNames = new Set(
         prev
           .filter((row) => isPointCloudLayer(row.layerType) && row.layerUrl && isPointCloudViewerUrl(row.layerUrl))
           .map((row) => normalizedPointCloudName(row.fileName)),
       )
-      const filteredLive = live.filter((row) => !readyPointCloudNames.has(normalizedPointCloudName(row.fileName)))
+      const filteredLive = [...live, ...handoff].filter((row) => !readyPointCloudNames.has(normalizedPointCloudName(row.fileName)))
       const filteredLiveKeys = new Set(filteredLive.map((row) => datasetMergeKey(row)))
       const base = prev.filter((row) => !row.id.startsWith('live-') && !filteredLiveKeys.has(datasetMergeKey(row)))
       const mergedMap = new Map<string, DatasetRow>()
@@ -621,14 +783,9 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
           mergedMap.set(key, row)
         }
       })
-      return [...mergedMap.values()].sort((a, b) => {
-        const aProcessing = a.status === 'Processing' ? 0 : 1
-        const bProcessing = b.status === 'Processing' ? 0 : 1
-        if (aProcessing !== bProcessing) return aProcessing - bProcessing
-        return String(b.uploadDateRaw || b.fileName).localeCompare(String(a.uploadDateRaw || a.fileName))
-      })
+      return finalizeCatalogRows([...mergedMap.values()])
     })
-  }, [activeTasks, projectId])
+  }, [activeTasks, projectId, recentSuccessTasks])
 
   useEffect(() => {
     if (!exportToast) return
@@ -692,6 +849,27 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     setSelectedFile(null)
   }, [canUploadData, modal, projectId, selectedFile, startDatasetUpload, startPointCloudUpload, uploadForm.date, uploadForm.epsg, uploadForm.name, uploadForm.type])
 
+  const onDeleteDataset = useCallback(async (row: DatasetRow) => {
+    if (!projectId) return
+    try {
+      if (row.datasetId) {
+        await deleteCatalogAsset(projectId, row.datasetId)
+      } else if (row.relPath) {
+        await deleteProjectFile(projectId, row.relPath)
+      } else {
+        await modal.alert('Delete unavailable', 'This catalog row has no linked file path or dataset id.')
+        return
+      }
+      invalidateProjectDataCache(projectId)
+      const layer = buildActiveLayer(projectId, row)
+      if (layer) removeLayer(layer.id)
+      setDatasets((prev) => prev.filter((item) => !isSameDatasetRow(item, row)))
+      void loadRows(projectId, () => false, true)
+    } catch (error) {
+      await modal.alert('Delete failed', error instanceof Error ? error.message : 'Delete failed')
+    }
+  }, [loadRows, modal, projectId, removeLayer])
+
   const getActionLabel = useCallback((row: DatasetRow) => {
     if (['cog', 'Ortho', 'DTM', 'DSM'].includes(String(row.layerType))) return `Show ${row.type} on Map`
     if (String(row.layerType).toLowerCase() === 'pointcloud') return 'Open Point Cloud'
@@ -716,9 +894,8 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     try {
       await generateContours(projectId, { dataset_id: row.datasetId, interval })
       invalidateProjectDataCache(projectId)
-      const cacheKey = `datasets:rows:v2:${projectId}`
       setLoadingRows(true)
-      await loadRows(projectId, cacheKey, () => false)
+      await loadRows(projectId, () => false, true)
       await modal.alert('Contours started', 'Contour generation started. The Vector layer will appear when ready.')
     } catch (error) {
       await modal.alert('Contour generation failed', error instanceof Error ? error.message : 'Contour generation failed')
@@ -740,7 +917,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     setExportingGrid((prev) => ({ ...prev, [key]: format }))
     try {
       const filename = await exportDatasetGrid(projectId, row.datasetId, { format, interval, fileName: row.fileName })
-      window.sessionStorage.removeItem(`datasets:rows:v2:${projectId}`)
+      invalidateProjectDataCache(projectId)
       setExportToast({
         title: 'Grid export ready',
         body: `${filename} added to Data Downloads.`,
@@ -773,9 +950,8 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         dataset_type: row.datasetType || toBackendDatasetType(row.type),
       })
       invalidateProjectDataCache(projectId)
-      const cacheKey = `datasets:rows:v2:${projectId}`
       setLoadingRows(true)
-      await loadRows(projectId, cacheKey, () => false)
+      await loadRows(projectId, () => false, true)
     } catch (error) {
       await modal.alert('Admin metadata update failed', error instanceof Error ? error.message : 'Admin metadata update failed')
     }
@@ -811,21 +987,32 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
   }, [modal, projectId])
 
   const onAdminForceDelete = useCallback(async (row: DatasetRow) => {
-    if (!projectId || !row.datasetId) return
+    if (!projectId) return
+    const deleteKey = row.datasetId || row.fileName
+    if (!deleteKey) return
     const confirmed = await modal.confirm(
       'Force delete dataset',
-      `Force delete ${row.fileName}? This removes the selected dataset path from local storage.`,
+      `Force delete ${row.fileName}? This removes catalog records and matching files from local storage.`,
     )
     if (!confirmed) return
     try {
-      await forceDeleteAdminDataset(projectId, row.datasetId)
+      await forceDeleteAdminDataset(projectId, deleteKey)
       invalidateProjectDataCache(projectId)
       const layer = buildActiveLayer(projectId, row)
       if (layer) removeLayer(layer.id)
-      window.sessionStorage.removeItem(`datasets:rows:v2:${projectId}`)
       setDatasets((prev) => prev.filter((item) => !isSameDatasetRow(item, row)))
-      void loadRows(projectId, `datasets:rows:v2:${projectId}`, () => false)
+      void loadRows(projectId, () => false, true)
     } catch (error) {
+      if (row.datasetId) {
+        try {
+          await deleteCatalogAsset(projectId, row.datasetId)
+          setDatasets((prev) => prev.filter((item) => !isSameDatasetRow(item, row)))
+          void loadRows(projectId, () => false, true)
+          return
+        } catch {
+          // fall through to alert below
+        }
+      }
       await modal.alert('Admin force delete failed', error instanceof Error ? error.message : 'Admin force delete failed')
     }
   }, [loadRows, modal, projectId, removeLayer])
@@ -836,9 +1023,8 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     try {
       const res = await syncManualDatasetFolders(projectId)
       await modal.alert('Manual sync complete', res.message || `Found ${res.new_count} manual datasets`)
-      const cacheKey = `datasets:rows:v2:${projectId}`
       setLoadingRows(true)
-      await loadRows(projectId, cacheKey, () => false)
+      await loadRows(projectId, () => false, true)
     } catch (err) {
       await modal.alert('Manual sync failed', err instanceof Error ? err.message : 'Manual sync failed')
     } finally {
@@ -882,6 +1068,87 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       setDetectingEpsg(false)
     }
   }, [detectingEpsg, projectId, selectedFile, uploadForm.type])
+
+  const addManualBulkTask = useCallback(() => {
+    const folder = manualBulkFolder.trim().replace(/^"+|"+$/g, '')
+    if (!folder) return
+    setManualBulkQueue((prev) => [...prev, { source_folder: folder, kind: manualBulkKind }])
+  }, [manualBulkFolder, manualBulkKind])
+
+  const onLocateManualBulkFolder = useCallback(async () => {
+    if (!isAdmin || locatingManualFolder) return
+    const proceed = await modal.confirm(
+      'Locate folder on this PC',
+      'This opens a Windows folder picker on the machine where the backend runs — not inside the browser. While "Locating..." is shown, check the Windows taskbar; the dialog may open behind this window.\n\nYou can also paste the folder path directly (for example D:\\MyBulkFolder).',
+    )
+    if (!proceed) return
+    setLocatingManualFolder(true)
+    try {
+      const res = await adminLocateFolder(manualBulkFolder.trim(), { kind: manualBulkKind, mode: 'folder' })
+      if (res.folder_path) setManualBulkFolder(res.folder_path)
+    } catch (err) {
+      await modal.alert(
+        'Locate folder',
+        err instanceof Error ? err.message : 'Could not open server folder picker',
+      )
+    } finally {
+      setLocatingManualFolder(false)
+    }
+  }, [isAdmin, locatingManualFolder, manualBulkFolder, manualBulkKind, modal])
+
+  const onLocateManualBulkFile = useCallback(async () => {
+    if (!isAdmin || locatingManualFile) return
+    const proceed = await modal.confirm(
+      'Locate sample file on this PC',
+      'This opens a Windows file picker on the machine where the backend runs. Pick one matching file and the folder path will be filled automatically for bulk import.',
+    )
+    if (!proceed) return
+    setLocatingManualFile(true)
+    try {
+      const res = await adminLocateFolder(manualBulkFolder.trim(), { kind: manualBulkKind, mode: 'file' })
+      if (res.folder_path) setManualBulkFolder(res.folder_path)
+    } catch (err) {
+      await modal.alert(
+        'Locate file',
+        err instanceof Error ? err.message : 'Could not open server file picker',
+      )
+    } finally {
+      setLocatingManualFile(false)
+    }
+  }, [isAdmin, locatingManualFile, manualBulkFolder, manualBulkKind, modal])
+
+  const runManualBulk = useCallback(async () => {
+    if (!projectId || !isAdmin || manualBulkRunning) return
+    const tasks = manualBulkQueue.length ? manualBulkQueue : (manualBulkFolder.trim() ? [{ source_folder: manualBulkFolder.trim().replace(/^"+|"+$/g, ''), kind: manualBulkKind }] : [])
+    if (!tasks.length) {
+      await modal.alert('Manual bulk import', 'Please enter a source folder path and select type.')
+      return
+    }
+    setManualBulkRunning(true)
+    try {
+      const res = await adminManualBulkImport(projectId, { tasks, max_parallel: 2 })
+      const fileCount = Number(res.file_count) || 0
+      await modal.alert(
+        'Manual bulk import queued',
+        fileCount > 0
+          ? `${fileCount} file(s) queued from ${res.task_count} folder task(s). Watch Bulk Processing Monitor below for live stage and percent.`
+          : `${res.task_count} task(s) queued. Processing will run in background.`,
+      )
+      setManualBulkQueue([])
+      setManualBulkFolder('')
+      invalidateProjectDataCache(projectId)
+      setLoadingRows(true)
+      await loadRows(projectId, () => false, true)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Manual bulk import failed'
+      const hint = message.toLowerCase().includes('not found')
+        ? ' Backend route missing. Run 0_Stop_Dev_Environment.bat then 1_Start_Dev_Environment.bat, then open http://127.0.0.1:8001/api/version and confirm manual_bulk_import is true.'
+        : ''
+      await modal.alert('Manual bulk import failed', `${message}${hint}`)
+    } finally {
+      setManualBulkRunning(false)
+    }
+  }, [isAdmin, loadRows, manualBulkFolder, manualBulkKind, manualBulkQueue, manualBulkRunning, modal, projectId])
 
   return (
     <>
@@ -950,6 +1217,139 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         </div>
         ) : null}
       </header>
+
+      {isAdmin ? (
+        <div className="dsp-manual-bulk">
+          <div className="dsp-manual-bulk__head">
+            <strong>Admin Manual Bulk Import</strong>
+            <span>Folder must exist on the Windows PC where the backend runs. Paste a path (e.g. D:\MyBulkFolder) or use Locate Folder — the picker opens on that PC, not in the browser.</span>
+          </div>
+          <div className="dsp-manual-bulk__form">
+            <label>
+              Source folder
+              <div className="dsp-manual-bulk__folder-row">
+                <input
+                  value={manualBulkFolder}
+                  onChange={(e) => setManualBulkFolder(e.target.value)}
+                  placeholder='D:\MyBulkFolder'
+                />
+                <button
+                  type="button"
+                  className="dsp-action dsp-action--secondary"
+                  onClick={() => void onLocateManualBulkFolder()}
+                  disabled={!isAdmin || locatingManualFolder || locatingManualFile || manualBulkRunning}
+                  title="Open folder picker on the server machine"
+                >
+                  {locatingManualFolder ? 'Locating...' : 'Locate Folder'}
+                </button>
+                <button
+                  type="button"
+                  className="dsp-action dsp-action--secondary"
+                  onClick={() => void onLocateManualBulkFile()}
+                  disabled={!isAdmin || locatingManualFolder || locatingManualFile || manualBulkRunning}
+                  title="Pick one matching file; folder path will auto-fill"
+                >
+                  {locatingManualFile ? 'Picking...' : 'Locate File'}
+                </button>
+              </div>
+            </label>
+            <label>
+              Type
+              <select value={manualBulkKind} onChange={(e) => setManualBulkKind(e.target.value as AdminManualBulkImportTask["kind"])}>
+                <option value="las">LAS/LAZ (convert to COPC)</option>
+                <option value="ortho">Ortho (auto EPSG)</option>
+                <option value="dtm">DTM/DEM (auto EPSG)</option>
+                <option value="dsm">DSM (auto EPSG)</option>
+              </select>
+            </label>
+            <div className="dsp-manual-bulk__actions">
+              <button type="button" className="dsp-action dsp-action--secondary" onClick={addManualBulkTask} disabled={!projectId || manualBulkRunning}>
+                Add Task
+              </button>
+              <button
+                type="button"
+                className="dsp-action dsp-action--secondary"
+                onClick={() => setManualBulkQueue([])}
+                disabled={!manualBulkQueue.length || manualBulkRunning}
+              >
+                Clear
+              </button>
+              <button type="button" className="dsp-action dsp-action--primary" onClick={() => void runManualBulk()} disabled={!projectId || manualBulkRunning}>
+                {manualBulkRunning ? 'Queuing...' : 'Start Bulk Import'}
+              </button>
+            </div>
+          </div>
+          {manualBulkQueue.length ? (
+            <div className="dsp-manual-bulk__queue">
+              {manualBulkQueue.map((task, idx) => (
+                <div key={`${task.kind}:${task.source_folder}:${idx}`} className="dsp-manual-bulk__row">
+                  <span className="dsp-manual-bulk__chip">{task.kind.toUpperCase()}</span>
+                  <span className="dsp-manual-bulk__path" title={task.source_folder}>{task.source_folder}</span>
+                  <button
+                    type="button"
+                    className="dsp-action dsp-action--danger"
+                    onClick={() => setManualBulkQueue((prev) => prev.filter((_, i) => i !== idx))}
+                    disabled={manualBulkRunning}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <div className="dsp-manual-bulk__monitor" aria-live="polite">
+            <div className="dsp-manual-bulk__monitor-head">
+              <strong>Bulk Processing Monitor</strong>
+              <span>
+                {manualBulkProcessingSummary.activeCount
+                  ? `${manualBulkProcessingSummary.activeCount} active`
+                  : 'No active processing'}
+                {manualBulkProcessingSummary.failedCount ? ` • ${manualBulkProcessingSummary.failedCount} failed` : ''}
+                {manualBulkProcessingSummary.readyCount ? ` • ${manualBulkProcessingSummary.readyCount} ready` : ''}
+              </span>
+            </div>
+            {manualBulkProcessingSummary.averageProgress !== undefined ? (
+              <div className="dsp-progress dsp-progress--compact">
+                <div className="dsp-progress__summary">
+                  <strong>Overall processing</strong>
+                  <span>Average across current project processing jobs</span>
+                  <em>{manualBulkProcessingSummary.activeCount > 1 ? 'Multiple files running' : 'Single file running'}</em>
+                </div>
+                <div className="dsp-progress__barline">
+                  <span>{`${Math.round(manualBulkProcessingSummary.averageProgress)}%`}</span>
+                  <div className="dsp-progress__track">
+                    <div className="dsp-progress__fill" style={{ width: `${manualBulkProcessingSummary.averageProgress}%` }} />
+                  </div>
+                </div>
+              </div>
+            ) : null}
+            <div className="dsp-manual-bulk__monitor-list">
+              {manualBulkProcessingRows.length ? manualBulkProcessingRows.slice(0, 8).map((row) => (
+                <div key={`monitor-${row.id}`} className="dsp-manual-bulk__monitor-row">
+                  <div className="dsp-manual-bulk__monitor-text">
+                    <strong title={row.fileName}>{row.fileName}</strong>
+                    <span>{row.type}</span>
+                    <em title={row.errorMessage || row.stage || ''}>
+                      {row.stage || (row.status === 'Failed' ? 'Failed' : 'Processing')}
+                    </em>
+                  </div>
+                  <div className="dsp-manual-bulk__monitor-progress">
+                    <span>{row.progressPercent !== undefined ? `${Math.round(row.progressPercent)}%` : row.status}</span>
+                    <div className="dsp-progress__track">
+                      <div className="dsp-progress__fill" style={{ width: `${row.progressPercent ?? 100}%` }} />
+                    </div>
+                    <small>{row.etaText || (row.status === 'Failed' ? 'Needs attention' : 'Working...')}</small>
+                  </div>
+                </div>
+              )) : (
+                <div className="dsp-manual-bulk__monitor-empty">
+                  Start a bulk import and its per-file stage and percent will appear here.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {canUploadData ? (
       <div
@@ -1121,12 +1521,18 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                   ) : null}
                 </td>
                 <td>
-                  <span className={row.status === 'Web-Ready' ? 'dsp-badge dsp-badge--ready' : 'dsp-badge dsp-badge--processing'}>
+                  <span className={
+                    row.status === 'Web-Ready'
+                      ? 'dsp-badge dsp-badge--ready'
+                      : row.status === 'Failed'
+                        ? 'dsp-badge dsp-badge--failed'
+                        : 'dsp-badge dsp-badge--processing'
+                  }>
                     {row.status}
                   </span>
-                  {row.status === 'Processing' ? (
-                    <div className="dsp-row-progress">
-                      <span>{row.stage || 'Processing'}</span>
+                  {row.status === 'Processing' || row.status === 'Failed' ? (
+                    <div className="dsp-row-progress" title={row.errorMessage || row.stage || ''}>
+                      <span>{row.stage || (row.status === 'Failed' ? 'Conversion failed' : 'Processing')}</span>
                       <em>{row.progressPercent !== undefined ? `${Math.round(row.progressPercent)}%` : ''}{row.etaText ? ` - ${row.etaText}` : ''}</em>
                     </div>
                   ) : null}
@@ -1134,8 +1540,8 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                 <td>
                   <div className="dsp-action-group">
                     {row.status !== 'Web-Ready' ? (
-                      <button type="button" className="dsp-action" disabled>
-                        {row.stage || 'Processing...'}
+                      <button type="button" className="dsp-action dsp-action--muted" disabled>
+                        {row.status === 'Failed' ? 'Failed' : 'Processing...'}
                       </button>
                     ) : row.layerType && (row.layerUrl || (isPointCloudLayer(row.layerType) && row.datasetId)) ? (
                       <button
@@ -1177,7 +1583,7 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                                 ].map((value) => String(value || '').trim()).filter(Boolean)))
                                 for (const lookup of lookupCandidates) {
                                   const candidateStatus = await getPointCloudStatus(projectId, lookup)
-                                  if (candidateStatus?.ready && (candidateStatus.tileset_url || candidateStatus.copc_url || candidateStatus.ept_url)) {
+                                  if (candidateStatus?.ready && (candidateStatus.tileset_url || candidateStatus.copc_url)) {
                                     status = candidateStatus
                                     break
                                   }
@@ -1189,15 +1595,6 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                                   row.datasetId || row.fileName,
                                   row.fileName,
                                 )
-                                const statusEptViewerUrl =
-                                  status?.ready && status?.ept_url
-                                    ? normalizePointCloudViewerUrl(
-                                      status.ept_url,
-                                      projectId,
-                                      row.datasetId || row.fileName,
-                                      row.fileName,
-                                    )
-                                    : ''
                                 const statusCopcViewerUrl =
                                   status?.ready && status?.copc_url
                                     ? normalizePointCloudViewerUrl(
@@ -1208,11 +1605,8 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                                     )
                                     : ''
                                 let readyUrl =
-                                  status?.ready && resolvedUrl
-                                    ? resolvedUrl
-                                    : statusCopcViewerUrl || statusEptViewerUrl
-                                      ? statusCopcViewerUrl || statusEptViewerUrl
-                                      : ''
+                                  statusCopcViewerUrl
+                                  || (status?.ready && resolvedUrl && resolvedUrl.includes('copc=') ? resolvedUrl : '')
                                 const sameNameReadyRow = datasets.find((candidate) => {
                                   const candidateUrl = candidate.layerUrl
                                   if (!candidateUrl) return false
@@ -1266,6 +1660,12 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                             setActiveViewerTab('2D')
                             setActiveId('map')
                           } else {
+                            setPending3DOpen({
+                              url: layer.url,
+                              name: layer.name,
+                              datasetId: String(layer.datasetId || row.datasetId || row.fileName),
+                              viewer: row.layerType === '3DModel' ? 'cesium' : 'potree',
+                            })
                             setActiveViewerTab('3D')
                             setActiveId('globe')
                           }
@@ -1273,29 +1673,25 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
                       >
                         {getActionLabel(row)}
                       </button>
-                    ) : (
+                    ) : null}
+                    {row.status === 'Web-Ready' && (row.relPath || row.datasetId) ? (
                       <button
                         type="button"
-                        className="dsp-action"
-                        onClick={async () => {
-                          if (!projectId || !row.relPath) return
-                          try {
-                            await deleteProjectFile(projectId, row.relPath)
-                            const layer = buildActiveLayer(projectId, row)
-                            if (layer) removeLayer(layer.id)
-                            window.sessionStorage.removeItem(`datasets:rows:v2:${projectId}`)
-                            setDatasets((prev) => prev.filter((item) => !isSameDatasetRow(item, row)))
-                            void loadRows(projectId, `datasets:rows:v2:${projectId}`, () => false)
-                            invalidateProjectDataCache(projectId)
-                          } catch {
-                            // keep UI stable on failure
-                          }
-                        }}
-                        disabled={!row.relPath}
+                        className="dsp-action dsp-action--danger"
+                        onClick={() => void onDeleteDataset(row)}
                       >
                         Delete
                       </button>
-                    )}
+                    ) : null}
+                    {(row.status === 'Processing' || row.status === 'Failed') && (row.datasetId || row.relPath) ? (
+                      <button
+                        type="button"
+                        className="dsp-action dsp-action--danger"
+                        onClick={() => void onDeleteDataset(row)}
+                      >
+                        Delete
+                      </button>
+                    ) : null}
                     {row.datasetId && ['DTM', 'DSM'].includes(row.type) ? (
                       <button
                         type="button"

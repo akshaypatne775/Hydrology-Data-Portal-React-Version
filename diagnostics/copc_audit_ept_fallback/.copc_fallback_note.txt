@@ -1,0 +1,1 @@
+COPC conversion failed: pdal executable was not found. Set PDAL_EXE or install PDAL before starting the backend.

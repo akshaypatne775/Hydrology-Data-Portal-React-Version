@@ -48,6 +48,13 @@ export type ActiveLayerConfig = {
   boundsWgs84?: [number, number, number, number]
 }
 
+export type Pending3DOpen = {
+  url: string
+  name: string
+  datasetId: string
+  viewer: 'potree' | 'cesium'
+}
+
 export function useWorkspaceState() {
   const saved = readSavedWorkspaceState()
   const [activeId, setActiveId] = useState<WorkspaceTabId>(saved.activeId || 'projects')
@@ -65,6 +72,7 @@ export function useWorkspaceState() {
   const [shareCopied, setShareCopied] = useState(false)
   const [activeLayers, setActiveLayers] = useState<ActiveLayerConfig[]>([])
   const [activeViewerTab, setActiveViewerTab] = useState<ActiveViewerTab>(saved.activeViewerTab || '2D')
+  const [pending3DOpen, setPending3DOpen] = useState<Pending3DOpen | null>(null)
 
   const upsertLayer = useCallback((layerConfig: ActiveLayerConfig) => {
     setActiveLayers((prev) => {
@@ -119,6 +127,8 @@ export function useWorkspaceState() {
       activeLayers,
       activeViewerTab,
       setActiveViewerTab,
+      pending3DOpen,
+      setPending3DOpen,
       upsertLayer,
       toggleLayer,
       removeLayer,
@@ -133,6 +143,7 @@ export function useWorkspaceState() {
       shareCopied,
       activeLayers,
       activeViewerTab,
+      pending3DOpen,
       upsertLayer,
       toggleLayer,
       removeLayer,

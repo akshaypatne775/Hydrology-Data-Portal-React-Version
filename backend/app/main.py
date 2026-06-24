@@ -21,7 +21,8 @@ import json
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from importlib.util import find_spec
-from urllib.parse import quote
+from typing import Callable
+from urllib.parse import quote, unquote
 from urllib.parse import urlencode
 from urllib.request import Request as UrlRequest, urlopen
 from urllib.error import URLError
@@ -50,6 +51,7 @@ from rio_tiler import colormap as rio_colormap
 from rio_tiler.io import Reader
 
 from app.core.database import configure_database, ensure_tables, get_db_connection
+from app.services import catalog_service
 from app.utils.spatial_import import (
     normalize_structure_type,
     parse_spatial_upload,
@@ -74,7 +76,8 @@ def _load_local_env_file() -> None:
             key, value = line.split("=", 1)
             key = key.strip()
             value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
+            force_keys = {"POTREE_NATIVE_COPC_ENABLED", "PDAL_EXE"}
+            if key and (key not in os.environ or key in force_keys):
                 os.environ[key] = value
     except OSError as exc:
         print(f"Could not load backend .env: {exc}")
@@ -140,12 +143,16 @@ PDAL_EXE = os.getenv(
     r"C:\Program Files\QGIS 3.22.8\bin\pdal.exe",
 ).strip()
 PROJECT_FILES_CACHE_TTL_SECONDS = float(os.getenv("PROJECT_FILES_CACHE_TTL_SECONDS", "15"))
-POTREE_NATIVE_COPC_ENABLED = os.getenv("POTREE_NATIVE_COPC_ENABLED", "false").strip().lower() in {
+POTREE_NATIVE_COPC_ENABLED = os.getenv("POTREE_NATIVE_COPC_ENABLED", "true").strip().lower() in {
     "1",
     "true",
     "yes",
     "on",
 }
+print(
+    f"[pointcloud] POTREE_NATIVE_COPC_ENABLED={POTREE_NATIVE_COPC_ENABLED} "
+    f"PDAL_EXE={PDAL_EXE}"
+)
 TIFF_TILE_BUDGET_MB = float(os.getenv("TIFF_TILE_BUDGET_MB", "100"))
 TIFF_TILE_MIN_ZOOM_LIMIT = int(os.getenv("TIFF_TILE_MIN_ZOOM_LIMIT", "14"))
 TIFF_TILE_MAX_ZOOM_LIMIT = int(os.getenv("TIFF_TILE_MAX_ZOOM_LIMIT", "19"))
@@ -261,9 +268,11 @@ class Debug404Middleware(BaseHTTPMiddleware):
         if response.status_code == 404 and request.url.path.startswith("/data/"):
             rel = request.url.path.replace("/data/", "", 1).lstrip("/")
             expected_path = Path(LOCAL_DATA_PATH) / rel
-            print(f"âŒ [DEBUG 404] Frontend requested: {request.url.path}")
-            print(f"ðŸ” [DEBUG 404] Backend looked for file at: {expected_path.resolve()}")
-            print(f"ðŸ“‚ [DEBUG 404] Does this file exist? {expected_path.exists()}")
+            print(
+                f"[DEBUG 404] Frontend requested: {request.url.path} | "
+                f"looked for: {expected_path.resolve()} | exists: {expected_path.exists()}",
+                flush=True,
+            )
         return response
 
 
@@ -369,6 +378,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Accept-Ranges", "Content-Range", "Content-Length", "Content-Type"],
 )
 app.include_router(
     cog_tiler.router,
@@ -447,6 +457,23 @@ class PointCloudSliceExportPayload(BaseModel):
     box: PointCloudSliceBoxPayload
     source_asset: str = ""
     viewer_type: str = ""
+
+
+class AdminManualBulkImportTask(BaseModel):
+    source_folder: str
+    kind: str  # las | ortho | dtm | dsm
+
+
+class AdminManualBulkImportPayload(BaseModel):
+    project_id: str = ""
+    tasks: list[AdminManualBulkImportTask]
+    max_parallel: int = 2
+
+
+class AdminLocateFolderPayload(BaseModel):
+    initial_path: str = ""
+    kind: str = ""
+    mode: str = "folder"
 
 
 class ClientErrorLogPayload(BaseModel):
@@ -1133,7 +1160,7 @@ async def process_pointcloud_background(
     file_name: str | None = None,
 ) -> None:
     """
-    Background conversion worker for COPC point clouds with Untwine EPT fallback.
+    Background conversion worker for COPC point clouds (PDAL writers.copc only).
     """
     if output_dir.is_dir():
         shutil.rmtree(output_dir, ignore_errors=True)
@@ -1145,7 +1172,7 @@ async def process_pointcloud_background(
     try:
         conversion = await run_in_threadpool(process_pointcloud, str(final_path), str(output_dir), output_dir.name)
         converter_label = conversion.get("converter", "Point Cloud")
-        viewer_type = conversion.get("asset_type", "ept")
+        viewer_type = conversion.get("asset_type", "copc")
         if project_id and job_id:
             _upsert_processing_job(
                 project_id,
@@ -1451,6 +1478,24 @@ def _copc_ept_compat_dir(copc_file: Path) -> Path:
     return copc_file.parent.with_name(f"{copc_file.parent.name}__ept_viewer")
 
 
+def _primary_copc_dir_for_ept_folder(ept_dir: Path) -> Path | None:
+    if not ept_dir.name.endswith("__ept_viewer"):
+        return None
+    copc_dir = ept_dir.parent / ept_dir.name[: -len("__ept_viewer")]
+    return copc_dir if _copc_asset_in_dir(copc_dir) is not None else None
+
+
+def _should_skip_ept_listing_for_native_copc(ept_dir: Path) -> bool:
+    if not POTREE_NATIVE_COPC_ENABLED:
+        return False
+    if ept_dir.name.endswith("__ept_viewer"):
+        return True
+    if _copc_asset_in_dir(ept_dir) is not None:
+        return True
+    primary = _primary_copc_dir_for_ept_folder(ept_dir)
+    return primary is not None
+
+
 def _process_copc_ept_compat_job(
     project_id: str,
     dataset_id: str,
@@ -1458,6 +1503,8 @@ def _process_copc_ept_compat_job(
     output_dir: str,
     display_name: str,
 ) -> None:
+    if POTREE_NATIVE_COPC_ENABLED:
+        return
     source = Path(copc_file)
     output = Path(output_dir)
     try:
@@ -1562,7 +1609,7 @@ def _process_copc_ept_compat_job(
 def _run_copc_converter_once(input_las: str, output_path: Path) -> str:
     """
     Convert LAS/LAZ to a single Cloud Optimized Point Cloud asset.
-    COPC is the primary fast-streaming output; Untwine EPT remains fallback.
+    COPC is the primary fast-streaming output for Potree native COPC viewing.
     """
     def reset_output_dir() -> None:
         if output_path.is_file():
@@ -1584,12 +1631,12 @@ def _run_copc_converter_once(input_las: str, output_path: Path) -> str:
     if not _pdal_has_driver(pdal_exe, "writers.copc"):
         raise RuntimeError(
             "COPC conversion failed: the configured PDAL executable does not expose writers.copc. "
-            f"PDAL_EXE={pdal_exe}. Install a PDAL build with COPC writer support or keep using Untwine EPT fallback."
+            f"PDAL_EXE={pdal_exe}. Install a PDAL build with COPC writer support."
         )
 
     reset_output_dir()
     output_file = output_path / "output.copc.laz"
-    command = [pdal_exe, "translate", str(input_path), str(output_file)]
+    command = [pdal_exe, "translate", str(input_path), str(output_file), "--writer", "writers.copc"]
     print(f"Running PDAL COPC conversion: {command}")
     env = os.environ.copy()
     env["PATH"] = str(Path(pdal_exe).parent) + os.pathsep + env.get("PATH", "")
@@ -1616,11 +1663,13 @@ def _run_copc_converter_once(input_las: str, output_path: Path) -> str:
     return "PDAL COPC"
 
 
-def process_pointcloud(input_las: str, output_dir: str, dataset_name: str) -> dict[str, str]:
-    """
-    Convert LAS/LAZ to COPC first, then fall back to Untwine EPT only if
-    PDAL COPC conversion is unavailable or fails.
-    """
+def process_pointcloud(
+    input_las: str,
+    output_dir: str,
+    dataset_name: str,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
+) -> dict[str, str]:
+    """Convert LAS/LAZ to COPC with PDAL writers.copc (no EPT/Untwine fallback)."""
     safe_dataset_name = _ept_dataset_name(dataset_name)
     output_path = Path(output_dir)
     if output_path.is_dir():
@@ -1630,8 +1679,9 @@ def process_pointcloud(input_las: str, output_dir: str, dataset_name: str) -> di
     prepared_input: Path | None = None
     prepared_note = ""
     repaired_input: Path | None = None
-    conversion_result: dict[str, str] | None = None
     try:
+        if progress_callback:
+            progress_callback({"stage": "Preparing LAS/LAZ source", "progress_percent": 12, "eta_seconds": ""})
         input_path = Path(input_las)
         prepared_input, prepared_note = _prepare_las_for_ept(
             input_path,
@@ -1639,99 +1689,44 @@ def process_pointcloud(input_las: str, output_dir: str, dataset_name: str) -> di
             safe_dataset_name,
         )
         converter_input = str(prepared_input or input_path)
-        copc_error = ""
         try:
+            if progress_callback:
+                progress_callback({"stage": "Converting to COPC", "progress_percent": 55, "eta_seconds": ""})
             converter_label = _run_copc_converter_once(converter_input, output_path)
-            if prepared_note:
-                (output_path / ".crs_note.txt").write_text(prepared_note, encoding="utf-8")
-            (output_path / ".viewer_type.txt").write_text("copc", encoding="utf-8")
-            (output_path / ".converter.txt").write_text(converter_label, encoding="utf-8")
-            if POTREE_NATIVE_COPC_ENABLED:
-                conversion_result = {
-                    "asset_type": "copc",
-                    "asset_path": str(output_path / "output.copc.laz"),
-                    "asset_name": "output.copc.laz",
-                    "converter": converter_label,
-                    "viewer_dataset_name": output_path.name,
-                }
-            else:
-                compatibility_path = output_path.with_name(f"{output_path.name}__ept_viewer")
-                try:
-                    ept_converter = _run_ept_converter_once(converter_input, compatibility_path)
-                except RuntimeError as compatibility_exc:
-                    raise OSError(
-                        "COPC was created successfully, but its Potree compatibility index failed. "
-                        f"The original COPC was preserved: {compatibility_exc}"
-                    ) from compatibility_exc
-                if prepared_note:
-                    (compatibility_path / ".crs_note.txt").write_text(prepared_note, encoding="utf-8")
-                (compatibility_path / ".viewer_type.txt").write_text("ept", encoding="utf-8")
-                (compatibility_path / ".converter.txt").write_text(
-                    f"{ept_converter} compatibility index for PDAL COPC", encoding="utf-8"
-                )
-                conversion_result = {
-                    "asset_type": "ept",
-                    "asset_path": str(compatibility_path / "ept.json"),
-                    "asset_name": "ept.json",
-                    "converter": f"{converter_label} + {ept_converter} viewer index",
-                    "viewer_dataset_name": compatibility_path.name,
-                    "copc_asset_path": str(output_path / "output.copc.laz"),
-                }
         except RuntimeError as exc:
-            copc_error = str(exc)
-            print(f"COPC primary conversion failed; falling back to Untwine EPT: {copc_error}")
-            try:
-                converter_label = _run_ept_converter_once(converter_input, output_path)
-                if prepared_note:
-                    (output_path / ".crs_note.txt").write_text(prepared_note, encoding="utf-8")
-            except RuntimeError as ept_exc:
-                original_error = str(ept_exc)
-                repair_source = Path(converter_input)
-                can_repair = repair_source.suffix.lower() in {".las", ".laz"}
-                if not can_repair or not _ept_error_needs_las_bbox_repair(original_error):
-                    raise RuntimeError(
-                        "COPC conversion failed and Untwine EPT fallback failed.\n\n"
-                        f"COPC error:\n{copc_error}\n\nEPT fallback error:\n{original_error}"
-                    ) from ept_exc
-
+            repair_source = Path(converter_input)
+            if repair_source.suffix.lower() in {".las", ".laz"} and _ept_error_needs_las_bbox_repair(str(exc)):
+                if progress_callback:
+                    progress_callback({"stage": "Repairing LAS bounds", "progress_percent": 35, "eta_seconds": ""})
                 repair_dir = output_path.parent / "_repaired_inputs"
                 repaired_input = repair_dir / f"{safe_dataset_name}.bbox-repaired.las"
                 _repair_las_bounding_box(repair_source, repaired_input)
-
                 if output_path.is_dir():
                     shutil.rmtree(output_path, ignore_errors=True)
                 output_path.mkdir(parents=True, exist_ok=True)
-                try:
-                    converter_label = _run_ept_converter_once(str(repaired_input), output_path)
-                    if prepared_note:
-                        (output_path / ".crs_note.txt").write_text(prepared_note, encoding="utf-8")
-                    (output_path / ".repair_note.txt").write_text(
-                        "LAS bounding box header was repaired automatically before EPT fallback conversion.",
-                        encoding="utf-8",
-                    )
-                except RuntimeError as retry_exc:
-                    raise RuntimeError(
-                        "COPC conversion failed and automatic LAS bounding-box repair was attempted for "
-                        "the Untwine EPT fallback, but EPT conversion still failed.\n\n"
-                        f"COPC error:\n{copc_error}\n\nOriginal EPT fallback error:\n{original_error}\n\n"
-                        f"Retry EPT fallback error:\n{retry_exc}"
-                    ) from retry_exc
-
-            if not (output_path / "ept.json").is_file():
-                raise RuntimeError(
-                    "COPC conversion failed and Untwine EPT fallback finished but ept.json was not created.\n\n"
-                    f"COPC error:\n{copc_error}"
+                if progress_callback:
+                    progress_callback({"stage": "Retrying COPC conversion", "progress_percent": 62, "eta_seconds": ""})
+                converter_label = _run_copc_converter_once(str(repaired_input), output_path)
+                (output_path / ".repair_note.txt").write_text(
+                    "LAS bounding box header was repaired automatically before COPC conversion.",
+                    encoding="utf-8",
                 )
-            (output_path / ".viewer_type.txt").write_text("ept", encoding="utf-8")
-            (output_path / ".converter.txt").write_text(converter_label or "Untwine", encoding="utf-8")
-            if copc_error:
-                (output_path / ".copc_fallback_note.txt").write_text(copc_error[:8000], encoding="utf-8")
-            conversion_result = {
-                "asset_type": "ept",
-                "asset_path": str(output_path / "ept.json"),
-                "asset_name": "ept.json",
-                "converter": converter_label or "Untwine",
-            }
+            else:
+                raise
+
+        if prepared_note:
+            (output_path / ".crs_note.txt").write_text(prepared_note, encoding="utf-8")
+        if progress_callback:
+            progress_callback({"stage": "Finalizing point cloud viewer", "progress_percent": 92, "eta_seconds": ""})
+        (output_path / ".viewer_type.txt").write_text("copc", encoding="utf-8")
+        (output_path / ".converter.txt").write_text(converter_label, encoding="utf-8")
+        return {
+            "asset_type": "copc",
+            "asset_path": str(output_path / "output.copc.laz"),
+            "asset_name": "output.copc.laz",
+            "converter": converter_label,
+            "viewer_dataset_name": output_path.name,
+        }
     finally:
         if repaired_input is not None:
             try:
@@ -1748,10 +1743,6 @@ def process_pointcloud(input_las: str, output_dir: str, dataset_name: str) -> di
             except OSError:
                 pass
 
-    if conversion_result is None:
-        raise RuntimeError("Point cloud conversion finished without producing a COPC or EPT viewer asset.")
-    return conversion_result
-
 
 def process_pointcloud_ept_job(
     input_las: str,
@@ -1765,9 +1756,42 @@ def process_pointcloud_ept_job(
     output_path = Path(output_dir)
     err_path = output_path / ".conversion_error.txt"
     try:
-        conversion = process_pointcloud(input_las, output_dir, dataset_name)
+        _upsert_processing_job(
+            project_id,
+            {
+                "job_id": job_id,
+                "kind": "pointcloud",
+                "file_name": file_name,
+                "status": "Processing",
+                "stage": "Starting COPC conversion",
+                "progress_percent": "15",
+                "eta_seconds": "",
+                "updated_at": _now_iso(),
+            },
+        )
+
+        def update_progress(payload: dict[str, object]) -> None:
+            progress_percent = str(payload.get("progress_percent", ""))
+            stage = str(payload.get("stage") or "Processing point cloud")
+            eta_seconds = str(payload.get("eta_seconds") or "")
+            _upsert_processing_job(
+                project_id,
+                {
+                    "job_id": job_id,
+                    "kind": "pointcloud",
+                    "file_name": file_name,
+                    "status": "Processing",
+                    "stage": stage,
+                    "progress_percent": progress_percent,
+                    "eta_seconds": eta_seconds,
+                    "updated_at": _now_iso(),
+                },
+            )
+            _invalidate_project_files_cache(project_id)
+
+        conversion = process_pointcloud(input_las, output_dir, dataset_name, update_progress)
         converter_label = conversion.get("converter", "Point Cloud")
-        viewer_type = conversion.get("asset_type", "ept")
+        viewer_type = conversion.get("asset_type", "copc")
         viewer_dataset_name = conversion.get("viewer_dataset_name", dataset_name)
         viewer_output_path = Path(conversion.get("asset_path", output_dir)).parent
         (output_path / ".source_name.txt").write_text(file_name, encoding="utf-8")
@@ -1799,6 +1823,51 @@ def process_pointcloud_ept_job(
             )
         except Exception:
             pass
+        raw_rel_path = (
+            str(Path(input_las).relative_to(Path(LOCAL_DATA_PATH)).as_posix())
+            if Path(input_las).is_file()
+            else ""
+        )
+        copc_rel_path = (
+            str((viewer_output_path / "output.copc.laz").relative_to(Path(LOCAL_DATA_PATH)).as_posix())
+            if viewer_type == "copc" and (viewer_output_path / "output.copc.laz").is_file()
+            else ""
+        )
+        source_size_bytes = Path(input_las).stat().st_size if Path(input_las).is_file() else 0
+        processed_path = (
+            viewer_output_path / "output.copc.laz"
+            if viewer_type == "copc" and (viewer_output_path / "output.copc.laz").is_file()
+            else viewer_output_path
+        )
+        processed_size_bytes = (
+            processed_path.stat().st_size
+            if processed_path.is_file()
+            else calculate_folder_size(processed_path)
+        )
+        viewer_url = _pointcloud_viewer_url("", project_id, viewer_dataset_name, file_name, viewer_type)
+        _write_dataset_status(
+            project_id,
+            job_id,
+            {
+                "status": "WEB-READY",
+                "updated_at": _now_iso(),
+                "dataset_id": job_id,
+                "dataset_name": file_name,
+                "display_name": file_name,
+                "dataset_type": "pointcloud",
+                "layer_type": "pointcloud",
+                "viewer_type": viewer_type,
+                "viewer_url": viewer_url,
+                "layer_url": viewer_url,
+                "result_url": viewer_url,
+                "raw_rel_path": raw_rel_path,
+                "copc_rel_path": copc_rel_path,
+                "size_bytes": str(source_size_bytes or processed_size_bytes),
+                "processed_size_bytes": str(processed_size_bytes),
+                "processed_size": _format_size_bytes(processed_size_bytes),
+                "converter": converter_label,
+            },
+        )
         _upsert_processing_job(
             project_id,
             {
@@ -1807,9 +1876,15 @@ def process_pointcloud_ept_job(
                 "file_name": file_name,
                 "status": "Completed",
                 "updated_at": _now_iso(),
-                "result_url": _pointcloud_viewer_url("", project_id, viewer_dataset_name, file_name, viewer_type),
+                "result_url": viewer_url,
                 "converter": converter_label,
                 "viewer_type": viewer_type,
+                "content_hash": source_hash,
+                "raw_rel_path": raw_rel_path,
+                "copc_rel_path": copc_rel_path,
+                "size_bytes": str(source_size_bytes or processed_size_bytes),
+                "processed_size": _format_size_bytes(processed_size_bytes),
+                "processed_size_bytes": str(processed_size_bytes),
             },
         )
     except Exception as exc:
@@ -2818,11 +2893,9 @@ def _pointcloud_viewer_url(
     project_id: str,
     dataset_name: str,
     display_name: str = "",
-    viewer_type: str = "ept",
+    viewer_type: str = "copc",
 ) -> str:
-    if (viewer_type or "").lower() == "copc":
-        return _copc_viewer_url(base_url, project_id, dataset_name, display_name)
-    return _ept_viewer_url(base_url, project_id, dataset_name, display_name)
+    return _copc_viewer_url(base_url, project_id, dataset_name, display_name)
 
 
 def _safe_dataset_id(dataset_id: str) -> str:
@@ -3147,10 +3220,19 @@ def _write_processing_jobs(data: dict[str, list[dict[str, str]]]) -> None:
 def _upsert_processing_job(project_id: str, job: dict[str, str]) -> None:
     jobs = _read_processing_jobs()
     current = jobs.get(project_id, [])
+    existing = next((item for item in current if item.get("job_id") == job.get("job_id")), None)
+    if isinstance(existing, dict):
+        merged = dict(existing)
+        merged.update(job)
+        job = merged
     current = [item for item in current if item.get("job_id") != job.get("job_id")]
     current.insert(0, job)
     jobs[project_id] = current[:200]
     _write_processing_jobs(jobs)
+    catalog_service.mirror_processing_job(project_id, job)
+    status = str(job.get("status") or "").strip().lower()
+    if status in {"processing", "uploading", "uploaded", "queued", "running", "pending", "converting cog"}:
+        _invalidate_project_files_cache(project_id)
 
 
 def _remove_project_processing_jobs(project_id: str) -> None:
@@ -3212,6 +3294,7 @@ def _write_dataset_status(project_id: str, dataset_id: str, payload: dict[str, s
         _write_status_manifests(project_id, dataset_id, payload)
     except OSError:
         pass
+    catalog_service.mirror_dataset_status(project_id, dataset_id, payload)
 
 
 def _read_dataset_status(project_id: str, dataset_id: str) -> dict[str, str] | None:
@@ -4332,7 +4415,7 @@ def pointcloud_status(
 
     for candidate in candidates:
         copc_file = _copc_asset_in_dir(candidate)
-        if copc_file is not None and POTREE_NATIVE_COPC_ENABLED:
+        if copc_file is not None:
             source_name = source_name_for(candidate)
             return {
                 "ready": True,
@@ -4349,84 +4432,19 @@ def pointcloud_status(
             }
 
     for candidate in candidates:
-        ept_json = candidate / "ept.json"
-        if ept_json.is_file() and _ept_asset_quality(candidate) >= 0:
-            source_name = source_name_for(candidate)
-            return {
-                "ready": True,
-                "failed": False,
-                "tileset_url": _ept_viewer_url(base_url, safe_id, candidate.name, source_name),
-                "ept_url": _ept_json_url(base_url, safe_id, candidate.name),
-                "viewer_type": "ept",
-            }
-        if ept_json.is_file():
-            return {
-                "ready": False,
-                "failed": True,
-                "error": (
-                    "Point cloud EPT output exists, but its hierarchy is incomplete for this viewer. "
-                    "Reprocess this LAS/LAZ so the output contains ept.json, ept-data, and a chunked "
-                    "multi-file ept-hierarchy folder."
-                ),
-                "tileset_url": _ept_viewer_url(base_url, safe_id, candidate.name, source_name_for(candidate)),
-                "ept_url": _ept_json_url(base_url, safe_id, candidate.name),
-                "viewer_type": "ept",
-            }
-
-    for candidate in candidates:
-        copc_file = _copc_asset_in_dir(candidate)
-        if copc_file is not None:
-            compatibility_dir = _copc_ept_compat_dir(copc_file)
-            if _ept_asset_quality(compatibility_dir) >= 0:
-                source_name = source_name_for(candidate)
-                return {
-                    "ready": True,
-                    "failed": False,
-                    "tileset_url": _ept_viewer_url(
-                        base_url, safe_id, compatibility_dir.name, source_name
-                    ),
-                    "ept_url": _ept_json_url(base_url, safe_id, compatibility_dir.name),
-                    "copc_url": _copc_url(
-                        base_url, safe_id, candidate.name,
-                        copc_file.relative_to(Path(LOCAL_DATA_PATH) / "projects" / safe_id).as_posix(),
-                    ),
-                    "viewer_type": "ept",
-                    "source_asset_type": "copc",
-                }
-            return {
-                "ready": False,
-                "failed": False,
-                "error": "COPC exists and is waiting for its Potree compatibility index. Run Sync Manual Folders once.",
-                "copc_url": _copc_url(
-                    base_url, safe_id, candidate.name,
-                    copc_file.relative_to(Path(LOCAL_DATA_PATH) / "projects" / safe_id).as_posix(),
-                ),
-                "viewer_type": "pending",
-            }
-
-    for candidate in candidates:
-        ept_json = candidate / "ept.json"
         err_file = candidate / ".conversion_error.txt"
         if err_file.is_file():
             try:
                 msg = err_file.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 msg = "Unknown conversion error"
-            viewer_type = "ept"
-            marker = candidate / ".viewer_type.txt"
-            if marker.is_file():
-                try:
-                    viewer_type = marker.read_text(encoding="utf-8", errors="replace").strip() or viewer_type
-                except OSError:
-                    viewer_type = "ept"
             return {
                 "ready": False,
                 "failed": True,
                 "error": msg[:8000],
-                "tileset_url": _pointcloud_viewer_url(base_url, safe_id, candidate.name, viewer_type=viewer_type),
-                "ept_url": _ept_json_url(base_url, safe_id, candidate.name),
+                "tileset_url": _copc_viewer_url(base_url, safe_id, candidate.name),
                 "copc_url": _copc_url(base_url, safe_id, candidate.name),
-                "viewer_type": viewer_type,
+                "viewer_type": "copc",
             }
 
     pending_suffix = f"/{quote(_safe_ept_folder_name(tileset_id), safe='')}" if tileset_id else ""
@@ -4434,7 +4452,7 @@ def pointcloud_status(
         "ready": False,
         "failed": False,
         "tileset_url": (
-            _ept_viewer_url(base_url, safe_id, _safe_ept_folder_name(tileset_id))
+            _copc_viewer_url(base_url, safe_id, _safe_ept_folder_name(tileset_id))
             if tileset_id
             else f"{base_url}/data/projects/{safe_id}/processed{pending_suffix}/"
         ),
@@ -5034,6 +5052,153 @@ def admin_cleanup_stale_project_jobs(
     _write_processing_jobs(jobs)
     _invalidate_project_files_cache(safe_project_id)
     return {"status": "success", "cleaned": cleaned}
+
+
+def _picker_filter_for_kind(kind: str) -> str:
+    normalized = str(kind or "").strip().lower()
+    if normalized == "las":
+        return "LAS/LAZ (*.las;*.laz)|*.las;*.laz|All files (*.*)|*.*"
+    if normalized == "ortho":
+        return "Ortho GeoTIFF (*.tif;*.tiff)|*.tif;*.tiff|All files (*.*)|*.*"
+    if normalized in {"dtm", "dsm"}:
+        label = normalized.upper()
+        return f"{label} GeoTIFF (*.tif;*.tiff)|*.tif;*.tiff|All files (*.*)|*.*"
+    return "Supported files (*.las;*.laz;*.tif;*.tiff)|*.las;*.laz;*.tif;*.tiff|All files (*.*)|*.*"
+
+
+def _browse_server_folder(initial_path: str = "", kind: str = "", mode: str = "folder") -> str:
+    if os.name != "nt":
+        raise HTTPException(
+            status_code=501,
+            detail="Server folder picker works only when the backend runs on Windows.",
+        )
+    picker_mode = str(mode or "folder").strip().lower()
+    if picker_mode not in {"folder", "file"}:
+        picker_mode = "folder"
+    initial = str(initial_path or "").strip().strip('"')
+    if initial:
+        initial_path_obj = Path(initial).expanduser()
+        if initial_path_obj.is_file():
+            initial = str(initial_path_obj.parent.resolve())
+        elif initial_path_obj.is_dir():
+            initial = str(initial_path_obj.resolve())
+        elif initial_path_obj.parent.is_dir():
+            initial = str(initial_path_obj.parent.resolve())
+        else:
+            initial = ""
+    out_file = Path(tempfile.gettempdir()) / f"droid-folder-pick-{secrets.token_hex(8)}.txt"
+    out_file_escaped = str(out_file).replace("'", "''")
+    initial_line = ""
+    if initial:
+        initial_escaped = initial.replace("'", "''")
+        initial_line = (
+            f"$d.SelectedPath = '{initial_escaped}'"
+            if picker_mode == "folder"
+            else f"$d.InitialDirectory = '{initial_escaped}'"
+        )
+    file_dialog_block = ""
+    if picker_mode == "file":
+        filter_text = _picker_filter_for_kind(kind).replace("'", "''")
+        file_dialog_block = f"""
+$d = New-Object System.Windows.Forms.OpenFileDialog
+$d.CheckFileExists = $true
+$d.Multiselect = $false
+$d.Filter = '{filter_text}'
+{initial_line}
+$r = $d.ShowDialog($owner)
+$owner.Dispose()
+if ($r -eq [System.Windows.Forms.DialogResult]::OK -and $d.FileName) {{
+    Set-Content -LiteralPath '{out_file_escaped}' -Value ([System.IO.Path]::GetDirectoryName($d.FileName)) -Encoding UTF8 -NoNewline
+}}
+"""
+    ps_script = f"""
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true
+$owner.ShowInTaskbar = $true
+$owner.Text = 'Droid Bulk Import'
+$owner.StartPosition = 'CenterScreen'
+$owner.WindowState = 'Minimized'
+$owner.Show()
+$owner.Activate() | Out-Null
+"""
+    if picker_mode == "file":
+        ps_script += file_dialog_block
+    else:
+        ps_script += f"""
+$d = New-Object System.Windows.Forms.FolderBrowserDialog
+$d.Description = 'Select bulk import source folder on this server'
+$d.ShowNewFolderButton = $true
+{initial_line}
+$r = $d.ShowDialog($owner)
+$owner.Dispose()
+if ($r -eq [System.Windows.Forms.DialogResult]::OK -and $d.SelectedPath) {{
+    Set-Content -LiteralPath '{out_file_escaped}' -Value $d.SelectedPath -Encoding UTF8 -NoNewline
+}}
+"""
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-Command", ps_script],
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired as exc:
+        out_file.unlink(missing_ok=True)
+        raise HTTPException(status_code=408, detail="Folder picker timed out") from exc
+    try:
+        if proc.returncode != 0 and not out_file.is_file():
+            raise HTTPException(status_code=500, detail="Folder picker failed to open on this Windows machine")
+        if not out_file.is_file():
+            raise HTTPException(status_code=400, detail="No folder selected")
+        folder = out_file.read_text(encoding="utf-8").strip()
+        if not folder:
+            raise HTTPException(status_code=400, detail="No folder selected")
+        resolved = Path(folder).expanduser().resolve()
+        if not resolved.is_dir():
+            raise HTTPException(status_code=400, detail="Selected folder is not accessible")
+        return str(resolved)
+    finally:
+        out_file.unlink(missing_ok=True)
+
+
+@app.post("/api/admin/locate-folder")
+async def admin_locate_folder(payload: AdminLocateFolderPayload, request: Request) -> dict[str, str]:
+    verify_admin(request)
+    folder_path = await run_in_threadpool(_browse_server_folder, payload.initial_path, payload.kind, payload.mode)
+    return {"status": "success", "folder_path": folder_path}
+
+
+@app.post("/api/admin/manual-bulk-import")
+async def admin_manual_bulk_import(
+    payload: AdminManualBulkImportPayload,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    project_id = str(payload.project_id or "").strip()
+    if not project_id:
+        raise HTTPException(status_code=400, detail="project_id is required")
+    return _queue_admin_manual_bulk_import(
+        project_id=project_id,
+        payload=payload,
+        request=request,
+        background_tasks=background_tasks,
+    )
+
+
+@app.post("/api/admin/projects/{project_id}/manual-bulk-import")
+async def admin_manual_bulk_import_for_project(
+    project_id: str,
+    payload: AdminManualBulkImportPayload,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    return _queue_admin_manual_bulk_import(
+        project_id=project_id,
+        payload=payload,
+        request=request,
+        background_tasks=background_tasks,
+    )
 
 
 @app.patch("/api/admin/users/{user_id}/hidden-tabs")
@@ -6013,25 +6178,16 @@ async def complete_upload(
         existing_hash = None
 
     copc_file = output_dir / "output.copc.laz"
-    ept_json = output_dir / "ept.json"
-    compatibility_dir = output_dir.with_name(f"{output_dir.name}__ept_viewer")
-    compatibility_ready = _ept_asset_quality(compatibility_dir) >= 0
-    cached_viewer_type = (
-        "copc"
-        if copc_file.is_file() and POTREE_NATIVE_COPC_ENABLED
-        else "ept"
-        if copc_file.is_file() and compatibility_ready
-        else ""
-    )
-    cached_viewer_dataset_name = compatibility_dir.name if cached_viewer_type == "ept" else ept_dataset_name
+    cached_viewer_type = "copc" if copc_file.is_file() else ""
+    cached_viewer_dataset_name = ept_dataset_name
     if cached_viewer_type and existing_hash == content_hash:
         try:
             (output_dir / ".source_name.txt").write_text(safe_name, encoding="utf-8")
             (output_dir / ".viewer_type.txt").write_text(cached_viewer_type, encoding="utf-8")
         except OSError:
             pass
-        cached_viewer_url = _pointcloud_viewer_url(
-            str(request.base_url), safe_project_id, cached_viewer_dataset_name, safe_name, cached_viewer_type
+        cached_viewer_url = _copc_viewer_url(
+            str(request.base_url), safe_project_id, cached_viewer_dataset_name, safe_name
         )
         _upsert_processing_job(
             safe_project_id,
@@ -6041,9 +6197,7 @@ async def complete_upload(
                 "file_name": safe_name,
                 "status": "Completed",
                 "updated_at": _now_iso(),
-                "result_url": _pointcloud_viewer_url(
-                    "", safe_project_id, cached_viewer_dataset_name, safe_name, cached_viewer_type
-                ),
+                "result_url": _copc_viewer_url("", safe_project_id, cached_viewer_dataset_name, safe_name),
                 "viewer_type": cached_viewer_type,
             },
         )
@@ -6051,20 +6205,15 @@ async def complete_upload(
             "status": "success",
             "message": (
                 f"Merged {total} chunks into {safe_name}. "
-                "Found existing point cloud viewer for same file content; reusing project viewer."
+                "Found existing COPC viewer for same file content; reusing project viewer."
             ),
             "tileset_url": "PENDING",
             "project_id": safe_project_id,
             "target_tileset_url": cached_viewer_url,
-            "copc_url": _copc_url(str(request.base_url), safe_project_id, ept_dataset_name) if cached_viewer_type == "copc" else "",
-            "ept_url": _ept_json_url(
-                str(request.base_url), safe_project_id, cached_viewer_dataset_name
-            ) if cached_viewer_type == "ept" else "",
+            "copc_url": _copc_url(str(request.base_url), safe_project_id, ept_dataset_name),
             "viewer_type": cached_viewer_type,
             "tileset_id": ept_dataset_name,
         }
-    if ept_json.is_file() and existing_hash == content_hash:
-        print("Existing legacy EPT found; rebuilding the paired COPC and viewer index for this content.")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -6097,6 +6246,7 @@ async def complete_upload(
         pass
     cache[user_cache_key] = reused_tileset_id
     _write_conversion_cache(cache)
+    raw_rel = out_path.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
     _upsert_processing_job(
         safe_project_id,
             {
@@ -6105,6 +6255,8 @@ async def complete_upload(
                 "file_name": safe_name,
                 "status": "Processing",
             "updated_at": _now_iso(),
+            "raw_rel_path": raw_rel,
+            "content_hash": content_hash,
         },
     )
     _invalidate_project_files_cache(safe_project_id)
@@ -6121,22 +6273,11 @@ async def complete_upload(
 
     return {
         "status": "success",
-        "message": "File merged. COPC storage and Potree viewer index processing started in background.",
+        "message": "File merged. COPC conversion started in background.",
         "tileset_url": "PENDING",
         "project_id": safe_project_id,
-        "target_tileset_url": (
-            _copc_viewer_url(str(request.base_url), safe_project_id, ept_dataset_name, safe_name)
-            if POTREE_NATIVE_COPC_ENABLED
-            else _ept_viewer_url(
-                str(request.base_url), safe_project_id, f"{ept_dataset_name}__ept_viewer", safe_name
-            )
-        ),
+        "target_tileset_url": _copc_viewer_url(str(request.base_url), safe_project_id, ept_dataset_name, safe_name),
         "copc_url": _copc_url(str(request.base_url), safe_project_id, ept_dataset_name),
-        "ept_url": _ept_json_url(
-            str(request.base_url),
-            safe_project_id,
-            ept_dataset_name if POTREE_NATIVE_COPC_ENABLED else f"{ept_dataset_name}__ept_viewer",
-        ),
         "viewer_type": "pending",
         "tileset_id": ept_dataset_name,
     }
@@ -6774,105 +6915,9 @@ def sync_manual_datasets(
             tracked_dataset_by_key[cog_rel] = job_dir.name
 
     found_new = 0
-    manual_ept_dirs = {
-        path.parent
-        for path in [
-            *_legacy_project_pointcloud_root(safe_project_id).glob("*/ept.json"),
-            *processed_dir.glob("*/ept.json"),
-            *processed_dir.glob("*/*/ept.json"),
-            *processed_dir.glob("*/*/*/ept.json"),
-        ]
-        if path.is_file() and _ept_asset_quality(path.parent) >= 0
-    }
     manual_copc_dirs = {path.parent for path in _project_copc_assets(safe_project_id)}
-    if not POTREE_NATIVE_COPC_ENABLED:
-        for copc_dir in sorted(manual_copc_dirs, key=lambda path: path.name.lower()):
-            copc_file = _copc_asset_in_dir(copc_dir)
-            if copc_file is None:
-                continue
-            compatibility_dir = _copc_ept_compat_dir(copc_file)
-            if _ept_asset_quality(compatibility_dir) >= 0:
-                manual_ept_dirs.add(compatibility_dir)
-                continue
-
-            source_rel = copc_file.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
-            folder_rel = copc_dir.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
-            manifest = _read_dataset_manifest(copc_dir)
-            display_name = str(
-                manifest.get("display_name")
-                or manifest.get("source_name")
-                or _read_text_marker(copc_dir / ".source_name.txt")
-                or copc_file.name
-            )
-            dataset_id = str(
-                manifest.get("dataset_id")
-                or tracked_dataset_by_key.get(folder_rel)
-                or tracked_dataset_by_key.get(copc_dir.name)
-                or f"manual-copc-{hashlib.sha1(source_rel.encode('utf-8')).hexdigest()[:12]}"
-            )
-            dataset_id = _safe_dataset_id(dataset_id)
-            existing = _read_dataset_status(safe_project_id, dataset_id) or {}
-            status = {
-                **existing,
-                "status": "Processing",
-                "stage": "Preparing COPC for the current 3D viewer",
-                "progress_percent": "0",
-                "updated_at": _now_iso(),
-                "dataset_id": dataset_id,
-                "dataset_name": display_name,
-                "display_name": display_name,
-                "source_name": display_name,
-                "dataset_type": "pointcloud",
-                "layer_type": "pointcloud",
-                "viewer_type": "pending",
-                "tile_folder": compatibility_dir.name,
-                "tiles_rel_path": compatibility_dir.relative_to(Path(LOCAL_DATA_PATH)).as_posix(),
-                "source_asset_rel_path": source_rel,
-            }
-            _write_dataset_status(safe_project_id, dataset_id, status)
-            _write_dataset_manifest(
-                copc_dir,
-                {
-                    **status,
-                    "viewer_type": "copc",
-                    "asset_name": copc_file.name,
-                    "viewer_dataset_name": compatibility_dir.name,
-                },
-            )
-            _upsert_processing_job(
-                safe_project_id,
-                {
-                    "job_id": dataset_id,
-                    "kind": "pointcloud",
-                    "file_name": display_name,
-                    "status": "Processing",
-                    "stage": "Preparing COPC viewer",
-                    "updated_at": _now_iso(),
-                    "viewer_type": "pending",
-                    "source_asset_rel_path": source_rel,
-                },
-            )
-            queue_marker = compatibility_dir.parent / f".{compatibility_dir.name}.queued"
-            marker_is_fresh = (
-                queue_marker.is_file()
-                and time.time() - queue_marker.stat().st_mtime < 6 * 60 * 60
-            )
-            if not marker_is_fresh:
-                queue_marker.write_text(_now_iso(), encoding="utf-8")
-                background_tasks.add_task(
-                    _process_copc_ept_compat_job,
-                    safe_project_id,
-                    dataset_id,
-                    str(copc_file),
-                    str(compatibility_dir),
-                    display_name,
-                )
-            if not existing:
-                found_new += 1
-        manual_copc_dirs = set()
 
     candidates: list[tuple[Path, str, str, str]] = [
-        *[(item, "pointcloud", "pointcloud", "pointcloud_ept") for item in sorted(manual_ept_dirs, key=lambda p: p.name.lower())],
         *[(item, "pointcloud", "pointcloud", "pointcloud_copc") for item in sorted(manual_copc_dirs, key=lambda p: p.name.lower())],
         *[
             (
@@ -6906,12 +6951,8 @@ def sync_manual_datasets(
                     or str(existing_status.get("layer_type") or "").lower() != "pointcloud"
                     or not str(existing_status.get("viewer_type") or "").strip()
                 ):
-                    viewer_type = "ept" if asset_kind == "pointcloud_ept" else "copc"
-                    viewer_url = (
-                        _ept_viewer_url("", safe_project_id, folder_name, folder_name)
-                        if viewer_type == "ept"
-                        else _copc_viewer_url("", safe_project_id, folder_name, folder_name)
-                    )
+                    viewer_type = "copc"
+                    viewer_url = _copc_viewer_url("", safe_project_id, folder_name, folder_name)
                     _write_dataset_status(
                         safe_project_id,
                         existing_dataset_id,
@@ -6971,7 +7012,7 @@ def sync_manual_datasets(
                 "tile_folder": folder_name,
                 "dataset_type": dataset_type,
                 "layer_type": layer_kind,
-                "viewer_type": "ept" if asset_kind == "pointcloud_ept" else "copc" if asset_kind == "pointcloud_copc" else "",
+                "viewer_type": "copc" if asset_kind == "pointcloud_copc" else "",
                 "month": "",
                 "raw_rel_path": "",
                 "tiles_rel_path": "" if asset_kind == "cog" else rel_path,
@@ -6981,9 +7022,7 @@ def sync_manual_datasets(
             },
         )
         result_url = f"/data/{rel_path}/tileset.json" if layer_kind == "3DModel" else f"/data/{rel_path}"
-        if asset_kind == "pointcloud_ept":
-            result_url = _ept_viewer_url("", safe_project_id, folder_name, folder_name)
-        elif asset_kind == "pointcloud_copc":
+        if asset_kind == "pointcloud_copc":
             result_url = _copc_viewer_url("", safe_project_id, folder_name, folder_name)
         _upsert_processing_job(
             safe_project_id,
@@ -6994,7 +7033,7 @@ def sync_manual_datasets(
                 "status": "Completed",
                 "updated_at": _now_iso(),
                 "result_url": result_url,
-                "viewer_type": "ept" if asset_kind == "pointcloud_ept" else "copc" if asset_kind == "pointcloud_copc" else "",
+                "viewer_type": "copc" if asset_kind == "pointcloud_copc" else "",
                 "dataset_type": dataset_type,
                 "layer_type": layer_kind,
                 "tiles_rel_path": "" if asset_kind == "cog" else rel_path,
@@ -7012,6 +7051,294 @@ def sync_manual_datasets(
         "status": "success",
         "message": f"Found {found_new} manual datasets",
         "new_count": str(found_new),
+    }
+
+
+def _bulk_scan_files(source_dir: Path, kind: str) -> list[Path]:
+    safe_kind = str(kind or "").strip().lower()
+    if safe_kind == "las":
+        exts = {".las", ".laz"}
+    elif safe_kind in {"ortho", "dtm", "dsm"}:
+        exts = {".tif", ".tiff"}
+    else:
+        return []
+    files = [p for p in source_dir.iterdir() if p.is_file() and p.suffix.lower() in exts]
+    return sorted(files, key=lambda p: p.name.lower())
+
+
+async def _admin_manual_bulk_import_background(
+    *,
+    project_id: str,
+    tasks: list[AdminManualBulkImportTask],
+    max_parallel: int,
+) -> None:
+    safe_project_id = _safe_project_id(project_id)
+    semaphore = asyncio.Semaphore(max(1, min(int(max_parallel or 2), 6)))
+
+    async def run_one_pointcloud(source_file: Path) -> None:
+        async with semaphore:
+            raw_dir, _ = get_project_dirs(safe_project_id)
+            safe_name = _safe_pointcloud_basename(source_file.name)
+            dataset_id = _safe_tileset_id(f"{re.sub(r'[^A-Za-z0-9._-]+', '-', Path(safe_name).stem)[:40]}-{secrets.token_hex(6)}")
+            raw_target = raw_dir / f"{safe_project_id}__{dataset_id}__{safe_name}"
+            output_dir = _ept_dataset_dir(safe_project_id, dataset_id)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            _upsert_processing_job(
+                safe_project_id,
+                {
+                    "job_id": dataset_id,
+                    "kind": "pointcloud",
+                    "file_name": safe_name,
+                    "status": "Processing",
+                    "stage": "Copying source file into project",
+                    "progress_percent": "8",
+                    "eta_seconds": "",
+                    "updated_at": _now_iso(),
+                },
+            )
+            _invalidate_project_files_cache(safe_project_id)
+
+            try:
+                shutil.copy2(source_file, raw_target)
+            except OSError as exc:
+                _upsert_processing_job(
+                    safe_project_id,
+                    {
+                        "job_id": dataset_id,
+                        "kind": "pointcloud",
+                        "file_name": safe_name,
+                        "status": "Failed",
+                        "stage": "Copy failed",
+                        "progress_percent": "100",
+                        "error": f"Copy failed: {exc}"[:8000],
+                        "updated_at": _now_iso(),
+                    },
+                )
+                _invalidate_project_files_cache(safe_project_id)
+                return
+
+            raw_rel = raw_target.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+            _upsert_processing_job(
+                safe_project_id,
+                {
+                    "job_id": dataset_id,
+                    "kind": "pointcloud",
+                    "file_name": safe_name,
+                    "status": "Processing",
+                    "stage": "Source copied, starting COPC conversion",
+                    "progress_percent": "12",
+                    "eta_seconds": "",
+                    "raw_rel_path": raw_rel,
+                    "updated_at": _now_iso(),
+                },
+            )
+            _invalidate_project_files_cache(safe_project_id)
+            await asyncio.to_thread(
+                process_pointcloud_ept_job,
+                str(raw_target),
+                str(output_dir),
+                dataset_id,
+                safe_project_id,
+                dataset_id,
+                safe_name,
+                "",
+            )
+
+    async def run_one_raster(source_file: Path, dataset_type: str) -> None:
+        async with semaphore:
+            normalized_type = _normalize_dataset_type(dataset_type, source_file.name)
+            raw_dir, processed_dir = get_project_dataset_type_dirs(safe_project_id, normalized_type)
+            safe_name = _safe_dataset_upload_basename(source_file.name)
+            ext = source_file.suffix.lower()
+            dataset_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(safe_name).stem).strip("-") or "dataset"
+            dataset_id = _safe_dataset_id(f"{dataset_stem[:40]}-{secrets.token_hex(6)}")
+            tile_output_folder = _safe_dataset_id(f"{dataset_stem[:56]}-{secrets.token_hex(4)}")
+            input_path = raw_dir / f"{tile_output_folder}{ext}"
+            output_tile_dir = processed_dir / tile_output_folder
+            output_tile_dir.mkdir(parents=True, exist_ok=True)
+
+            _upsert_processing_job(
+                safe_project_id,
+                {
+                    "job_id": dataset_id,
+                    "kind": "dataset",
+                    "file_name": safe_name,
+                    "status": "Processing",
+                    "stage": "Copying source raster into project",
+                    "progress_percent": "8",
+                    "updated_at": _now_iso(),
+                },
+            )
+            _invalidate_project_files_cache(safe_project_id)
+
+            try:
+                shutil.copy2(source_file, input_path)
+            except OSError as exc:
+                _upsert_processing_job(
+                    safe_project_id,
+                    {
+                        "job_id": dataset_id,
+                        "kind": "dataset",
+                        "file_name": safe_name,
+                        "status": "Failed",
+                        "stage": "Copy failed",
+                        "progress_percent": "100",
+                        "error": f"Copy failed: {exc}"[:8000],
+                        "updated_at": _now_iso(),
+                    },
+                )
+                _invalidate_project_files_cache(safe_project_id)
+                return
+
+            raw_rel = input_path.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+            pending_cog_path = (output_tile_dir / f"{tile_output_folder}.cog.tif").resolve()
+            _write_dataset_status(
+                safe_project_id,
+                dataset_id,
+                {
+                    "status": "Uploading",
+                    "updated_at": _now_iso(),
+                    "dataset_id": dataset_id,
+                    "dataset_name": safe_name,
+                    "tile_folder": tile_output_folder,
+                    "dataset_type": normalized_type,
+                    "layer_type": _raster_layer_type(normalized_type, safe_name),
+                    "month": "",
+                    "created_at": "",
+                    "raw_rel_path": raw_rel,
+                    "processed_size_bytes": str(input_path.stat().st_size),
+                    "processed_size": _format_size_bytes(input_path.stat().st_size),
+                    "cog_path": str(pending_cog_path),
+                    "manual_epsg": "",
+                    "applied_epsg": "",
+                },
+            )
+            _upsert_processing_job(
+                safe_project_id,
+                {
+                    "job_id": dataset_id,
+                    "kind": "dataset",
+                    "file_name": safe_name,
+                    "status": "Processing",
+                    "stage": "Source copied, starting COG conversion",
+                    "progress_percent": "12",
+                    "raw_rel_path": raw_rel,
+                    "updated_at": _now_iso(),
+                },
+            )
+            _invalidate_project_files_cache(safe_project_id)
+            await process_dataset_background(
+                safe_project_id,
+                dataset_id,
+                str(input_path),
+                safe_name,
+                str(output_tile_dir),
+                tile_output_folder,
+                "",
+            )
+
+    try:
+        scheduled: list[asyncio.Task[None]] = []
+        for task in tasks:
+            source = Path(str(task.source_folder or "")).expanduser().resolve()
+            if not source.is_dir():
+                continue
+            kind = str(task.kind or "").strip().lower()
+            files = _bulk_scan_files(source, kind)
+            if not files:
+                continue
+            if kind == "las":
+                for file_path in files:
+                    scheduled.append(asyncio.create_task(run_one_pointcloud(file_path)))
+            elif kind in {"ortho", "dtm", "dsm"}:
+                for file_path in files:
+                    scheduled.append(asyncio.create_task(run_one_raster(file_path, kind)))
+        if scheduled:
+            await asyncio.gather(*scheduled)
+    finally:
+        _invalidate_project_files_cache(safe_project_id)
+
+
+def _prepare_admin_manual_bulk_import(
+    tasks: list[AdminManualBulkImportTask],
+) -> tuple[list[AdminManualBulkImportTask], list[dict[str, object]], int]:
+    cleaned: list[AdminManualBulkImportTask] = []
+    preview: list[dict[str, object]] = []
+    file_count = 0
+    for item in tasks:
+        kind = str(item.kind or "").strip().lower()
+        if kind not in {"las", "ortho", "dtm", "dsm"}:
+            continue
+        folder = str(item.source_folder or "").strip().strip('"')
+        if not folder:
+            continue
+        source = Path(folder).expanduser()
+        if not source.is_dir():
+            preview.append(
+                {
+                    "kind": kind,
+                    "source_folder": folder,
+                    "status": "missing",
+                    "file_count": 0,
+                    "message": "Folder not found on server",
+                }
+            )
+            continue
+        files = _bulk_scan_files(source.resolve(), kind)
+        preview.append(
+            {
+                "kind": kind,
+                "source_folder": str(source.resolve()),
+                "status": "ready" if files else "empty",
+                "file_count": len(files),
+                "message": (
+                    f"Found {len(files)} file(s)"
+                    if files
+                    else f"No matching {kind.upper()} files in folder"
+                ),
+            }
+        )
+        if not files:
+            continue
+        cleaned.append(AdminManualBulkImportTask(source_folder=str(source.resolve()), kind=kind))
+        file_count += len(files)
+    return cleaned, preview, file_count
+
+
+def _queue_admin_manual_bulk_import(
+    *,
+    project_id: str,
+    payload: AdminManualBulkImportPayload,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    user = verify_admin(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+
+    cleaned, preview, file_count = _prepare_admin_manual_bulk_import(payload.tasks or [])
+    if not cleaned:
+        detail = "No importable files found. Check folder path and selected type."
+        if preview:
+            detail = "; ".join(
+                f"{row['source_folder']} ({row['message']})" for row in preview if isinstance(row.get("message"), str)
+            ) or detail
+        raise HTTPException(status_code=400, detail=detail)
+
+    background_tasks.add_task(
+        _admin_manual_bulk_import_background,
+        project_id=safe_project_id,
+        tasks=cleaned,
+        max_parallel=payload.max_parallel,
+    )
+    return {
+        "status": "success",
+        "message": f"Queued {file_count} file(s) from {len(cleaned)} folder task(s).",
+        "project_id": safe_project_id,
+        "task_count": len(cleaned),
+        "file_count": file_count,
+        "preview": preview,
     }
 
 
@@ -8098,6 +8425,7 @@ def _remove_processing_job(project_id: str, dataset_id: str) -> None:
     current = jobs.get(project_id, [])
     jobs[project_id] = [item for item in current if str(item.get("job_id")) != dataset_id]
     _write_processing_jobs(jobs)
+    catalog_service.remove_asset_db(project_id, dataset_id)
 
 
 def _safe_remove_dataset_path(path: Path) -> int:
@@ -8223,6 +8551,12 @@ def _find_dataset_status_for_rel(project_id: str, rel_path: str) -> tuple[str, d
 
 def _delete_dataset_artifacts(project_id: str, dataset_id: str, st: dict[str, str]) -> int:
     removed = 0
+    if catalog_service.catalog_db_enabled():
+        removed += catalog_service.delete_asset_artifacts(
+            project_id,
+            dataset_id,
+            local_data_path=LOCAL_DATA_PATH,
+        )
     for key in ("raw_rel_path", "tiles_rel_path", "tileset_rel_path", "vector_rel_path", "model_rel_path", "cog_rel_path"):
         rel = str(st.get(key) or "").strip().replace("\\", "/").lstrip("/")
         if rel and ".." not in rel:
@@ -8284,42 +8618,39 @@ def admin_delete_dataset_by_name(
 ) -> dict[str, str | int]:
     safe_project_id = _safe_project_id(project_id)
     safe_dataset_name = os.path.basename(dataset_name.replace("\\", "/").strip().strip("/"))
-    try:
-        dataset_id, st = _admin_dataset_status_by_key(safe_project_id, safe_dataset_name)
-        removed = _delete_dataset_artifacts(safe_project_id, dataset_id, st)
-        return {"status": "success", "dataset_id": dataset_id, "removed_paths": removed}
-    except HTTPException as exc:
-        if exc.status_code != 404:
-            raise
-
-    local_root = Path(LOCAL_DATA_PATH).resolve()
-    removed = 0
-    processed_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "processed"
-    raw_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "raw"
-    candidate_paths = [
-        processed_root / safe_dataset_name,
-        processed_root / "pointclouds" / safe_dataset_name,
-        processed_root / "3dmodel" / safe_dataset_name,
-        raw_root / safe_dataset_name,
-        raw_root / f"{safe_project_id}__{safe_dataset_name}",
-        Path(LOCAL_DATA_PATH) / "pointclouds" / safe_project_id / safe_dataset_name,
-    ]
-    normalized_target = _safe_export_stem(safe_dataset_name).lower()
-    for root in (processed_root, processed_root / "pointclouds", processed_root / "3dmodel", raw_root):
-        if not root.is_dir():
-            continue
-        for child in root.iterdir():
-            if _safe_export_stem(child.name).lower() == normalized_target:
-                candidate_paths.append(child)
-    for candidate in candidate_paths:
-        resolved = candidate.resolve()
-        if resolved.exists() and local_root in resolved.parents:
-            removed += _safe_remove_dataset_path(resolved)
-    if removed == 0:
-        raise HTTPException(status_code=404, detail="Dataset not found")
-    _remove_processing_job(safe_project_id, safe_dataset_name)
-    _invalidate_project_files_cache(safe_project_id)
-    return {"status": "success", "dataset_id": safe_dataset_name, "removed_paths": removed}
+    result = _purge_catalog_dataset(safe_project_id, safe_dataset_name)
+    if int(result.get("removed_paths", 0)) <= 0:
+        local_root = Path(LOCAL_DATA_PATH).resolve()
+        removed = 0
+        processed_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "processed"
+        raw_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "raw"
+        candidate_paths = [
+            processed_root / safe_dataset_name,
+            processed_root / "pointclouds" / safe_dataset_name,
+            processed_root / "3dmodel" / safe_dataset_name,
+            raw_root / safe_dataset_name,
+            raw_root / f"{safe_project_id}__{safe_dataset_name}",
+            Path(LOCAL_DATA_PATH) / "pointclouds" / safe_project_id / safe_dataset_name,
+        ]
+        normalized_target = _safe_export_stem(safe_dataset_name).lower()
+        for root in (processed_root, processed_root / "pointclouds", processed_root / "3dmodel", raw_root):
+            if not root.is_dir():
+                continue
+            for child in root.iterdir():
+                if _safe_export_stem(child.name).lower() == normalized_target:
+                    candidate_paths.append(child)
+        for candidate in candidate_paths:
+            resolved = candidate.resolve()
+            if resolved.exists() and local_root in resolved.parents:
+                removed += _safe_remove_dataset_path(resolved)
+        if removed == 0 and not catalog_service.catalog_db_enabled():
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        result["removed_paths"] = int(result.get("removed_paths", 0)) + removed
+    return {
+        "status": "success",
+        "dataset_id": safe_dataset_name,
+        "removed_paths": int(result.get("removed_paths", 0)),
+    }
 
 
 @app.get("/api/analysis/{project_id}/elevation")
@@ -8579,6 +8910,8 @@ def project_jobs(project_id: str, request: Request) -> dict[str, list[dict[str, 
     user = _require_user(request)
     safe_project_id = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
+    if catalog_service.catalog_db_enabled() and catalog_service.asset_count(safe_project_id) > 0:
+        return {"jobs": catalog_service.list_job_rows(safe_project_id, local_data_path=LOCAL_DATA_PATH)}
     jobs = _read_processing_jobs()
     return {"jobs": jobs.get(safe_project_id, [])}
 
@@ -8658,6 +8991,10 @@ def _safe_project_file_response_path(project_id: str, file_path: str) -> Path:
     target_abs = os.path.abspath(str(target_path))
     if target_abs != base_abs and not target_abs.startswith(base_abs + os.sep):
         raise HTTPException(status_code=400, detail="Invalid file path")
+    if target_path.is_dir():
+        copc_candidate = _copc_asset_in_dir(target_path)
+        if copc_candidate is not None:
+            target_path = copc_candidate
     if not target_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     return target_path
@@ -8854,15 +9191,171 @@ def download_project_dataset_raw(project_id: str, dataset_id: str, request: Requ
     )
 
 
+_CATALOG_FORCE_DISK_SCAN: set[str] = set()
+
+
+def _dedupe_pointcloud_file_rows(files: list[dict[str, str]], project_id: str) -> list[dict[str, str]]:
+    def canonical_pointcloud_key(value: object) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            text = unquote(text)
+        except Exception:
+            pass
+        text = Path(text.replace("\\", "/")).name
+        stem = Path(text).stem.lower()
+        stem = stem.replace(project_id.lower(), "")
+        stem = re.sub(r"^(?:ept|copc|pointcloud|point-cloud|pc)(?=[0-9._\-\s])[\W_]*", "", stem, flags=re.IGNORECASE)
+        stem = re.sub(r"[\W_]*(?:ept|copc|pointcloud|point-cloud|pc)$", "", stem, flags=re.IGNORECASE)
+        stem = re.sub(r"[-_][a-f0-9]{8,}$", "", stem, flags=re.IGNORECASE)
+        stem = re.sub(r"[^a-z0-9]+", "", stem)
+        return stem
+
+    def pointcloud_keys(*values: object) -> set[str]:
+        keys: set[str] = set()
+        for value in values:
+            key = canonical_pointcloud_key(value)
+            if key:
+                keys.add(key)
+            stem = Path(str(value or "")).stem.lower()
+            if stem:
+                keys.add(stem)
+        return keys
+
+    def _is_pointcloud_catalog_row(row: dict[str, str]) -> bool:
+        signature = " ".join(
+            str(row.get(key) or "").lower()
+            for key in ("kind", "type", "layer_type", "dataset_type", "name", "viewer_type")
+        )
+        if "pointcloud" in signature or "point cloud" in signature:
+            return True
+        name = str(row.get("name") or row.get("display_name") or "").lower()
+        rel = str(row.get("rel_path") or row.get("raw_rel_path") or row.get("source_rel_path") or "").lower()
+        if name.endswith((".las", ".laz", ".copc.laz")) or rel.endswith((".las", ".laz", ".copc.laz")):
+            return True
+        viewer_url = str(row.get("viewer_url") or row.get("layer_url") or "").lower()
+        if "/droid-ept-viewer/" in viewer_url or viewer_url.endswith("/ept.json") or "copc=" in viewer_url:
+            return True
+        return str(row.get("viewer_type") or "").lower() == "copc"
+
+    def pointcloud_row_rank(row: dict[str, str]) -> int:
+        viewer_url = str(row.get("viewer_url") or row.get("layer_url") or "").strip().lower()
+        if str(row.get("viewer_type") or "").lower() == "copc":
+            return 0
+        if viewer_url and ("copc=" in viewer_url or viewer_url.endswith(".copc.laz")):
+            return 0
+        status = str(row.get("status") or "").strip().lower()
+        if status in {"processing", "uploaded", "queued", "running"}:
+            return 1
+        name = str(row.get("name") or row.get("display_name") or "").lower()
+        rel = str(row.get("rel_path") or row.get("raw_rel_path") or "").lower()
+        if (name.endswith((".las", ".laz")) or rel.endswith((".las", ".laz"))) and not viewer_url:
+            return 9
+        return 2
+
+    canonical_files: list[dict[str, str]] = []
+    pointcloud_groups: list[dict[str, object]] = []
+    ignored_identity_keys = {"ept", "copc", "pointcloud", "point-cloud", "pc", "output", "index", "las", "laz"}
+    for index, file_row in enumerate(files):
+        row = _canonical_file_row(file_row)
+        if not _is_pointcloud_catalog_row(row):
+            canonical_files.append(row)
+            continue
+        keys = {
+            key
+            for key in pointcloud_keys(
+                row.get("canonical_key"),
+                row.get("display_name"),
+                row.get("name"),
+                row.get("dataset_id"),
+                row.get("source_rel_path"),
+                row.get("raw_rel_path"),
+                row.get("rel_path"),
+            )
+            if len(key) >= 3 and key not in ignored_identity_keys
+        }
+        matching = [group for group in pointcloud_groups if keys.intersection(group["keys"])]
+        if not matching:
+            pointcloud_groups.append({"keys": set(keys), "rows": [(index, row)]})
+            continue
+        primary = matching[0]
+        primary["keys"].update(keys)
+        primary["rows"].append((index, row))
+        for extra in matching[1:]:
+            primary["keys"].update(extra["keys"])
+            primary["rows"].extend(extra["rows"])
+            pointcloud_groups.remove(extra)
+
+    for group in pointcloud_groups:
+        ranked_rows = sorted(
+            group["rows"],
+            key=lambda item: (pointcloud_row_rank(item[1]), item[0]),
+        )
+        winner = dict(ranked_rows[0][1])
+        for _, candidate in ranked_rows[1:]:
+            for field, value in candidate.items():
+                if not str(winner.get(field) or "").strip() and str(value or "").strip():
+                    winner[field] = value
+        if pointcloud_row_rank(winner) >= 9 and any(pointcloud_row_rank(row) <= 2 for _, row in ranked_rows):
+            continue
+        if str(winner.get("viewer_url") or "").strip():
+            winner["status"] = "WEB-READY"
+            winner["asset_status"] = "WEB-READY"
+            winner["layer_type"] = "pointcloud"
+            winner["dataset_type"] = "pointcloud"
+        canonical_files.append(_canonical_file_row(winner))
+    return canonical_files
+
+
+@app.get("/api/projects/{project_id}/catalog-revision")
+def project_catalog_revision(project_id: str, request: Request) -> dict[str, int]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    return {"revision": catalog_service.get_revision(safe_project_id)}
+
+
+@app.post("/api/admin/catalog/{project_id}/reconcile")
+def admin_reconcile_catalog(
+    project_id: str,
+    request: Request,
+    admin_user: dict[str, str | int] = Depends(verify_admin),
+) -> dict[str, object]:
+    safe_project_id = _safe_project_id(project_id)
+    _invalidate_project_files_cache(safe_project_id)
+    _CATALOG_FORCE_DISK_SCAN.add(safe_project_id)
+    try:
+        scanned = project_files(safe_project_id, request)["files"]
+    finally:
+        _CATALOG_FORCE_DISK_SCAN.discard(safe_project_id)
+    stats = catalog_service.reconcile_from_file_rows(safe_project_id, scanned, local_data_path=LOCAL_DATA_PATH)
+    stats["revision"] = catalog_service.get_revision(safe_project_id)
+    return {"status": "success", **stats}
+
+
 @app.get("/api/projects/{project_id}/files")
 def project_files(project_id: str, request: Request) -> dict[str, list[dict[str, str]]]:
     user = _require_user(request)
     safe_project_id = _safe_project_id(project_id)
     _ensure_project_owner(int(user["id"]), safe_project_id)
     base_url = str(request.base_url).rstrip("/")
+    force_disk = safe_project_id in _CATALOG_FORCE_DISK_SCAN
     cached = _get_cached_project_files(safe_project_id)
-    if cached is not None:
+    if cached is not None and not catalog_service.catalog_db_enabled() and not force_disk:
         return {"files": cached}
+    if (
+        not force_disk
+        and catalog_service.catalog_db_enabled()
+        and catalog_service.asset_count(safe_project_id) > 0
+    ):
+        catalog_rows = [
+            _canonical_file_row(row)
+            for row in catalog_service.list_file_rows(safe_project_id, base_url, local_data_path=LOCAL_DATA_PATH)
+        ]
+        canonical_files = _dedupe_pointcloud_file_rows(catalog_rows, safe_project_id)
+        _set_cached_project_files(safe_project_id, canonical_files)
+        return {"files": canonical_files}
 
     jobs_by_file = {
         job.get("file_name", ""): job
@@ -9286,16 +9779,12 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                 listed_rel_paths.add(rel)
                 listed_rel_paths.add(rel_base)
                 continue
-            viewer_url = (
-                _copc_viewer_url(
-                    base_url,
-                    safe_project_id,
-                    copc_file.parent.name,
-                    display_name,
-                    project_asset_rel,
-                )
-                if POTREE_NATIVE_COPC_ENABLED
-                else ""
+            viewer_url = _copc_viewer_url(
+                base_url,
+                safe_project_id,
+                copc_file.parent.name,
+                display_name,
+                project_asset_rel,
             )
             _write_dataset_manifest(
                 copc_file.parent,
@@ -9312,6 +9801,21 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "asset_rel_path": project_asset_rel,
                 },
             )
+            _upsert_processing_job(
+                safe_project_id,
+                {
+                    "job_id": dataset_id,
+                    "kind": "pointcloud",
+                    "file_name": display_name,
+                    "status": "Completed",
+                    "updated_at": _now_iso(),
+                    "result_url": viewer_url,
+                    "viewer_type": "copc",
+                    "dataset_type": "pointcloud",
+                    "layer_type": "pointcloud",
+                    "tiles_rel_path": rel_base,
+                },
+            )
             files.append(
                 {
                     "name": display_name,
@@ -9319,9 +9823,8 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     "kind": "Droid COPC Point Cloud",
                     "type": "PointCloud",
                     "size_bytes": str(copc_file.stat().st_size),
-                    "status": "WEB-READY" if POTREE_NATIVE_COPC_ENABLED else "Processing",
-                    "asset_status": "WEB-READY" if POTREE_NATIVE_COPC_ENABLED else "Processing",
-                    "stage": "Preparing COPC viewer" if not POTREE_NATIVE_COPC_ENABLED else "",
+                    "status": "WEB-READY",
+                    "asset_status": "WEB-READY",
                     "file_url": viewer_url,
                     "layer_url": viewer_url,
                     "viewer_url": viewer_url,
@@ -9330,88 +9833,6 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
                     ),
                     "viewer_type": "copc",
                     "file_path": str(copc_file.resolve()),
-                    "rel_path": rel,
-                    "dataset_id": dataset_id,
-                    "dataset_type": "pointcloud",
-                    "layer_type": "pointcloud",
-                    "month": "",
-                    "raw_rel_path": "",
-                    "source_rel_path": str(manifest.get("raw_rel_path") or ""),
-                    "canonical_key": canonical_pointcloud_key(display_name) or canonical_pointcloud_key(dataset_id) or rel_base,
-                },
-            )
-            listed_rel_paths.add(rel)
-            listed_rel_paths.add(rel_base)
-            listed_pointcloud_keys.update(pc_row_keys)
-
-        ept_json_paths = [
-            *_project_pointcloud_root(safe_project_id).glob("*/ept.json"),
-            *_legacy_project_pointcloud_root(safe_project_id).glob("*/ept.json"),
-            *processed_root.glob("*/ept.json"),
-            *processed_root.glob("*/*/ept.json"),
-            *processed_root.glob("*/*/*/ept.json"),
-        ]
-        for ept_json in sorted({p.resolve() for p in ept_json_paths}, key=lambda p: (p.parent.stat().st_mtime, p.parent.name.lower()), reverse=True):
-            best_ept = _best_ept_asset(safe_project_id, ept_json.parent.name)
-            if not best_ept:
-                continue
-            best_rel_path, best_dir = best_ept
-            best_ept_json = best_dir / "ept.json"
-            if ept_json != best_ept_json.resolve():
-                continue
-            rel = ept_json.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
-            rel_base = ept_json.parent.relative_to(Path(LOCAL_DATA_PATH)).as_posix()
-            if rel in listed_rel_paths or rel_base in listed_rel_paths:
-                continue
-            if (ept_json.parent / ".conversion_error.txt").is_file():
-                listed_rel_paths.add(rel)
-                listed_rel_paths.add(rel_base)
-                continue
-            manifest = _read_dataset_manifest(ept_json.parent)
-            source_name = str(manifest.get("source_name") or manifest.get("display_name") or manifest.get("dataset_name") or "")
-            source_marker = ept_json.parent / ".source_name.txt"
-            if source_marker.is_file():
-                try:
-                    source_name = source_marker.read_text(encoding="utf-8").strip()
-                except OSError:
-                    pass
-            display_name = source_name or f"{ept_json.parent.name}.las"
-            dataset_id = str(manifest.get("dataset_id") or ept_json.parent.name)
-            pc_row_keys = pointcloud_keys(display_name, ept_json.parent.name, dataset_id, rel_base)
-            if pc_row_keys.intersection(listed_pointcloud_keys):
-                listed_rel_paths.add(rel)
-                listed_rel_paths.add(rel_base)
-                continue
-            viewer_url = _ept_viewer_url(base_url, safe_project_id, ept_json.parent.name, display_name)
-            _write_dataset_manifest(
-                ept_json.parent,
-                {
-                    **manifest,
-                    "project_id": safe_project_id,
-                    "dataset_id": dataset_id,
-                    "display_name": display_name,
-                    "dataset_name": display_name,
-                    "dataset_type": "pointcloud",
-                    "source_name": display_name,
-                    "viewer_type": "ept",
-                    "asset_name": "ept.json",
-                },
-            )
-            files.append(
-                {
-                    "name": display_name,
-                    "display_name": display_name,
-                    "kind": "Droid EPT Point Cloud",
-                    "type": "PointCloud",
-                    "size_bytes": str(get_dir_size(ept_json.parent)),
-                    "status": "WEB-READY",
-                    "asset_status": "WEB-READY",
-                    "file_url": viewer_url,
-                    "layer_url": viewer_url,
-                    "viewer_url": viewer_url,
-                    "ept_url": _ept_json_url(base_url, safe_project_id, ept_json.parent.name),
-                    "viewer_type": "ept",
-                    "file_path": str(ept_json.resolve()),
                     "rel_path": rel,
                     "dataset_id": dataset_id,
                     "dataset_type": "pointcloud",
@@ -9691,8 +10112,95 @@ def project_files(project_id: str, request: Request) -> dict[str, list[dict[str,
             winner["dataset_type"] = "pointcloud"
         canonical_files.append(_canonical_file_row(winner))
 
+    if catalog_service.catalog_db_enabled():
+        catalog_service.reconcile_from_file_rows(safe_project_id, canonical_files, local_data_path=LOCAL_DATA_PATH)
+
     _set_cached_project_files(safe_project_id, canonical_files)
     return {"files": canonical_files}
+
+
+def _purge_catalog_dataset(project_id: str, dataset_key: str) -> dict[str, int | str]:
+    safe_project_id = _safe_project_id(project_id)
+    clean_key = str(dataset_key or "").strip()
+    if not clean_key:
+        raise HTTPException(status_code=400, detail="Invalid dataset key")
+    removed = 0
+    if catalog_service.catalog_db_enabled():
+        removed += catalog_service.delete_assets_by_key(
+            safe_project_id,
+            clean_key,
+            local_data_path=LOCAL_DATA_PATH,
+        )
+    jobs = _read_processing_jobs()
+    current = jobs.get(safe_project_id, [])
+    normalized_key = _safe_export_stem(clean_key).lower()
+    next_jobs: list[dict[str, str]] = []
+    for job in current:
+        if not isinstance(job, dict):
+            continue
+        job_id = str(job.get("job_id") or "")
+        file_name = str(job.get("file_name") or "")
+        job_stem = _safe_export_stem(Path(file_name).stem or file_name).lower()
+        job_id_stem = _safe_export_stem(job_id).lower()
+        if (
+            clean_key in {job_id, file_name}
+            or normalized_key in {job_stem, job_id_stem}
+            or normalized_key in job_id.lower()
+            or normalized_key in file_name.lower()
+        ):
+            catalog_service.remove_asset_db(safe_project_id, job_id)
+            continue
+        next_jobs.append(job)
+    if len(next_jobs) != len(current):
+        jobs[safe_project_id] = next_jobs
+        _write_processing_jobs(jobs)
+
+    candidate_names = {clean_key, Path(clean_key).stem, os.path.basename(clean_key)}
+    for name in candidate_names:
+        if not name:
+            continue
+        for resolver in (
+            _ept_dataset_dir,
+            _legacy_ept_pointcloud_dataset_dir,
+            _legacy_ept_dataset_dir,
+        ):
+            candidate = resolver(safe_project_id, name)
+            if candidate.exists():
+                removed += _safe_remove_dataset_path(candidate)
+            compat = candidate.with_name(f"{candidate.name}__ept_viewer")
+            if compat.exists():
+                removed += _safe_remove_dataset_path(compat)
+        raw_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "raw"
+        for raw_candidate in (
+            raw_root / name,
+            raw_root / f"{safe_project_id}__{name}",
+            raw_root / f"{safe_project_id}__{Path(name).name}",
+        ):
+            if raw_candidate.exists():
+                removed += _safe_remove_dataset_path(raw_candidate)
+
+    try:
+        dataset_id, st = _admin_dataset_status_by_key(safe_project_id, clean_key)
+        removed += _delete_dataset_artifacts(safe_project_id, dataset_id, st)
+    except HTTPException:
+        pass
+
+    _invalidate_project_files_cache(safe_project_id)
+    if catalog_service.catalog_db_enabled():
+        catalog_service.prune_missing_assets(safe_project_id, LOCAL_DATA_PATH)
+        catalog_service.bump_revision(safe_project_id)
+    return {"status": "success", "removed_paths": removed}
+
+
+@app.delete("/api/projects/{project_id}/catalog/{asset_id}")
+def delete_catalog_asset(project_id: str, asset_id: str, request: Request) -> dict[str, int | str]:
+    user = _require_user(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+    safe_asset_id = str(asset_id or "").strip()
+    if not safe_asset_id or ".." in safe_asset_id:
+        raise HTTPException(status_code=400, detail="Invalid asset id")
+    return _purge_catalog_dataset(safe_project_id, safe_asset_id)
 
 
 @app.delete("/api/projects/{project_id}/files")
@@ -9709,7 +10217,16 @@ def delete_project_file(project_id: str, payload: FileDeletePayload, request: Re
     if local_root not in target.parents and target != local_root:
         raise HTTPException(status_code=400, detail="Invalid target path")
     if not target.exists():
+        purge = _purge_catalog_dataset(safe_project_id, Path(rel).stem or rel)
+        if int(purge.get("removed_paths", 0)) >= 0:
+            return {"status": "success"}
         raise HTTPException(status_code=404, detail="File not found")
+    if catalog_service.catalog_db_enabled():
+        catalog_service.delete_asset_by_rel_path(
+            safe_project_id,
+            rel,
+            local_data_path=LOCAL_DATA_PATH,
+        )
     matched = _find_dataset_status_for_rel(safe_project_id, rel)
     if matched:
         dataset_id, st = matched
@@ -9739,7 +10256,16 @@ def admin_force_delete_project_file(
     if local_root not in target.parents and target != local_root:
         raise HTTPException(status_code=400, detail="Invalid target path")
     if not target.exists():
+        purge = _purge_catalog_dataset(safe_project_id, Path(rel).stem or rel)
+        if int(purge.get("removed_paths", 0)) >= 0:
+            return {"status": "success"}
         raise HTTPException(status_code=404, detail="File not found")
+    if catalog_service.catalog_db_enabled():
+        catalog_service.delete_asset_by_rel_path(
+            safe_project_id,
+            rel,
+            local_data_path=LOCAL_DATA_PATH,
+        )
     matched = _find_dataset_status_for_rel(safe_project_id, rel)
     if matched:
         dataset_id, st = matched
@@ -9763,6 +10289,8 @@ def api_version() -> dict[str, str]:
     return {
         "version": PORTAL_VERSION,
         "dev_mode": "true" if str(os.getenv("DEV_MODE", "")).strip().lower() in {"1", "true", "yes", "on"} else "false",
+        "manual_bulk_import": "true",
+        "locate_folder": "true" if os.name == "nt" else "false",
     }
 
 

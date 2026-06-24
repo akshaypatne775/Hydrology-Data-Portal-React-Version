@@ -11,6 +11,7 @@ import { ApiError } from '../services/api'
 import {
   completeDatasetUpload,
   getDatasetStatus,
+  notifyCatalogChanged,
   processDatasetTif,
   uploadDatasetChunk,
   type ProcessDatasetResponse,
@@ -26,6 +27,26 @@ const LARGE_RASTER_DIRECT_UPLOAD_LIMIT_BYTES = 1024 * 1024 * 1024
 const POINT_CLOUD_CHUNK_MAX_RETRIES = 8
 const DATASET_CHUNK_MAX_RETRIES = 4
 const POINT_CLOUD_CONVERSION_TIMEOUT_MS = 24 * 60 * 60 * 1000
+const POINT_CLOUD_UPLOAD_PROGRESS_CAP = 62
+const POINT_CLOUD_MERGE_PROGRESS = 72
+const POINT_CLOUD_CONVERSION_PROGRESS_START = 78
+const POINT_CLOUD_CONVERSION_PROGRESS_CAP = 97
+const UPLOAD_SUCCESS_VISIBLE_MS = 8000
+
+function pointCloudUploadProgress(chunkIndex: number, totalChunks: number): number {
+  if (totalChunks <= 0) return 1
+  const ratio = (chunkIndex + 1) / totalChunks
+  return Math.max(1, Math.min(POINT_CLOUD_UPLOAD_PROGRESS_CAP, Math.round(ratio * POINT_CLOUD_UPLOAD_PROGRESS_CAP)))
+}
+
+function pointCloudConversionProgress(conversionStartedAt: number): number {
+  const elapsedSeconds = (Date.now() - conversionStartedAt) / 1000
+  const bump = Math.floor(elapsedSeconds / 4)
+  return Math.min(
+    POINT_CLOUD_CONVERSION_PROGRESS_CAP,
+    POINT_CLOUD_CONVERSION_PROGRESS_START + bump,
+  )
+}
 
 export type UploadTask = {
   id: string
@@ -181,12 +202,12 @@ export function UploadProvider({ children }: PropsWithChildren) {
               lastError = error instanceof Error ? error : new Error('Point cloud chunk upload failed')
               if ((lastError as Error & { nonRetryable?: boolean }).nonRetryable) throw lastError
               if (attempt >= POINT_CLOUD_CHUNK_MAX_RETRIES) break
-              const uploadPercent = ((chunkIndex + 1) / totalChunks) * 100
+              const retryProgress = pointCloudUploadProgress(chunkIndex, totalChunks)
               upsertTask(id, {
-                progressPercent: Math.max(1, Math.min(99, uploadPercent)),
+                progressPercent: retryProgress,
                 state: 'uploading',
                 stage: `Retrying upload chunk ${chunkIndex + 1}/${totalChunks}`,
-                etaText: estimateEtaFromProgress(uploadStartedAt, uploadPercent),
+                etaText: estimateEtaFromProgress(uploadStartedAt, retryProgress),
                 statusText: `Network interruption. Retrying point cloud part ${chunkIndex + 1}/${totalChunks} (${attempt + 1}/${POINT_CLOUD_CHUNK_MAX_RETRIES})...`,
               })
               await wait(1600 * attempt)
@@ -194,10 +215,10 @@ export function UploadProvider({ children }: PropsWithChildren) {
           }
           if (!uploaded) throw lastError || new Error(`Point cloud chunk upload failed at part ${chunkIndex + 1}`)
           upsertTask(id, {
-            progressPercent: ((chunkIndex + 1) / totalChunks) * 100,
+            progressPercent: pointCloudUploadProgress(chunkIndex, totalChunks),
             state: 'uploading',
-            stage: 'Uploading file in chunks',
-            etaText: estimateEtaFromProgress(uploadStartedAt, ((chunkIndex + 1) / totalChunks) * 100),
+            stage: `Uploading chunk ${chunkIndex + 1}/${totalChunks}`,
+            etaText: estimateEtaFromProgress(uploadStartedAt, pointCloudUploadProgress(chunkIndex, totalChunks)),
             statusText: `Uploading ${file.name} (${chunkIndex + 1}/${totalChunks})...`,
           })
         }
@@ -227,13 +248,19 @@ export function UploadProvider({ children }: PropsWithChildren) {
             : `${API_BASE}/droid-ept-viewer/index.html?project=${encodeURIComponent(resolvedProjectId)}`)
 
         upsertTask(id, {
+          progressPercent: POINT_CLOUD_MERGE_PROGRESS,
           state: 'processing',
-          statusText: `Processing ${file.name} on server...`,
+          stage: 'Merging uploaded chunks',
+          etaText: 'Preparing COPC conversion',
+          statusText: `Merging ${file.name} on server...`,
+          datasetId: completeData.tileset_id,
           resultUrl: targetUrl,
         })
 
-        const started = Date.now()
-        while (Date.now() - started < POINT_CLOUD_CONVERSION_TIMEOUT_MS) {
+        const conversionStartedAt = Date.now()
+        let pollCount = 0
+        while (Date.now() - conversionStartedAt < POINT_CLOUD_CONVERSION_TIMEOUT_MS) {
+          pollCount += 1
           const status = await getPointCloudStatus(projectId, completeData.tileset_id)
           if (status?.failed) {
             throw new Error(status.error || 'Point cloud conversion failed.')
@@ -245,18 +272,37 @@ export function UploadProvider({ children }: PropsWithChildren) {
             upsertTask(id, {
               state: 'success',
               progressPercent: 100,
-              statusText: `${file.name} is ready.`,
+              stage: 'WEB-READY',
+              etaText: 'Done',
+              statusText: `${file.name} is ready. Open it from Data Catalog or Viewer (3D).`,
               resultUrl: readyUrl,
+              datasetId: completeData.tileset_id,
             })
+            notifyCatalogChanged(projectId)
+            await wait(UPLOAD_SUCCESS_VISIBLE_MS)
+            dismissTask(id)
             return
           }
+
+          const conversionStage = pollCount <= 2
+            ? 'Merging uploaded LAS/LAZ'
+            : 'Converting to COPC (PDAL)'
+          const conversionProgress = pollCount <= 2
+            ? POINT_CLOUD_MERGE_PROGRESS
+            : pointCloudConversionProgress(conversionStartedAt)
+
           upsertTask(id, {
             state: 'processing',
-            statusText: `Converting ${file.name} to point cloud viewer...`,
-            stage: 'Point cloud conversion running',
-            etaText: 'Large point clouds can take several hours',
+            progressPercent: conversionProgress,
+            statusText: `${conversionStage} — ${file.name}`,
+            stage: conversionStage,
+            etaText: pollCount <= 2
+              ? 'Almost ready for COPC conversion'
+              : estimateEtaFromProgress(conversionStartedAt, conversionProgress) || 'Large point clouds can take several minutes',
+            datasetId: completeData.tileset_id,
+            resultUrl: targetUrl,
           })
-          await new Promise((resolve) => window.setTimeout(resolve, 2000))
+          await wait(2000)
         }
         throw new Error('Timed out waiting for point cloud conversion after 24 hours.')
       } catch (error) {
@@ -273,7 +319,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
         })
       }
     },
-    [createTask, upsertTask],
+    [createTask, dismissTask, upsertTask],
   )
 
   const startDatasetUpload = useCallback(
@@ -409,13 +455,18 @@ export function UploadProvider({ children }: PropsWithChildren) {
               : `Converting ${file.name} to COG...`,
         })
         if (isCsv || isPdf) {
-          upsertTask(id, {
-            state: 'success',
-            progressPercent: 100,
-            statusText: isPdf ? `${file.name} report is ready.` : `${file.name} is ready for comparison.`,
-            resultUrl: created.cog_tile_url_template,
-          })
-          return
+            upsertTask(id, {
+              state: 'success',
+              progressPercent: 100,
+              stage: 'WEB-READY',
+              etaText: 'Done',
+              statusText: isPdf ? `${file.name} report is ready.` : `${file.name} is ready for comparison.`,
+              resultUrl: created.cog_tile_url_template,
+            })
+            notifyCatalogChanged(projectId)
+            await wait(UPLOAD_SUCCESS_VISIBLE_MS)
+            dismissTask(id)
+            return
         }
 
         const start = Date.now()
@@ -450,11 +501,14 @@ export function UploadProvider({ children }: PropsWithChildren) {
             upsertTask(id, {
               state: 'success',
               progressPercent: 100,
-              stage: 'Web-ready',
+              stage: 'WEB-READY',
               etaText: 'Done',
-              statusText: isZip && is3DModel ? `${file.name} 3D model is ready.` : `${file.name} is Web-Ready.`,
+              statusText: isZip && is3DModel ? `${file.name} 3D model is ready.` : `${file.name} is Web-Ready in Data Catalog.`,
               resultUrl: status.cog_tile_url_template,
             })
+            notifyCatalogChanged(projectId)
+            await wait(UPLOAD_SUCCESS_VISIBLE_MS)
+            dismissTask(id)
             return
           }
           if (status.status === 'Failed') {
@@ -488,7 +542,7 @@ export function UploadProvider({ children }: PropsWithChildren) {
         })
       }
     },
-    [createTask, upsertTask],
+    [createTask, dismissTask, upsertTask],
   )
 
   const value = useMemo(

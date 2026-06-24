@@ -274,6 +274,12 @@ def _normalize_sql_for_postgres(statement: str) -> str:
     sql = re.sub(r"\bTEXT\b", "TEXT", sql, flags=re.I)
     sql = re.sub(r"\bINSERT\s+OR\s+IGNORE\b", "INSERT", sql, flags=re.I)
     sql = sql.replace("strftime('%Y-%m-%dT%H:%M:%fZ','now')", "CURRENT_TIMESTAMP")
+    sql = re.sub(
+        r"ON CONFLICT\(project_id\) DO UPDATE SET catalog_revision = catalog_revision \+ 1",
+        "ON CONFLICT(project_id) DO UPDATE SET catalog_revision = catalog_project_meta.catalog_revision + 1",
+        sql,
+        flags=re.I,
+    )
     return sql
 
 
@@ -461,6 +467,37 @@ def _postgres_schema_statements(srid: int) -> list[str]:
         """,
         "CREATE INDEX IF NOT EXISTS idx_activity_logs_user_time ON activity_logs(user_id, accessed_at)",
         "CREATE INDEX IF NOT EXISTS idx_activity_logs_accessed_at ON activity_logs(accessed_at)",
+        """
+        CREATE TABLE IF NOT EXISTS catalog_assets (
+            id TEXT NOT NULL,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            asset_type TEXT NOT NULL DEFAULT '',
+            display_name TEXT NOT NULL DEFAULT '',
+            source_name TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'Processing',
+            progress INTEGER NOT NULL DEFAULT 0,
+            stage TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            primary_rel_path TEXT NOT NULL DEFAULT '',
+            paths_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            viewer_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            content_hash TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (project_id, id)
+        )
+        """,
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_assets_primary_path ON catalog_assets(project_id, primary_rel_path) WHERE primary_rel_path <> ''",
+        "CREATE INDEX IF NOT EXISTS idx_catalog_assets_project ON catalog_assets(project_id)",
+        "CREATE INDEX IF NOT EXISTS idx_catalog_assets_status ON catalog_assets(project_id, status)",
+        """
+        CREATE TABLE IF NOT EXISTS catalog_project_meta (
+            project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+            catalog_revision BIGINT NOT NULL DEFAULT 0,
+            last_reconciled_at TEXT NOT NULL DEFAULT ''
+        )
+        """,
     ]
 
 
@@ -695,6 +732,59 @@ def _ensure_sqlite_tables() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_activity_logs_accessed_at
             ON activity_logs(accessed_at)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS catalog_assets (
+                id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                asset_type TEXT NOT NULL DEFAULT '',
+                display_name TEXT NOT NULL DEFAULT '',
+                source_name TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'Processing',
+                progress INTEGER NOT NULL DEFAULT 0,
+                stage TEXT NOT NULL DEFAULT '',
+                error_message TEXT NOT NULL DEFAULT '',
+                primary_rel_path TEXT NOT NULL DEFAULT '',
+                paths_json TEXT NOT NULL DEFAULT '{}',
+                viewer_json TEXT NOT NULL DEFAULT '{}',
+                meta_json TEXT NOT NULL DEFAULT '{}',
+                content_hash TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (project_id, id),
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_assets_primary_path
+            ON catalog_assets(project_id, primary_rel_path)
+            WHERE primary_rel_path <> ''
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_assets_project
+            ON catalog_assets(project_id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_catalog_assets_status
+            ON catalog_assets(project_id, status)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS catalog_project_meta (
+                project_id TEXT PRIMARY KEY,
+                catalog_revision INTEGER NOT NULL DEFAULT 0,
+                last_reconciled_at TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )
             """
         )
         connection.commit()

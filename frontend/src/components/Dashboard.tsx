@@ -8,7 +8,8 @@ import { updateAdminDatasetMetadata } from '../services/adminService'
 import { getPointCloudStatus } from '../services/pointCloudService'
 import { useWorkspaceContext } from '../context/WorkspaceContext'
 import { useModal } from '../context/ModalContext'
-import { toSameOriginBackendUrl } from '../lib/apiBase'
+import { API_BASE, toSameOriginBackendUrl } from '../lib/apiBase'
+import { copcApiUrlToViewerUrl, normalizePointCloudViewerUrl } from '../lib/pointCloudViewerUrl'
 import Viewer3DSidebar from './GlobeViewer/Viewer3DSidebar'
 import type { PotreeToolAction, PotreeViewerHandle } from './GlobeViewer/PotreeViewer'
 import type { WorkspaceTabId } from '../hooks/useWorkspaceState'
@@ -204,26 +205,22 @@ function canonical3DAssetKey(viewer: Project3DAsset['viewer'], values: unknown[]
 }
 
 function isRawPointCloudAssetUrl(url: string): boolean {
-  return /\.(las|laz)(?:[?#].*)?$/i.test(url.trim())
+  const normalized = url.trim()
+  return /\.(las|laz)(?:[?#].*)?$/i.test(normalized) && !/\.copc\.laz(?:[?#].*)?$/i.test(normalized)
 }
 
 function isConvertedPointCloudAssetUrl(url: string): boolean {
   const normalized = normalize3DAssetToken(url)
   return (
-    normalized.includes('/droid-ept-viewer/') ||
-    normalized.endsWith('/ept.json') ||
-    normalized.endsWith('.copc.laz') ||
-    (
-      normalized.includes('/processed/') &&
-      normalized.endsWith('/ept.json')
-    )
+    (normalized.includes('/droid-ept-viewer/') && url.includes('copc=')) ||
+    normalized.endsWith('.copc.laz')
   )
 }
 
 function isBetter3DAsset(candidate: Project3DAsset, current: Project3DAsset): boolean {
   const candidateUrl = normalize3DAssetToken(candidate.url)
   const currentUrl = normalize3DAssetToken(current.url)
-  if (candidate.viewer === 'potree') {
+    if (candidate.viewer === 'potree') {
     const candidateConverted = isConvertedPointCloudAssetUrl(candidate.url)
     const currentConverted = isConvertedPointCloudAssetUrl(current.url)
     if (candidateConverted && !currentConverted) return true
@@ -239,6 +236,16 @@ function isBetter3DAsset(candidate: Project3DAsset, current: Project3DAsset): bo
   return false
 }
 
+function assetsReferSame3DItem(left: Project3DAsset, right: Project3DAsset): boolean {
+  if (left.id && right.id && left.id === right.id) return true
+  const leftUrl = normalize3DAssetToken(left.url)
+  const rightUrl = normalize3DAssetToken(right.url)
+  if (leftUrl && rightUrl && leftUrl === rightUrl) return true
+  const leftName = left.viewer === 'potree' ? canonicalPointCloudAssetName(left.name) : normalize3DAssetToken(left.name)
+  const rightName = right.viewer === 'potree' ? canonicalPointCloudAssetName(right.name) : normalize3DAssetToken(right.name)
+  return Boolean(leftName && rightName && leftName === rightName)
+}
+
 function specific3DAssetNameKey(asset: Project3DAsset): string {
   const name = asset.viewer === 'potree' ? canonicalPointCloudAssetName(asset.name) : normalize3DAssetToken(asset.name)
   if (!name || name === 'point cloud' || name === '3d model') return ''
@@ -246,19 +253,21 @@ function specific3DAssetNameKey(asset: Project3DAsset): string {
 }
 
 function set3DAssetOnce(assets: Map<string, Project3DAsset>, asset: Project3DAsset) {
-  const key = specific3DAssetNameKey(asset) || asset.dedupeKey || canonical3DAssetKey(asset.viewer, [asset.url, asset.id, asset.name])
+  const key = asset.id
+    ? `${asset.viewer}:id:${asset.id}`
+    : (specific3DAssetNameKey(asset) || asset.dedupeKey || canonical3DAssetKey(asset.viewer, [asset.url, asset.id, asset.name]))
   const existing = assets.get(key)
   if (!existing || isBetter3DAsset(asset, existing)) {
     assets.set(key, asset)
   }
 }
 
-function project3DAssetsFromFiles(files: ProjectFile[]): Project3DAsset[] {
+function project3DAssetsFromFiles(files: ProjectFile[], projectId: string): Project3DAsset[] {
   const assets = new Map<string, Project3DAsset>()
   for (const file of files) {
     const rawUrl = String(file.viewer_url || file.layer_url || file.file_url || '').trim()
-    const url = toSameOriginBackendUrl(rawUrl) || rawUrl
-    if (!url) continue
+    let url = toSameOriginBackendUrl(rawUrl) || rawUrl
+    const normalizedType = String(file.type || file.dataset_type || file.layer_type || '').toLowerCase()
     const signature = [
       file.kind,
       file.type,
@@ -266,25 +275,55 @@ function project3DAssetsFromFiles(files: ProjectFile[]): Project3DAsset[] {
       file.dataset_type,
       file.name,
       url,
+      normalizedType,
     ].map((value) => String(value || '').toLowerCase()).join(' ')
     const viewer = (
       signature.includes('pointcloud') ||
       signature.includes('point cloud') ||
-      signature.includes('/droid-ept-viewer/') ||
-      signature.includes('/ept.json') ||
+      normalizedType === 'pointcloud' ||
+      (signature.includes('/droid-ept-viewer/') && signature.includes('copc=')) ||
       signature.includes('.copc.laz')
     )
       ? 'potree'
       : (
           signature.includes('3dmodel') ||
           signature.includes('3d model') ||
+          normalizedType === '3dmodel' ||
           signature.includes('tileset.json') ||
           signature.includes('cesium')
         )
         ? 'cesium'
         : null
     if (!viewer) continue
+    if (!url && viewer === 'potree') {
+      const copcCandidate = String(file.cog_rel_path || file.rel_path || file.raw_rel_path || '').trim()
+      if (copcCandidate.toLowerCase().endsWith('.copc.laz')) {
+        const copcApi = copcCandidate.startsWith('/api/')
+          ? copcCandidate
+          : `/api/data/${copcCandidate.replace(/^\/+/, '')}`
+        url = copcApiUrlToViewerUrl(
+          copcApi,
+          projectId,
+          String(file.dataset_id || file.name),
+          String(file.name || file.dataset_id || 'Point Cloud'),
+        )
+      }
+    }
+    if (!url && viewer === 'cesium' && file.rel_path) {
+      url = `${API_BASE}/data/${file.rel_path.replace(/\/$/, '')}/tileset.json`
+    }
+    if (!url) continue
     if (viewer === 'potree' && isRawPointCloudAssetUrl(url)) continue
+    if (viewer === 'potree') {
+      const normalizedUrl = normalizePointCloudViewerUrl(
+        url,
+        projectId,
+        String(file.dataset_id || file.rel_path || file.name),
+        String(file.name || file.dataset_id || 'Point Cloud'),
+      )
+      if (!normalizedUrl) continue
+      url = normalizedUrl
+    }
     const id = String(file.dataset_id || file.rel_path || url)
     const asset: Project3DAsset = {
       id,
@@ -298,11 +337,11 @@ function project3DAssetsFromFiles(files: ProjectFile[]): Project3DAsset[] {
   return Array.from(assets.values())
 }
 
-function project3DAssetsFromJobs(jobs: ProjectJob[]): Project3DAsset[] {
+function project3DAssetsFromJobs(jobs: ProjectJob[], projectId: string): Project3DAsset[] {
   const assets = new Map<string, Project3DAsset>()
   for (const job of jobs) {
     const rawUrl = String(job.result_url || '').trim()
-    const url = toSameOriginBackendUrl(rawUrl) || rawUrl
+    let url = toSameOriginBackendUrl(rawUrl) || rawUrl
     if (!url) continue
     const signature = [job.kind, job.file_name, url]
       .map((value) => String(value || '').toLowerCase())
@@ -310,8 +349,7 @@ function project3DAssetsFromJobs(jobs: ProjectJob[]): Project3DAsset[] {
     const viewer = (
       signature.includes('pointcloud') ||
       signature.includes('point cloud') ||
-      signature.includes('/droid-ept-viewer/') ||
-      signature.includes('/ept.json') ||
+      (signature.includes('/droid-ept-viewer/') && signature.includes('copc=')) ||
       signature.includes('.copc.laz')
     )
       ? 'potree'
@@ -325,6 +363,16 @@ function project3DAssetsFromJobs(jobs: ProjectJob[]): Project3DAsset[] {
         : null
     if (!viewer) continue
     if (viewer === 'potree' && isRawPointCloudAssetUrl(url)) continue
+    if (viewer === 'potree') {
+      const normalizedUrl = normalizePointCloudViewerUrl(
+        url,
+        projectId,
+        String(job.job_id || job.file_name),
+        String(job.file_name || 'Point Cloud'),
+      )
+      if (!normalizedUrl) continue
+      url = normalizedUrl
+    }
     const id = String(job.job_id || url)
     const asset: Project3DAsset = {
       id,
@@ -362,6 +410,8 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     activeLayers,
     activeViewerTab,
     setActiveViewerTab,
+    pending3DOpen,
+    setPending3DOpen,
   } = useWorkspaceContext()
   const isAdmin = user.role === 'admin'
   const canAccessDataCatalog = isAdmin || user.can_access_catalog !== false
@@ -435,28 +485,129 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
     }
   }, [selected3DAsset?.viewer])
 
+  const loadProject3DAssets = useCallback(async (options?: { preserveSelection?: boolean }) => {
+    if (!selectedProject?.id) {
+      setProject3DAssets([])
+      if (!options?.preserveSelection) setSelected3DAsset(null)
+      return
+    }
+    try {
+      const [files, jobs] = await Promise.all([
+        getProjectFiles(selectedProject.id, true),
+        getProjectJobs(selectedProject.id, true),
+      ])
+      const combined = new Map<string, Project3DAsset>()
+      for (const asset of [...project3DAssetsFromFiles(files, selectedProject.id), ...project3DAssetsFromJobs(jobs, selectedProject.id)]) {
+        set3DAssetOnce(combined, asset)
+      }
+      const unresolvedPointClouds = files.filter((file) => {
+        const signature = [file.kind, file.type, file.layer_type, file.dataset_type, file.name]
+          .map((value) => String(value || '').toLowerCase())
+          .join(' ')
+        const rawUrl = String(file.layer_url || file.file_url || '').trim()
+        const hasViewerUrl = rawUrl && !isRawPointCloudAssetUrl(rawUrl)
+        return (
+          !hasViewerUrl &&
+          (
+            signature.includes('pointcloud') ||
+            signature.includes('point cloud') ||
+            String(file.name || '').toLowerCase().endsWith('.las') ||
+            String(file.name || '').toLowerCase().endsWith('.laz')
+          )
+        )
+      })
+      await Promise.all(unresolvedPointClouds.map(async (file) => {
+        const lookupCandidates = Array.from(new Set([
+          String(file.dataset_id || '').trim(),
+          String(file.name || '').trim(),
+          String(file.rel_path || '').trim(),
+        ].filter(Boolean)))
+        for (const lookup of lookupCandidates) {
+          try {
+            const status = await getPointCloudStatus(selectedProject.id, lookup)
+            const rawUrl = String(status?.tileset_url || status?.copc_url || '').trim()
+            const url = toSameOriginBackendUrl(rawUrl) || rawUrl
+              if (status?.ready && url && !isRawPointCloudAssetUrl(url)) {
+                const viewerUrl = normalizePointCloudViewerUrl(
+                  String(status.tileset_url || status.copc_url || url),
+                  selectedProject.id,
+                  String(file.dataset_id || lookup),
+                  String(file.name || lookup || 'Point Cloud'),
+                )
+                if (!viewerUrl) break
+                set3DAssetOnce(combined, {
+                  id: String(file.dataset_id || lookup),
+                  name: String(file.name || lookup || 'Point Cloud'),
+                  url: viewerUrl,
+                  viewer: 'potree',
+                  dedupeKey: canonical3DAssetKey('potree', [file.dataset_id, file.rel_path, file.name, viewerUrl]),
+                })
+                break
+              }
+          } catch {
+            // Missing/processing point clouds stay out of the 3D list until a viewer asset is ready.
+          }
+        }
+      }))
+      const nextAssets = Array.from(combined.values())
+      setProject3DAssets(nextAssets)
+      if (options?.preserveSelection) {
+        setSelected3DAsset((current) => {
+          if (!current) return current
+          return nextAssets.find((asset) => assetsReferSame3DItem(asset, current)) ?? current
+        })
+      }
+    } catch {
+      setProject3DAssets([])
+    }
+  }, [selectedProject?.id])
+
+  useEffect(() => {
+    if (!selectedProject?.id) {
+      setProject3DAssets([])
+      setSelected3DAsset(null)
+      return
+    }
+    setSelected3DAsset(null)
+    void loadProject3DAssets()
+  }, [loadProject3DAssets, selectedProject?.id])
+
   useEffect(() => {
     if (!selected3DAsset) {
+      if (pending3DOpen) return
       const fallback = active3DCanvasTab === 'potree'
         ? projectPointClouds[0] ?? project3DModels[0]
         : project3DModels[0] ?? projectPointClouds[0]
       if (fallback) setSelected3DAsset(fallback)
       return
     }
-    if (active3DCanvasTab === 'potree' && projectPointClouds.length === 0 && project3DModels.length > 0) {
+    if (
+      active3DCanvasTab === 'potree' &&
+      projectPointClouds.length === 0 &&
+      project3DModels.length > 0 &&
+      !(selected3DAsset.viewer === 'potree' && selected3DAsset.url)
+    ) {
       setActive3DCanvasTab('cesium')
       setSelected3DAsset(project3DModels[0] ?? null)
     }
-    if (active3DCanvasTab === 'cesium' && project3DModels.length === 0 && projectPointClouds.length > 0) {
+    if (
+      active3DCanvasTab === 'cesium' &&
+      project3DModels.length === 0 &&
+      projectPointClouds.length > 0 &&
+      !(selected3DAsset.viewer === 'cesium' && selected3DAsset.url)
+    ) {
       setActive3DCanvasTab('potree')
       setSelected3DAsset(projectPointClouds[0] ?? null)
     }
-  }, [active3DCanvasTab, project3DModels, projectPointClouds, selected3DAsset])
+  }, [active3DCanvasTab, pending3DOpen, project3DModels, projectPointClouds, selected3DAsset])
 
   const select3DCanvasTab = useCallback((tab: 'potree' | 'cesium') => {
     setActive3DCanvasTab(tab)
-    const asset = tab === 'potree' ? projectPointClouds[0] : project3DModels[0]
-    if (asset) setSelected3DAsset(asset)
+    setSelected3DAsset((current) => {
+      if (current?.viewer === tab && current.url) return current
+      const asset = tab === 'potree' ? projectPointClouds[0] : project3DModels[0]
+      return asset ?? current
+    })
   }, [project3DModels, projectPointClouds])
 
   const selectedPointCloudUrl = selected3DAsset?.viewer === 'potree'
@@ -473,8 +624,35 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
       : ''
 
   useEffect(() => {
-    if (active3DLayer) setSelected3DAsset(null)
-  }, [active3DLayer?.id, active3DLayer?.url])
+    if (!pending3DOpen) return
+    const opened: Project3DAsset = {
+      id: pending3DOpen.datasetId || pending3DOpen.name,
+      name: pending3DOpen.name,
+      url: selectedProject?.id
+        ? (normalizePointCloudViewerUrl(
+          pending3DOpen.url,
+          selectedProject.id,
+          pending3DOpen.datasetId || pending3DOpen.name,
+          pending3DOpen.name,
+        ) || pending3DOpen.url)
+        : pending3DOpen.url,
+      viewer: pending3DOpen.viewer,
+      dedupeKey: canonical3DAssetKey(
+        pending3DOpen.viewer,
+        [pending3DOpen.datasetId, pending3DOpen.url, pending3DOpen.name],
+      ),
+    }
+    setProject3DAssets((current) => {
+      const combined = new Map<string, Project3DAsset>()
+      for (const asset of current) set3DAssetOnce(combined, asset)
+      set3DAssetOnce(combined, opened)
+      return Array.from(combined.values())
+    })
+    setSelected3DAsset(opened)
+    setActive3DCanvasTab(pending3DOpen.viewer)
+    setPending3DOpen(null)
+    void loadProject3DAssets({ preserveSelection: true })
+  }, [loadProject3DAssets, pending3DOpen, selectedProject?.id, setPending3DOpen])
 
   const routedViewerId = useMemo(() => {
     if (activeId !== 'map' && activeId !== 'globe') return activeId
@@ -482,6 +660,11 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
   }, [activeId, activeViewerTab])
 
   const isViewerWorkspace = routedViewerId === 'map' || routedViewerId === 'globe'
+
+  useEffect(() => {
+    if (routedViewerId !== 'globe' || !selectedProject?.id) return
+    void loadProject3DAssets({ preserveSelection: true })
+  }, [loadProject3DAssets, routedViewerId, selectedProject?.id])
 
   useEffect(() => {
     if (!isViewerWorkspace) setViewerFullscreen(false)
@@ -551,79 +734,6 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
       }
     })
   }, [projects, setSelectedProject])
-
-  useEffect(() => {
-    let cancelled = false
-    setSelected3DAsset(null)
-    if (!selectedProject?.id) {
-      setProject3DAssets([])
-      return () => {
-        cancelled = true
-      }
-    }
-    void Promise.all([
-      getProjectFiles(selectedProject.id),
-      getProjectJobs(selectedProject.id),
-    ])
-      .then(async ([files, jobs]) => {
-        if (cancelled) return
-        const combined = new Map<string, Project3DAsset>()
-        for (const asset of [...project3DAssetsFromFiles(files), ...project3DAssetsFromJobs(jobs)]) {
-          set3DAssetOnce(combined, asset)
-        }
-        const unresolvedPointClouds = files.filter((file) => {
-          const signature = [file.kind, file.type, file.layer_type, file.dataset_type, file.name]
-            .map((value) => String(value || '').toLowerCase())
-            .join(' ')
-          const rawUrl = String(file.layer_url || file.file_url || '').trim()
-          const hasViewerUrl = rawUrl && !isRawPointCloudAssetUrl(rawUrl)
-          return (
-            !hasViewerUrl &&
-            (
-              signature.includes('pointcloud') ||
-              signature.includes('point cloud') ||
-              String(file.name || '').toLowerCase().endsWith('.las') ||
-              String(file.name || '').toLowerCase().endsWith('.laz')
-            )
-          )
-        })
-        await Promise.all(unresolvedPointClouds.map(async (file) => {
-          if (cancelled) return
-          const lookupCandidates = Array.from(new Set([
-            String(file.dataset_id || '').trim(),
-            String(file.name || '').trim(),
-            String(file.rel_path || '').trim(),
-          ].filter(Boolean)))
-          for (const lookup of lookupCandidates) {
-            try {
-              const status = await getPointCloudStatus(selectedProject.id, lookup)
-              const rawUrl = String(status?.tileset_url || status?.copc_url || status?.ept_url || '').trim()
-              const url = toSameOriginBackendUrl(rawUrl) || rawUrl
-              if (status?.ready && url && !isRawPointCloudAssetUrl(url)) {
-                set3DAssetOnce(combined, {
-                  id: String(file.dataset_id || lookup),
-                  name: String(file.name || lookup || 'Point Cloud'),
-                  url,
-                  viewer: 'potree',
-                  dedupeKey: canonical3DAssetKey('potree', [file.dataset_id, file.rel_path, file.name, url]),
-                })
-                break
-              }
-            } catch {
-              // Missing/processing point clouds stay out of the 3D list until a viewer asset is ready.
-            }
-          }
-        }))
-        if (cancelled) return
-        setProject3DAssets(Array.from(combined.values()))
-      })
-      .catch(() => {
-        if (!cancelled) setProject3DAssets([])
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [selectedProject?.id])
 
   useEffect(() => {
     if (routedViewerId !== 'globe') return
@@ -845,6 +955,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
           selectedAsset={selected3DAsset}
           canRename={isAdmin}
           onSelect={(asset) => {
+            setPending3DOpen(null)
             setSelected3DAsset(asset)
             setActive3DCanvasTab(asset.viewer)
           }}

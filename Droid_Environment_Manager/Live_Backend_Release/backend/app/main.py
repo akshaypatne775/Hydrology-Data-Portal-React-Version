@@ -409,6 +409,21 @@ class PointCloudProcessPayload(BaseModel):
     project_id: str = "default-project"
 
 
+class AdminManualBulkImportTask(BaseModel):
+    source_folder: str
+    kind: str  # las | ortho | dtm | dsm
+
+
+class AdminManualBulkImportPayload(BaseModel):
+    project_id: str = ""
+    tasks: list[AdminManualBulkImportTask]
+    max_parallel: int = 2
+
+
+class AdminLocateFolderPayload(BaseModel):
+    initial_path: str = ""
+
+
 class CompleteUploadPayload(BaseModel):
     filename: str
     totalChunks: int
@@ -5373,6 +5388,345 @@ def sync_manual_datasets(project_id: str, request: Request) -> dict[str, str]:
     }
 
 
+def _bulk_scan_files(source_dir: Path, kind: str) -> list[Path]:
+    safe_kind = str(kind or "").strip().lower()
+    if safe_kind == "las":
+        exts = {".las", ".laz"}
+    elif safe_kind in {"ortho", "dtm", "dsm"}:
+        exts = {".tif", ".tiff"}
+    else:
+        return []
+    files = [p for p in source_dir.iterdir() if p.is_file() and p.suffix.lower() in exts]
+    return sorted(files, key=lambda p: p.name.lower())
+
+
+async def _admin_manual_bulk_import_background(
+    *,
+    project_id: str,
+    tasks: list[AdminManualBulkImportTask],
+    max_parallel: int,
+) -> None:
+    safe_project_id = _safe_project_id(project_id)
+    semaphore = asyncio.Semaphore(max(1, min(int(max_parallel or 2), 6)))
+
+    async def run_one_pointcloud(source_file: Path) -> None:
+        async with semaphore:
+            raw_dir, _ = get_project_dirs(safe_project_id)
+            safe_name = _safe_pointcloud_basename(source_file.name)
+            dataset_id = _safe_dataset_id(f"{re.sub(r'[^A-Za-z0-9._-]+', '-', Path(safe_name).stem)[:40]}-{secrets.token_hex(6)}")
+            raw_target = raw_dir / f"{safe_project_id}__{dataset_id}__{safe_name}"
+            dataset_folder = _potree_dataset_name(dataset_id)
+            output_dir = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "processed" / dataset_folder
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            try:
+                shutil.copy2(source_file, raw_target)
+            except OSError as exc:
+                _upsert_processing_job(
+                    safe_project_id,
+                    {
+                        "job_id": dataset_id,
+                        "kind": "pointcloud",
+                        "file_name": safe_name,
+                        "status": "Failed",
+                        "error": f"Copy failed: {exc}"[:8000],
+                        "updated_at": _now_iso(),
+                    },
+                )
+                _invalidate_project_files_cache(safe_project_id)
+                return
+
+            _upsert_processing_job(
+                safe_project_id,
+                {
+                    "job_id": dataset_id,
+                    "kind": "pointcloud",
+                    "file_name": safe_name,
+                    "status": "Processing",
+                    "stage": "Queued",
+                    "updated_at": _now_iso(),
+                },
+            )
+            _invalidate_project_files_cache(safe_project_id)
+
+            await asyncio.to_thread(
+                process_pointcloud_potree_job,
+                str(raw_target),
+                str(output_dir),
+                dataset_folder,
+                safe_project_id,
+                dataset_id,
+                safe_name,
+                "",
+            )
+
+    async def run_one_raster(source_file: Path, dataset_type: str) -> None:
+        async with semaphore:
+            normalized_type = _normalize_dataset_type(dataset_type, source_file.name)
+            raw_dir, processed_dir = get_project_dataset_type_dirs(safe_project_id, normalized_type)
+            safe_name = _safe_dataset_upload_basename(source_file.name)
+            ext = source_file.suffix.lower()
+            dataset_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(safe_name).stem).strip("-") or "dataset"
+            dataset_id = _safe_dataset_id(f"{dataset_stem[:40]}-{secrets.token_hex(6)}")
+            tile_output_folder = _safe_dataset_id(f"{dataset_stem[:56]}-{secrets.token_hex(4)}")
+            input_path = raw_dir / f"{tile_output_folder}{ext}"
+            output_tile_dir = processed_dir / tile_output_folder
+            output_tile_dir.mkdir(parents=True, exist_ok=True)
+
+            try:
+                shutil.copy2(source_file, input_path)
+            except OSError as exc:
+                _upsert_processing_job(
+                    safe_project_id,
+                    {
+                        "job_id": dataset_id,
+                        "kind": "dataset",
+                        "file_name": safe_name,
+                        "status": "Failed",
+                        "error": f"Copy failed: {exc}"[:8000],
+                        "updated_at": _now_iso(),
+                    },
+                )
+                _invalidate_project_files_cache(safe_project_id)
+                return
+
+            raw_rel = input_path.resolve().relative_to(Path(LOCAL_DATA_PATH).resolve()).as_posix()
+            pending_cog_path = (output_tile_dir / f"{tile_output_folder}.cog.tif").resolve()
+            _write_dataset_status(
+                safe_project_id,
+                dataset_id,
+                {
+                    "status": "Uploading",
+                    "updated_at": _now_iso(),
+                    "dataset_id": dataset_id,
+                    "dataset_name": safe_name,
+                    "tile_folder": tile_output_folder,
+                    "dataset_type": normalized_type,
+                    "layer_type": _raster_layer_type(normalized_type, safe_name),
+                    "month": "",
+                    "created_at": "",
+                    "raw_rel_path": raw_rel,
+                    "processed_size_bytes": str(input_path.stat().st_size),
+                    "processed_size": _format_size_bytes(input_path.stat().st_size),
+                    "cog_path": str(pending_cog_path),
+                    "manual_epsg": "",
+                    "applied_epsg": "",
+                },
+            )
+            _upsert_processing_job(
+                safe_project_id,
+                {
+                    "job_id": dataset_id,
+                    "kind": "dataset",
+                    "file_name": safe_name,
+                    "status": "Processing",
+                    "stage": "Queued",
+                    "updated_at": _now_iso(),
+                },
+            )
+            _invalidate_project_files_cache(safe_project_id)
+            await process_dataset_background(
+                safe_project_id,
+                dataset_id,
+                str(input_path),
+                safe_name,
+                str(output_tile_dir),
+                tile_output_folder,
+                "",
+            )
+
+    try:
+        scheduled: list[asyncio.Task[None]] = []
+        for task in tasks:
+            source = Path(str(task.source_folder or "")).expanduser().resolve()
+            if not source.is_dir():
+                continue
+            kind = str(task.kind or "").strip().lower()
+            files = _bulk_scan_files(source, kind)
+            if not files:
+                continue
+            if kind == "las":
+                for file_path in files:
+                    scheduled.append(asyncio.create_task(run_one_pointcloud(file_path)))
+            elif kind in {"ortho", "dtm", "dsm"}:
+                for file_path in files:
+                    scheduled.append(asyncio.create_task(run_one_raster(file_path, kind)))
+        if scheduled:
+            await asyncio.gather(*scheduled)
+    finally:
+        _invalidate_project_files_cache(safe_project_id)
+
+
+def _prepare_admin_manual_bulk_import(
+    tasks: list[AdminManualBulkImportTask],
+) -> tuple[list[AdminManualBulkImportTask], list[dict[str, object]], int]:
+    cleaned: list[AdminManualBulkImportTask] = []
+    preview: list[dict[str, object]] = []
+    file_count = 0
+    for item in tasks:
+        kind = str(item.kind or "").strip().lower()
+        if kind not in {"las", "ortho", "dtm", "dsm"}:
+            continue
+        folder = str(item.source_folder or "").strip().strip('"')
+        if not folder:
+            continue
+        source = Path(folder).expanduser()
+        if not source.is_dir():
+            preview.append(
+                {
+                    "kind": kind,
+                    "source_folder": folder,
+                    "status": "missing",
+                    "file_count": 0,
+                    "message": "Folder not found on server",
+                }
+            )
+            continue
+        files = _bulk_scan_files(source.resolve(), kind)
+        preview.append(
+            {
+                "kind": kind,
+                "source_folder": str(source.resolve()),
+                "status": "ready" if files else "empty",
+                "file_count": len(files),
+                "message": (
+                    f"Found {len(files)} file(s)"
+                    if files
+                    else f"No matching {kind.upper()} files in folder"
+                ),
+            }
+        )
+        if not files:
+            continue
+        cleaned.append(AdminManualBulkImportTask(source_folder=str(source.resolve()), kind=kind))
+        file_count += len(files)
+    return cleaned, preview, file_count
+
+
+def _queue_admin_manual_bulk_import(
+    *,
+    project_id: str,
+    payload: AdminManualBulkImportPayload,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    user = verify_admin(request)
+    safe_project_id = _safe_project_id(project_id)
+    _ensure_project_owner(int(user["id"]), safe_project_id)
+
+    cleaned, preview, file_count = _prepare_admin_manual_bulk_import(payload.tasks or [])
+    if not cleaned:
+        detail = "No importable files found. Check folder path and selected type."
+        if preview:
+            detail = "; ".join(
+                f"{row['source_folder']} ({row['message']})" for row in preview if isinstance(row.get("message"), str)
+            ) or detail
+        raise HTTPException(status_code=400, detail=detail)
+
+    background_tasks.add_task(
+        _admin_manual_bulk_import_background,
+        project_id=safe_project_id,
+        tasks=cleaned,
+        max_parallel=payload.max_parallel,
+    )
+    return {
+        "status": "success",
+        "message": f"Queued {file_count} file(s) from {len(cleaned)} folder task(s).",
+        "project_id": safe_project_id,
+        "task_count": len(cleaned),
+        "file_count": file_count,
+        "preview": preview,
+    }
+
+
+def _browse_server_folder(initial_path: str = "") -> str:
+    if os.name != "nt":
+        raise HTTPException(
+            status_code=501,
+            detail="Server folder picker works only when the backend runs on Windows.",
+        )
+    initial = str(initial_path or "").strip().strip('"')
+    if initial:
+        initial_path_obj = Path(initial).expanduser()
+        if initial_path_obj.is_dir():
+            initial = str(initial_path_obj.resolve())
+        elif initial_path_obj.parent.is_dir():
+            initial = str(initial_path_obj.parent.resolve())
+        else:
+            initial = ""
+    ps_script = (
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+        "$d.ShowNewFolderButton = $true; "
+        "$d.Description = 'Select bulk import source folder on this server'; "
+    )
+    if initial:
+        escaped = initial.replace("'", "''")
+        ps_script += f"$d.SelectedPath = '{escaped}'; "
+    ps_script += (
+        "$r = $d.ShowDialog(); "
+        "if ($r -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }"
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=408, detail="Folder picker timed out") from exc
+    if proc.returncode != 0 and not (proc.stdout or "").strip():
+        detail = (proc.stderr or proc.stdout or "Folder picker failed").strip()
+        raise HTTPException(status_code=500, detail=detail[:800])
+    folder = (proc.stdout or "").strip()
+    if not folder:
+        raise HTTPException(status_code=400, detail="No folder selected")
+    resolved = Path(folder).expanduser().resolve()
+    if not resolved.is_dir():
+        raise HTTPException(status_code=400, detail="Selected folder is not accessible")
+    return str(resolved)
+
+
+@app.post("/api/admin/locate-folder")
+async def admin_locate_folder(payload: AdminLocateFolderPayload, request: Request) -> dict[str, str]:
+    verify_admin(request)
+    folder_path = await run_in_threadpool(_browse_server_folder, payload.initial_path)
+    return {"status": "success", "folder_path": folder_path}
+
+
+@app.post("/api/admin/projects/{project_id}/manual-bulk-import")
+async def admin_manual_bulk_import(
+    project_id: str,
+    payload: AdminManualBulkImportPayload,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    return _queue_admin_manual_bulk_import(
+        project_id=project_id,
+        payload=payload,
+        request=request,
+        background_tasks=background_tasks,
+    )
+
+
+@app.post("/api/admin/manual-bulk-import")
+async def admin_manual_bulk_import_compat(
+    payload: AdminManualBulkImportPayload,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, object]:
+    project_id = str(payload.project_id or "").strip()
+    if not project_id:
+        raise HTTPException(status_code=400, detail="project_id is required")
+    return _queue_admin_manual_bulk_import(
+        project_id=project_id,
+        payload=payload,
+        request=request,
+        background_tasks=background_tasks,
+    )
+
+
 @app.post("/api/datasets/{project_id}/open-manual-folder")
 def open_manual_dataset_folder(project_id: str, request: Request) -> dict[str, str]:
     user = verify_admin(request)
@@ -7520,4 +7874,6 @@ def api_version() -> dict[str, str]:
     return {
         "version": PORTAL_VERSION,
         "dev_mode": "true" if str(os.getenv("DEV_MODE", "")).strip().lower() in {"1", "true", "yes", "on"} else "false",
+        "manual_bulk_import": "true",
+        "locate_folder": "true" if os.name == "nt" else "false",
     }

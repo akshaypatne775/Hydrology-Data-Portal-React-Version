@@ -170,3 +170,39 @@ export async function forceDeleteAdminDataset(projectId: string, datasetKey: str
     throw new Error(detail?.detail || `Force delete failed (${res.status})`)
   }
 }
+
+export type AdminManualBulkImportTask = {
+  source_folder: string
+  kind: 'las' | 'ortho' | 'dtm' | 'dsm'
+}
+
+export type AdminLocateSourceMode = 'folder' | 'file'
+
+export async function adminManualBulkImport(
+  projectId: string,
+  payload: { tasks: AdminManualBulkImportTask[]; max_parallel?: number },
+): Promise<{ status: string; message: string; project_id: string; task_count: number; file_count?: number }> {
+  return apiRequestJson('/api/admin/manual-bulk-import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      project_id: projectId,
+      ...payload,
+    }),
+  })
+}
+
+export async function adminLocateFolder(
+  initialPath = '',
+  options?: { kind?: AdminManualBulkImportTask['kind']; mode?: AdminLocateSourceMode },
+): Promise<{ status: string; folder_path: string }> {
+  return apiRequestJson('/api/admin/locate-folder', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      initial_path: initialPath,
+      kind: options?.kind || '',
+      mode: options?.mode || 'folder',
+    }),
+  })
+}

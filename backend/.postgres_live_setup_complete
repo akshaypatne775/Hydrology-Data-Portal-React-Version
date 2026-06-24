@@ -1,0 +1,4 @@
+database=droid_master_suite
+role=droid_live_app
+host=127.0.0.1
+port=5432

@@ -36,16 +36,21 @@ MIGRATION_TABLES = [
     "spatial_features",
     "camera_views",
     "activity_logs",
+    "catalog_assets",
+    "catalog_project_meta",
 ]
 
 
-def _load_env() -> None:
+def _load_env(env_file: Path | None = None) -> None:
+    env_paths = [env_file] if env_file is not None else []
+    env_paths.extend([BACKEND_DIR / ".env.live", BACKEND_DIR / ".env", REPO_ROOT / ".env"])
     if load_dotenv is not None:
-        load_dotenv(BACKEND_DIR / ".env", override=False)
-        load_dotenv(REPO_ROOT / ".env", override=False)
+        for path in env_paths:
+            if path and path.is_file():
+                load_dotenv(path, override=False)
         return
-    for env_path in (BACKEND_DIR / ".env", REPO_ROOT / ".env"):
-        if not env_path.is_file():
+    for env_path in env_paths:
+        if not env_path or not env_path.is_file():
             continue
         for raw_line in env_path.read_text(encoding="utf-8").splitlines():
             line = raw_line.strip()
@@ -91,6 +96,14 @@ def _connect_sqlite_readonly(sqlite_path: Path) -> sqlite3.Connection:
     return connection
 
 
+def _sqlite_table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
 def _sqlite_columns(connection: sqlite3.Connection, table_name: str) -> list[str]:
     rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
     if not rows:
@@ -115,13 +128,32 @@ def _postgres_columns(connection: Connection, table_name: str) -> list[str]:
     return [str(row[0]) for row in rows]
 
 
+def _postgres_table_exists(connection: Connection, table_name: str) -> bool:
+    row = connection.execute(
+        text("SELECT to_regclass(:table_name)"),
+        {"table_name": f"public.{table_name}"},
+    ).scalar_one()
+    return bool(row)
+
+
 def _target_has_data(connection: Connection) -> list[tuple[str, int]]:
     occupied: list[tuple[str, int]] = []
     for table_name in MIGRATION_TABLES:
+        if not _postgres_table_exists(connection, table_name):
+            continue
         count = int(connection.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar_one())
         if count:
             occupied.append((table_name, count))
     return occupied
+
+
+def _reset_target_tables(connection: Connection) -> None:
+    existing = [table_name for table_name in MIGRATION_TABLES if _postgres_table_exists(connection, table_name)]
+    if not existing:
+        return
+    tables_sql = ", ".join(existing)
+    connection.execute(text(f"TRUNCATE TABLE {tables_sql} RESTART IDENTITY CASCADE"))
+    print(f"[RESET] Truncated PostgreSQL tables: {', '.join(existing)}")
 
 
 def _geojson_geometry_text(raw_geojson: str, table_name: str, row_key: Any) -> str:
@@ -196,7 +228,7 @@ def _reset_serial_sequences(connection: Connection) -> None:
         )
 
 
-def run_migration(sqlite_path: Path, postgres_url: str, srid: int) -> None:
+def run_migration(sqlite_path: Path, postgres_url: str, srid: int, *, reset_target: bool = False) -> None:
     if not postgres_url:
         raise RuntimeError("POSTGRES_DATABASE_URL is required.")
     source_stat = sqlite_path.stat()
@@ -206,11 +238,19 @@ def run_migration(sqlite_path: Path, postgres_url: str, srid: int) -> None:
         f"mtime_ns={source_stat.st_mtime_ns} sha256={source_hash}"
     )
     sqlite_connection = _connect_sqlite_readonly(sqlite_path)
+    migration_tables = [
+        table_name
+        for table_name in MIGRATION_TABLES
+        if _sqlite_table_exists(sqlite_connection, table_name)
+    ]
+    skipped_tables = [table_name for table_name in MIGRATION_TABLES if table_name not in migration_tables]
+    if skipped_tables:
+        print(f"[SKIP] SQLite tables not present: {', '.join(skipped_tables)}")
     source_counts = {
         table_name: int(
             sqlite_connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
         )
-        for table_name in MIGRATION_TABLES
+        for table_name in migration_tables
     }
     postgres_engine = create_engine(postgres_url, future=True, pool_pre_ping=True)
     try:
@@ -223,11 +263,16 @@ def run_migration(sqlite_path: Path, postgres_url: str, srid: int) -> None:
                 occupied = _target_has_data(postgres_connection)
                 if occupied:
                     details = ", ".join(f"{table}={count}" for table, count in occupied)
-                    raise RuntimeError(
-                        "PostgreSQL target is not empty. Refusing migration to avoid duplicate/partial data. "
-                        f"Existing rows: {details}"
-                    )
-                for table_name in MIGRATION_TABLES:
+                    if reset_target:
+                        print(f"[WARN] Resetting existing Live PostgreSQL rows: {details}")
+                        _reset_target_tables(postgres_connection)
+                    else:
+                        raise RuntimeError(
+                            "PostgreSQL target is not empty. Refusing migration to avoid duplicate/partial data. "
+                            f"Existing rows: {details}. "
+                            "Re-run 7_Migrate_Live_SQLite_to_PostgreSQL.bat and choose Reset."
+                        )
+                for table_name in migration_tables:
                     sqlite_columns = _sqlite_columns(sqlite_connection, table_name)
                     postgres_columns = _postgres_columns(postgres_connection, table_name)
                     rows = sqlite_connection.execute(f"SELECT * FROM {table_name}").fetchall()
@@ -255,20 +300,21 @@ def run_migration(sqlite_path: Path, postgres_url: str, srid: int) -> None:
                             f"Row-count mismatch for {table_name}: "
                             f"SQLite={source_count}, PostgreSQL={target_count}"
                         )
-                spatial_count = source_counts["spatial_features"]
-                valid_geom_count = int(
-                    postgres_connection.execute(
-                        text(
-                            "SELECT COUNT(*) FROM spatial_features "
-                            "WHERE geom IS NOT NULL AND ST_IsValid(geom)"
-                        )
-                    ).scalar_one()
-                )
-                if valid_geom_count != spatial_count:
-                    raise RuntimeError(
-                        "PostGIS validation failed: "
-                        f"spatial_features={spatial_count}, valid_geom={valid_geom_count}"
+                if "spatial_features" in source_counts:
+                    spatial_count = source_counts["spatial_features"]
+                    valid_geom_count = int(
+                        postgres_connection.execute(
+                            text(
+                                "SELECT COUNT(*) FROM spatial_features "
+                                "WHERE geom IS NOT NULL AND ST_IsValid(geom)"
+                            )
+                        ).scalar_one()
                     )
+                    if valid_geom_count != spatial_count:
+                        raise RuntimeError(
+                            "PostGIS validation failed: "
+                            f"spatial_features={spatial_count}, valid_geom={valid_geom_count}"
+                        )
                 postgis_version = postgres_connection.execute(
                     text("SELECT postgis_full_version()")
                 ).scalar_one()
@@ -300,19 +346,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sqlite-path", type=Path, default=None, help="Optional explicit SQLite .db path. Opened read-only.")
     parser.add_argument("--postgres-url", default=None, help="Optional explicit PostgreSQL SQLAlchemy URL.")
     parser.add_argument("--srid", type=int, default=None, help="PostGIS SRID for migrated GeoJSON geometries.")
+    parser.add_argument("--env-file", type=Path, default=None, help="Optional env file, e.g. backend/.env.live")
+    parser.add_argument(
+        "--reset-target",
+        action="store_true",
+        help="Truncate existing PostgreSQL migration tables before importing SQLite data.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
-    _load_env()
     args = parse_args()
+    _load_env(args.env_file)
     sqlite_path = args.sqlite_path or _sqlite_path_from_url(os.getenv("SQLITE_DATABASE_URL", ""))
     postgres_url = args.postgres_url or os.getenv("POSTGRES_DATABASE_URL", "").strip()
     srid = args.srid or int(os.getenv("POSTGIS_SRID", "4326"))
     print(f"[SOURCE] SQLite read-only: {sqlite_path}")
     print("[TARGET] PostgreSQL/PostGIS target configured.")
     try:
-        run_migration(sqlite_path, postgres_url, srid)
+        run_migration(sqlite_path, postgres_url, srid, reset_target=args.reset_target)
     except Exception as exc:  # noqa: BLE001
         print(str(exc), file=sys.stderr)
         return 1

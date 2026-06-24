@@ -5,14 +5,18 @@ This machine contains two separate operating worlds for the same React + FastAPI
 LIVE CLOUDFLARE WORLD
 - Frontend: Vite preview on http://localhost:4173
 - Backend: FastAPI on http://127.0.0.1:8000
-- Database: Project_Data\droid_cloud_prod.db
+- Database: PostgreSQL/PostGIS database droid_master_suite
 - External Live release folder: D:\1_Portal_Workflows_development\DroidSurvair_Live_Release
 - Frontend bundle served from: D:\1_Portal_Workflows_development\DroidSurvair_Live_Release\frontend\dist_live
 - Backend code served from: D:\1_Portal_Workflows_development\DroidSurvair_Live_Release\backend
 - Project data remains in the Dev project folder: Project_Data
 - Start script: Droid_Environment_Manager\2_Start_Live_Portal.bat
+- Setup script: Droid_Environment_Manager\6_Setup_Live_PostgreSQL.bat
+- Migration script: Droid_Environment_Manager\7_Migrate_Live_SQLite_to_PostgreSQL.bat
+- Dev to Live copy: Droid_Environment_Manager\8_Copy_Dev_PostgreSQL_to_Live.bat
 - Cloudflare Tunnel should point to the frontend preview port 4173.
-- DEV_MODE=False tells the backend to use droid_cloud_prod.db.
+- DEV_MODE=False tells the backend to use droid_master_suite.
+- DB_BACKEND=postgres tells the Live backend to use PostgreSQL/PostGIS.
 
 DEV CURSOR WORLD
 - Frontend: Vite dev server on http://localhost:5173
@@ -21,15 +25,17 @@ DEV CURSOR WORLD
 - Start script: Droid_Environment_Manager\1_Start_Dev_Environment.bat
 - Setup script: Droid_Environment_Manager\4_Setup_Dev_PostgreSQL.bat
 - DB_BACKEND=postgres tells the Dev backend to use droid_master_suite_dev.
+- Dev PostgreSQL stays isolated while you work. Live PostgreSQL is not touched during Dev start.
+- Each Dev start refreshes droid_master_suite_dev from Live PostgreSQL droid_master_suite for testing.
 
 CRUCIAL DATA SAFETY RULE
 - NEVER copy Project_Data\droid_cloud_dev.db over Project_Data\droid_cloud_prod.db manually.
-- droid_cloud_prod.db is the live client database.
-- droid_cloud_dev.db is the preserved read-only source used for the completed Dev migration.
-- droid_master_suite_dev is the active Dev database and must never be connected to Live.
-- Copying dev DB back to live can overwrite real client data, users, sessions, spatial assignments, and activity logs.
+- droid_cloud_prod.db is the preserved read-only Live SQLite source used for the Live migration.
+- droid_master_suite_dev is the active Dev database used only by Dev backend on port 8001.
+- droid_master_suite is the active Live database used only by Live backend on port 8000.
+- Dev database changes stay in Dev only. Live client PostgreSQL is never overwritten by deploy.
+- Dev startup copies Live PostgreSQL into Dev PostgreSQL for safe testing with real client data.
 - Dev startup does not copy or open the Live SQLite database.
-- Deploy scripts copy code/builds to Live only; they must never copy Dev DB -> Live DB.
 - Legacy issues.db may remain as an old backup/source file. Do not treat it as the active live database after migration.
 
 DATABASE LOCK PROTECTION
@@ -52,12 +58,13 @@ UPDATES AND DEPLOYMENT
 - The client does not hard-refresh during active work.
 - Between 2:00 AM and 4:00 AM, the frontend may silently reload only after 30 minutes of user inactivity.
 - Backend/frontend logic changes go live through Droid_Environment_Manager\3_Nightly_Auto_Deploy.bat.
+- Database changes made in Dev stay in Dev unless you intentionally update Live client data outside deploy.
 - Manual Live restart only restarts the last deployed release copy; it should not pick up current dev source changes.
-- Database schema changes go live when the deployed backend starts and runs ensure_tables against droid_cloud_prod.db.
-- Dev testing data never moves to Live unless explicitly entered again in Live.
+- Database schema changes go live when the deployed backend starts and runs ensure_tables against droid_master_suite.
+- 8_Copy_Dev_PostgreSQL_to_Live.bat is manual only and should not be used for normal deploys.
 
 PORT SUMMARY
-- Live Cloudflare: Frontend 4173 -> Backend 8000 -> Project_Data\droid_cloud_prod.db
+- Live Cloudflare: Frontend 4173 -> Backend 8000 -> PostgreSQL/PostGIS droid_master_suite
 - Dev Cursor:      Frontend 5173 -> Backend 8001 -> PostgreSQL/PostGIS droid_master_suite_dev
 
 POINT CLOUD EPT CONVERSION

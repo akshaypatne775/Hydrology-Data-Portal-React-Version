@@ -2,6 +2,7 @@ import { apiRequest, apiRequestJson } from './api'
 const CACHE_TTL_MS = 30_000
 const projectFilesCache = new Map<string, { ts: number; data: ProjectFile[] }>()
 const projectJobsCache = new Map<string, { ts: number; data: ProjectJob[] }>()
+const catalogRevisionCache = new Map<string, number>()
 
 export type ProcessDatasetResponse = {
   status: string
@@ -36,6 +37,7 @@ export type DatasetStatusResponse = {
 export type ProjectJob = {
   job_id: string
   kind: string
+  dataset_type?: string
   file_name: string
   status: string
   updated_at?: string
@@ -44,6 +46,7 @@ export type ProjectJob = {
   eta_seconds?: string | number
   error?: string
   result_url?: string
+  viewer_type?: string
 }
 
 export type ProjectFile = {
@@ -194,6 +197,26 @@ export async function getDatasetStatus(
   )
 }
 
+export async function getCatalogRevision(projectId: string): Promise<number> {
+  const data = await apiRequestJson<{ revision: number }>(
+    `/api/projects/${encodeURIComponent(projectId)}/catalog-revision`,
+    { cache: 'no-store' },
+  )
+  const revision = Number(data.revision) || 0
+  catalogRevisionCache.set(projectId, revision)
+  return revision
+}
+
+export function getCachedCatalogRevision(projectId: string): number | null {
+  const revision = catalogRevisionCache.get(projectId)
+  return revision === undefined ? null : revision
+}
+
+export function notifyCatalogChanged(projectId: string): void {
+  catalogRevisionCache.delete(projectId)
+  invalidateProjectDataCache(projectId)
+}
+
 export async function getProjectJobs(projectId: string, forceRefresh = false): Promise<ProjectJob[]> {
   const cached = projectJobsCache.get(projectId)
   if (!forceRefresh && cached && Date.now() - cached.ts < CACHE_TTL_MS) {
@@ -222,6 +245,24 @@ export async function getProjectFiles(projectId: string, forceRefresh = false): 
   return next
 }
 
+export async function deleteCatalogAsset(projectId: string, assetId: string): Promise<void> {
+  const res = await apiRequest(
+    `/api/projects/${encodeURIComponent(projectId)}/catalog/${encodeURIComponent(assetId)}`,
+    { method: 'DELETE' },
+  )
+  if (!res.ok) {
+    let detail = ''
+    try {
+      const data = (await res.json()) as { detail?: string }
+      detail = data.detail ? `: ${data.detail}` : ''
+    } catch {
+      detail = ''
+    }
+    throw new Error(`Catalog delete failed (${res.status})${detail}`)
+  }
+  notifyCatalogChanged(projectId)
+}
+
 export async function deleteProjectFile(projectId: string, relPath: string): Promise<void> {
   const res = await apiRequest(`/api/projects/${encodeURIComponent(projectId)}/files`, {
     method: 'DELETE',
@@ -231,7 +272,7 @@ export async function deleteProjectFile(projectId: string, relPath: string): Pro
   if (!res.ok) {
     throw new Error(`Delete failed (${res.status})`)
   }
-  projectFilesCache.delete(projectId)
+  notifyCatalogChanged(projectId)
 }
 
 export async function updateDatasetMetadata(
@@ -404,4 +445,5 @@ export async function saveDatasetCropMaskDraw(
 export function invalidateProjectDataCache(projectId: string): void {
   projectFilesCache.delete(projectId)
   projectJobsCache.delete(projectId)
+  catalogRevisionCache.delete(projectId)
 }

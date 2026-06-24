@@ -35,11 +35,11 @@ if not exist "%LIVE_BACKEND_DIR%\app\main.py" (
 pushd "%LIVE_BACKEND_DIR%"
 call "%~dp0_Setup_EPT_Environment.bat"
 set DEV_MODE=False
-set DB_BACKEND=sqlite
+set DB_BACKEND=postgres
 set LOCAL_DATA_PATH=%PROJECT_DATA_DIR%
 set PORTAL_VERSION=live-%RANDOM%
 echo [INFO] Starting FastAPI on http://127.0.0.1:8000
-echo [INFO] Database: Project_Data\droid_cloud_prod.db
+echo [INFO] Database: PostgreSQL/PostGIS droid_master_suite
 echo [INFO] Backend code: "%LIVE_BACKEND_DIR%"
 echo [INFO] Project data: "%PROJECT_DATA_DIR%"
 echo.

@@ -11,6 +11,8 @@ set "DROID_OSGEO4W_BAT=C:\OSGeo4W\OSGeo4W.bat"
 set "DROID_OSGEO4W64_BAT=C:\OSGeo4W64\OSGeo4W.bat"
 set "DROID_QGIS_328_BAT=C:\Program Files\QGIS 3.28.0\OSGeo4W.bat"
 set "DROID_QGIS_322_BAT=C:\Program Files\QGIS 3.22.8\OSGeo4W.bat"
+set "DROID_QGIS_322_PROJ=C:\Program Files\QGIS 3.22.8\share\proj"
+set "DROID_CONDA_EPT_PROJ=%USERPROFILE%\miniforge3\envs\droid-ept\Library\share\proj"
 set "DROID_QGIS_UNTWINE=C:\Program Files\QGIS 3.22.8\apps\qgis-ltr\untwine.exe"
 set "DROID_EPT_FOUND=0"
 set "DROID_COPC_FOUND=0"
@@ -40,6 +42,18 @@ if defined OSGEO4W_BAT (
   )
   echo [OK] OSGeo shell:
   echo      %OSGEO4W_BAT%
+)
+
+if exist "%DROID_CONDA_EPT_PROJ%\proj.db" (
+  set "PROJ_LIB=%DROID_CONDA_EPT_PROJ%"
+  set "PROJ_DATA=%DROID_CONDA_EPT_PROJ%"
+  echo [OK] PROJ database:
+  echo      %DROID_CONDA_EPT_PROJ%
+) else if exist "%DROID_QGIS_322_PROJ%\proj.db" (
+  set "PROJ_LIB=%DROID_QGIS_322_PROJ%"
+  set "PROJ_DATA=%DROID_QGIS_322_PROJ%"
+  echo [OK] PROJ database:
+  echo      %DROID_QGIS_322_PROJ%
 )
 
 if not defined UNTWINE_EXE (
@@ -112,7 +126,7 @@ if defined PDAL_EXE (
   echo        Install OSGeo4W/PDAL with writers.copc, then set PDAL_EXE.
 )
 
-endlocal & set "PATH=%PATH%" & set "OSGEO4W_BAT=%OSGEO4W_BAT%" & set "UNTWINE_EXE=%UNTWINE_EXE%" & set "PDAL_EXE=%PDAL_EXE%" & set "DROID_COPC_FOUND=%DROID_COPC_FOUND%"
+endlocal & set "PATH=%PATH%" & set "OSGEO4W_BAT=%OSGEO4W_BAT%" & set "UNTWINE_EXE=%UNTWINE_EXE%" & set "PDAL_EXE=%PDAL_EXE%" & set "DROID_COPC_FOUND=%DROID_COPC_FOUND%" & set "PROJ_LIB=%PROJ_LIB%" & set "PROJ_DATA=%PROJ_DATA%"
 exit /b 0
 
 :TryCopcPdal

@@ -58,6 +58,7 @@ timeout /t %WAIT_SECONDS% /nobreak
 echo.
 echo [INFO] Starting nightly deployment at %DATE% %TIME%
 echo [%DATE% %TIME%] Nightly deployment started.>> "%LOG_FILE%"
+echo [INFO] Deploy updates Live code only. Live PostgreSQL client data is not modified.
 
 pushd "%FRONTEND_DIR%"
 set VITE_BACKEND_PORT=8000
@@ -91,7 +92,15 @@ if errorlevel 8 (
   exit /b 1
 )
 if exist "%BACKEND_DIR%\requirements.txt" copy /Y "%BACKEND_DIR%\requirements.txt" "%LIVE_BACKEND_DIR%\requirements.txt" >nul
-if exist "%BACKEND_DIR%\.env" copy /Y "%BACKEND_DIR%\.env" "%LIVE_BACKEND_DIR%\.env" >nul
+if exist "%BACKEND_DIR%\.env.live" (
+  copy /Y "%BACKEND_DIR%\.env.live" "%LIVE_BACKEND_DIR%\.env" >nul
+  echo [%DATE% %TIME%] Live backend env copied from backend\.env.live.>> "%LOG_FILE%"
+) else if exist "%BACKEND_DIR%\.env" (
+  copy /Y "%BACKEND_DIR%\.env" "%LIVE_BACKEND_DIR%\.env" >nul
+  echo [%DATE% %TIME%] WARN: backend\.env.live missing; copied dev .env to Live release.>> "%LOG_FILE%"
+  echo [WARN] backend\.env.live not found. Copied dev .env to Live release.
+  echo [WARN] Run 6_Setup_Live_PostgreSQL.bat before Live PostgreSQL cutover.
+)
 echo [%DATE% %TIME%] Live backend release copy refreshed.>> "%LOG_FILE%"
 
 echo [INFO] Stopping existing Live backend process on port 8000...

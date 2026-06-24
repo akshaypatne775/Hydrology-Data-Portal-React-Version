@@ -63,6 +63,72 @@
   cursor: pointer;
 }
 
+.upw-item--success {
+  border-color: rgba(20, 184, 166, 0.45);
+  background: #f0fdfa;
+}
+
+.upw-item--error {
+  border-color: rgba(220, 38, 38, 0.35);
+}
+
+.upw-item__percent {
+  color: #0e3e49;
+  font-size: 0.68rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.upw-pipeline {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.25rem;
+  margin-top: 0.45rem;
+}
+
+.upw-pipeline__step {
+  text-align: center;
+  border-radius: 999px;
+  padding: 0.18rem 0.2rem;
+  background: #e2e8f0;
+  color: #64748b;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.upw-pipeline__step--done {
+  background: rgba(20, 184, 166, 0.22);
+  color: #0f766e;
+}
+
+.upw-pipeline__step--active {
+  background: linear-gradient(90deg, #0e3e49 0%, #14b8a6 100%);
+  color: #fff;
+}
+
+.upw-fill--success {
+  background: linear-gradient(90deg, #0f766e 0%, #14b8a6 100%);
+}
+
+.upw-fill--error {
+  background: linear-gradient(90deg, #b91c1c 0%, #ef4444 100%);
+}
+
+.upw-stage {
+  margin: 0.4rem 0 0;
+  color: #0e3e49;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.upw-eta {
+  margin: 0.2rem 0 0;
+  color: #64748b;
+  font-size: 0.65rem;
+}
+
 .upw-track {
   height: 0.45rem;
   border-radius: 999px;

@@ -148,7 +148,7 @@ const BASE_MAPS: BaseMapConfig[] = [
   },
 ]
 
-const ORTHO_RENDERER_VERSION = 'edge-padding-v7'
+import { buildRasterTileUrl, isRasterDatasetType, ORTHO_RENDERER_VERSION } from '../../lib/rasterTileUrl'
 
 function getBaseMap(key: BaseMapKey): BaseMapConfig {
   return BASE_MAPS.find((map) => map.key === key) ?? BASE_MAPS[0]!
@@ -657,25 +657,7 @@ function buildTitilerTileUrl(layer: {
   rescaleMin?: number | string
   rescaleMax?: number | string
 }): string {
-  const sourcePath = String(layer.cogPath || '').trim()
-  if (!sourcePath) {
-    return toSameOriginBackendUrl(layer.url || '') || layer.url || ''
-  }
-  const params = new URLSearchParams()
-  params.set('url', sourcePath.replace(/\\/g, '/'))
-  const rasterType = String(layer.layerType || layer.datasetType || '').toLowerCase()
-  const min = Number(layer.rescaleMin)
-  const max = Number(layer.rescaleMax)
-  if (rasterType === 'ortho' || rasterType === 'orthomosaic') {
-    params.set('renderer', ORTHO_RENDERER_VERSION)
-    params.set('v', String(layer.cacheKey || layer.datasetId || layer.cogRelPath || '1'))
-    return `${API_BASE}/api/ortho-cog/tiles/WebMercatorQuad/{z}/{x}/{y}@1x?${params.toString()}`
-  }
-  if ((rasterType === 'dtm' || rasterType === 'dsm') && Number.isFinite(min) && Number.isFinite(max) && min !== max) {
-    params.set('rescale', `${min},${max}`)
-    return `${API_BASE}/api/dji-terra/tiles/WebMercatorQuad/{z}/{x}/{y}@1x?${params.toString()}`
-  }
-  return `${API_BASE}/api/titiler/tiles/WebMercatorQuad/{z}/{x}/{y}@1x?${params.toString()}`
+  return buildRasterTileUrl(layer)
 }
 
 function dynamicCogNativeZoom(tileUrl: string): number {
@@ -1952,7 +1934,11 @@ export function MapViewer({ projectId }: MapViewerProps) {
 
   const projectCogLayers = useMemo<ViewerLayer[]>(() => {
     const fromFiles = projectFiles
-      .filter((file) => file.layer_url && file.status === 'Web-Ready' && file.type === 'cog')
+      .filter((file) => {
+        if (file.status !== 'Web-Ready') return false
+        const datasetType = String(file.dataset_type || file.type).toLowerCase()
+        return Boolean(file.layer_url || file.cog_path || file.cog_rel_path) && isRasterDatasetType(datasetType)
+      })
       .map<ViewerLayer>((file) => {
         const bounds = parseWgs84Bounds(file.bounds_wgs84)
         const layerType = file.layer_type || (['dtm', 'dsm', 'ortho'].includes(String(file.dataset_type).toLowerCase())

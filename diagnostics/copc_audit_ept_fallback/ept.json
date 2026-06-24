@@ -1,0 +1,31 @@
+{
+"bounds": [-5.410000, -6.520000, -0.370000, 13.200000, 12.090000, 18.240000],
+"boundsConforming": [-5.410000, -6.520000, -0.370000, 13.200000, 4.800000, 4.550000],
+"dataType": "laszip",
+"hierarchyType": "json",
+"points": 50000,
+"span": 128,
+"version": "1.0.0",
+"schema": [
+	{"name": "X", "type": "float", "scale": 0.01, "offset": 3.895, "size": 8},
+	{"name": "Y", "type": "float", "scale": 0.01, "offset": 2.785, "size": 8},
+	{"name": "Z", "type": "float", "scale": 0.01, "offset": 8.935, "size": 8},
+	{"name": "Intensity", "type": "unsigned", "size": 2},
+	{"name": "ReturnNumber", "type": "unsigned", "size": 1},
+	{"name": "NumberOfReturns", "type": "unsigned", "size": 1},
+	{"name": "ScanChannel", "type": "unsigned", "size": 1},
+	{"name": "ScanDirectionFlag", "type": "unsigned", "size": 1},
+	{"name": "PointSourceId", "type": "unsigned", "size": 2},
+	{"name": "Classification", "type": "unsigned", "size": 1},
+	{"name": "EdgeOfFlightLine", "type": "unsigned", "size": 1},
+	{"name": "ScanAngleRank", "type": "float", "size": 4},
+	{"name": "UserData", "type": "unsigned", "size": 1},
+	{"name": "GpsTime", "type": "float", "size": 8},
+	{"name": "Red", "type": "unsigned", "size": 2},
+	{"name": "Green", "type": "unsigned", "size": 2},
+	{"name": "Blue", "type": "unsigned", "size": 2},
+	{"name": "ClassFlags", "type": "unsigned", "size": 1}
+],
+"srs": {
+}
+}

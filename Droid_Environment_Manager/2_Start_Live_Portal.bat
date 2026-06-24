@@ -93,7 +93,8 @@ if not exist "%LIVE_BACKEND_DIR%\app\main.py" (
     exit /b 1
   )
   if exist "%BACKEND_DIR%\requirements.txt" copy /Y "%BACKEND_DIR%\requirements.txt" "%LIVE_BACKEND_DIR%\requirements.txt" >nul
-  if exist "%BACKEND_DIR%\.env" copy /Y "%BACKEND_DIR%\.env" "%LIVE_BACKEND_DIR%\.env" >nul
+  if exist "%BACKEND_DIR%\.env.live" copy /Y "%BACKEND_DIR%\.env.live" "%LIVE_BACKEND_DIR%\.env" >nul
+  if exist "%BACKEND_DIR%\.env" if not exist "%LIVE_BACKEND_DIR%\.env" copy /Y "%BACKEND_DIR%\.env" "%LIVE_BACKEND_DIR%\.env" >nul
 ) else (
   echo [INFO] Using existing external Live backend copy: "%LIVE_BACKEND_DIR%"
   echo [INFO] Backend source changes will not appear here until Deploy refreshes this copy.
@@ -107,7 +108,7 @@ start "Droid Live Backend 8000" "%ComSpec%" /k call "%~dp0_Run_Live_Backend_8000
 
 echo.
 echo [READY] Live world started.
-echo        Backend:  127.0.0.1:8000  DB: Project_Data\droid_cloud_prod.db
+echo        Backend:  127.0.0.1:8000  DB: PostgreSQL/PostGIS droid_master_suite
 echo        Frontend: localhost:4173  Cloudflare tunnel target
 echo        Live release folder: "%LIVE_RELEASE_ROOT%"
 echo.

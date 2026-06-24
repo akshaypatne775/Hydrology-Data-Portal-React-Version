@@ -18,6 +18,26 @@ type Viewer3DSidebarProps = {
   onBack: () => void
 }
 
+function normalizeAssetLabel(value: string): string {
+  const text = String(value || '').trim().toLowerCase()
+  if (!text) return ''
+  return text
+    .replace(/\.(las|laz|copc\.laz)$/i, '')
+    .replace(/[-_][a-f0-9]{8,}$/i, '')
+    .replace(/[^a-z0-9]+/g, '')
+}
+
+function assetsMatch(left: Viewer3DAsset, right: Viewer3DAsset | null | undefined): boolean {
+  if (!right) return false
+  if (left.id && right.id && left.id === right.id) return true
+  const leftUrl = normalizeAssetKey(left)
+  const rightUrl = normalizeAssetKey(right)
+  if (leftUrl && rightUrl && leftUrl === rightUrl) return true
+  const leftName = normalizeAssetLabel(left.name)
+  const rightName = normalizeAssetLabel(right.name)
+  return Boolean(leftName && rightName && leftName === rightName)
+}
+
 export default function Viewer3DSidebar({
   pointClouds,
   models,
@@ -52,7 +72,7 @@ export default function Viewer3DSidebar({
             {section.assets.map((asset) => (
               <div
                 key={asset.id}
-                className={selectedAsset?.id === asset.id ? 'viewer-3d-sidebar__asset viewer-3d-sidebar__asset--active' : 'viewer-3d-sidebar__asset'}
+                className={assetsMatch(asset, selectedAsset) ? 'viewer-3d-sidebar__asset viewer-3d-sidebar__asset--active' : 'viewer-3d-sidebar__asset'}
               >
                 <button type="button" className="viewer-3d-sidebar__asset-main" onClick={() => onSelect(asset)}>
                   <i className={asset.viewer === 'potree' ? 'fas fa-cloud' : 'fas fa-cube'} aria-hidden />
