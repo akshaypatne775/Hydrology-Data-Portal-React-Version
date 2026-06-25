@@ -103,6 +103,16 @@
   overflow-y: auto;
 }
 
+.viewer-3d-sidebar__empty {
+  margin: 0;
+  padding: 0.85rem 0.65rem;
+  border: 1px dashed rgba(255, 255, 255, 0.22);
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
 .viewer-3d-sidebar__asset {
   display: flex;
   align-items: center;

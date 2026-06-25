@@ -11,10 +11,11 @@ import {
   normalizePointCloudViewerUrl,
   normalizedPointCloudName,
 } from '../../lib/pointCloudViewerUrl'
-import { adminLocateFolder, adminManualBulkImport, forceDeleteAdminDataset, updateAdminDatasetMetadata, type AdminManualBulkImportTask } from '../../services/adminService'
+import { adminLocateFolder, adminManualBulkImport, forceDeleteAdminDataset, reconcileProjectCatalog, updateAdminDatasetMetadata, type AdminManualBulkImportTask } from '../../services/adminService'
 import { logClientError } from '../../services/errorLogService'
 import { getPointCloudStatus } from '../../services/pointCloudService'
 import {
+  bulkDeleteCatalogDatasets,
   deleteProjectFile,
   deleteCatalogAsset,
   exportDatasetGrid,
@@ -32,6 +33,7 @@ import './DatasetsPanel.css'
 
 const ALLOWED_EXTENSIONS = new Set(['las', 'laz', 'tif', 'tiff', 'csv', 'zip', 'kml', 'geojson', 'dwg', 'pdf'])
 type DatasetType = 'Ortho' | 'DTM' | 'DSM' | 'Point Cloud' | '3D Model' | 'CSV' | 'Vector' | 'CAD' | 'Reports'
+const ALL_DATASET_TYPES: DatasetType[] = ['Ortho', 'DTM', 'DSM', 'Point Cloud', '3D Model', 'CSV', 'Vector', 'CAD', 'Reports']
 type DatasetStatus = 'Raw' | 'Processing' | 'Web-Ready' | 'Failed'
 
 type DatasetRow = {
@@ -343,6 +345,13 @@ function mapProjectFile(file: ProjectFile, projectId: string): DatasetRow {
       String(file.dataset_id || file.rel_path || file.name),
       String(file.name || file.dataset_id || 'Point Cloud'),
     ) || layerUrl
+  } else if (layerType === 'pointcloud' && !layerUrl && file.copc_url) {
+    layerUrl = normalizePointCloudViewerUrl(
+      file.copc_url,
+      projectId,
+      String(file.dataset_id || file.rel_path || file.name),
+      String(file.name || file.dataset_id || 'Point Cloud'),
+    ) || ''
   }
   const parseBounds = (value?: string): [number, number, number, number] | undefined => {
     if (!value) return undefined
@@ -584,6 +593,13 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
     date: new Date().toISOString().slice(0, 10),
     epsg: '',
   })
+  const [filterName, setFilterName] = useState('')
+  const [filterType, setFilterType] = useState<DatasetType | ''>('')
+  const [filterDate, setFilterDate] = useState('')
+  const [filterTime, setFilterTime] = useState('')
+  const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(new Set())
+  const [refreshingCatalog, setRefreshingCatalog] = useState(false)
+  const [bulkDeleting, setBulkDeleting] = useState(false)
   const loadGenerationRef = useRef(0)
   const catalogRevisionRef = useRef<number | null>(null)
 
@@ -618,6 +634,38 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       averageProgress,
     }
   }, [datasets, manualBulkProcessingRows])
+
+  const filteredDatasets = useMemo(() => {
+    const nameQuery = filterName.trim().toLowerCase()
+    return datasets.filter((row) => {
+      if (nameQuery) {
+        const haystack = `${row.fileName} ${row.datasetId || ''}`.toLowerCase()
+        if (!haystack.includes(nameQuery)) return false
+      }
+      if (filterType && row.type !== filterType) return false
+      if (filterDate) {
+        const raw = String(row.uploadDateRaw || '').trim()
+        if (!raw || !raw.startsWith(filterDate)) return false
+      }
+      if (filterTime) {
+        const raw = String(row.uploadDateRaw || '').trim()
+        if (!raw) return false
+        const parsed = new Date(raw)
+        if (Number.isNaN(parsed.getTime())) return false
+        const hhmm = `${String(parsed.getHours()).padStart(2, '0')}:${String(parsed.getMinutes()).padStart(2, '0')}`
+        if (hhmm !== filterTime) return false
+      }
+      return true
+    })
+  }, [datasets, filterDate, filterName, filterTime, filterType])
+
+  const deletableFilteredRows = useMemo(
+    () => filteredDatasets.filter((row) => Boolean(row.datasetId || row.relPath)),
+    [filteredDatasets],
+  )
+  const allFilteredSelected = deletableFilteredRows.length > 0
+    && deletableFilteredRows.every((row) => selectedRowIds.has(row.id))
+  const hasActiveFilters = Boolean(filterName.trim() || filterType || filterDate || filterTime)
 
   const loadRows = useCallback(async (currentProjectId: string, cancelledRef: () => boolean, forceRefresh = false) => {
     const generation = ++loadGenerationRef.current
@@ -683,6 +731,11 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
 
   useEffect(() => {
     if (!projectId) return
+    setSelectedRowIds(new Set())
+    setFilterName('')
+    setFilterType('')
+    setFilterDate('')
+    setFilterTime('')
     let cancelled = false
     setLoadingRows(true)
     void loadRows(projectId, () => cancelled, true)
@@ -869,6 +922,142 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
       await modal.alert('Delete failed', error instanceof Error ? error.message : 'Delete failed')
     }
   }, [loadRows, modal, projectId, removeLayer])
+
+  const purgeDeletedRows = useCallback((deletedKeys: Set<string>) => {
+    setDatasets((prev) => prev.filter((row) => {
+      const keys = [row.id, row.datasetId, row.relPath, row.fileName].filter(Boolean) as string[]
+      return !keys.some((key) => deletedKeys.has(key))
+    }))
+    setSelectedRowIds((prev) => {
+      const next = new Set(prev)
+      for (const rowId of prev) {
+        if (deletedKeys.has(rowId)) next.delete(rowId)
+      }
+      return next
+    })
+  }, [])
+
+  const deleteRowsFromCatalog = useCallback(async (rows: DatasetRow[]) => {
+    if (!projectId || rows.length === 0) return
+    const payload = rows.map((row) => ({
+      dataset_id: row.datasetId || '',
+      file_name: row.fileName,
+      rel_path: row.relPath || '',
+    }))
+    const result = await bulkDeleteCatalogDatasets(projectId, payload)
+    const deletedKeys = new Set<string>([
+      ...result.deleted,
+      ...rows.map((row) => row.id),
+      ...rows.map((row) => row.datasetId).filter(Boolean) as string[],
+    ])
+    rows.forEach((row) => {
+      const layer = buildActiveLayer(projectId, row)
+      if (layer) removeLayer(layer.id)
+    })
+    purgeDeletedRows(deletedKeys)
+    invalidateProjectDataCache(projectId)
+    await loadRows(projectId, () => false, true)
+    if (result.errors.length) {
+      await modal.alert(
+        'Partial delete',
+        `${result.deleted_count} deleted. ${result.errors.length} item(s) failed.`,
+      )
+    }
+    return result
+  }, [loadRows, modal, projectId, purgeDeletedRows, removeLayer])
+
+  const onRefreshCatalog = useCallback(async () => {
+    if (!projectId) return
+    setRefreshingCatalog(true)
+    try {
+      if (isAdmin) {
+        await reconcileProjectCatalog(projectId)
+      }
+      invalidateProjectDataCache(projectId)
+      setLoadingRows(true)
+      await loadRows(projectId, () => false, true)
+      setSelectedRowIds(new Set())
+    } catch (error) {
+      await modal.alert('Refresh failed', error instanceof Error ? error.message : 'Could not refresh catalog')
+    } finally {
+      setRefreshingCatalog(false)
+    }
+  }, [isAdmin, loadRows, modal, projectId])
+
+  const onToggleRowSelection = useCallback((rowId: string, checked: boolean) => {
+    setSelectedRowIds((prev) => {
+      const next = new Set(prev)
+      if (checked) next.add(rowId)
+      else next.delete(rowId)
+      return next
+    })
+  }, [])
+
+  const onToggleSelectAllFiltered = useCallback((checked: boolean) => {
+    if (!checked) {
+      setSelectedRowIds((prev) => {
+        const next = new Set(prev)
+        deletableFilteredRows.forEach((row) => next.delete(row.id))
+        return next
+      })
+      return
+    }
+    setSelectedRowIds((prev) => {
+      const next = new Set(prev)
+      deletableFilteredRows.forEach((row) => next.add(row.id))
+      return next
+    })
+  }, [deletableFilteredRows])
+
+  const onDeleteSelectedRows = useCallback(async () => {
+    if (!projectId || selectedRowIds.size === 0) return
+    const targets = filteredDatasets.filter((row) => selectedRowIds.has(row.id) && (row.datasetId || row.relPath))
+    if (!targets.length) return
+    const confirmed = await modal.confirm(
+      'Delete selected datasets',
+      `Delete ${targets.length} selected dataset(s)? This removes files and database catalog rows.`,
+    )
+    if (!confirmed) return
+    setBulkDeleting(true)
+    try {
+      await deleteRowsFromCatalog(targets)
+      setSelectedRowIds(new Set())
+    } catch (error) {
+      await modal.alert('Bulk delete failed', error instanceof Error ? error.message : 'Bulk delete failed')
+    } finally {
+      setBulkDeleting(false)
+    }
+  }, [deleteRowsFromCatalog, filteredDatasets, modal, projectId, selectedRowIds])
+
+  const onDeleteByType = useCallback(async () => {
+    if (!projectId || !filterType) return
+    const targets = filteredDatasets.filter((row) => row.type === filterType && (row.datasetId || row.relPath))
+    if (!targets.length) {
+      await modal.alert('Nothing to delete', `No deletable ${filterType} datasets match the current filters.`)
+      return
+    }
+    const confirmed = await modal.confirm(
+      `Delete all ${filterType}`,
+      `Delete ${targets.length} ${filterType} dataset(s) matching current filters? This cannot be undone.`,
+    )
+    if (!confirmed) return
+    setBulkDeleting(true)
+    try {
+      await deleteRowsFromCatalog(targets)
+      setSelectedRowIds(new Set())
+    } catch (error) {
+      await modal.alert('Type delete failed', error instanceof Error ? error.message : 'Type delete failed')
+    } finally {
+      setBulkDeleting(false)
+    }
+  }, [deleteRowsFromCatalog, filterType, filteredDatasets, modal, projectId])
+
+  const onClearFilters = useCallback(() => {
+    setFilterName('')
+    setFilterType('')
+    setFilterDate('')
+    setFilterTime('')
+  }, [])
 
   const getActionLabel = useCallback((row: DatasetRow) => {
     if (['cog', 'Ortho', 'DTM', 'DSM'].includes(String(row.layerType))) return `Show ${row.type} on Map`
@@ -1196,8 +1385,18 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
           <h3>Dataset Management</h3>
           <p>{canUploadData ? 'Upload from this panel with metadata and automatic EPSG detection.' : 'View and download project datasets from this panel.'}</p>
         </div>
-        {isAdmin ? (
         <div className="dsp-head__actions">
+          <button
+            type="button"
+            className="dsp-action dsp-action--secondary"
+            onClick={() => void onRefreshCatalog()}
+            disabled={!projectId || refreshingCatalog}
+            title="Reload catalog from database without browser refresh"
+          >
+            {refreshingCatalog ? 'Refreshing...' : 'Refresh Catalog'}
+          </button>
+          {isAdmin ? (
+            <>
           <button
             type="button"
             className="dsp-action dsp-action--sync"
@@ -1214,8 +1413,9 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
           >
             {syncingManual ? 'Syncing...' : 'Sync Manual Folders'}
           </button>
+            </>
+          ) : null}
         </div>
-        ) : null}
       </header>
 
       {isAdmin ? (
@@ -1472,10 +1672,78 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
         </div>
       ) : null}
 
+      <div className="dsp-filters">
+        <label>
+          Name
+          <input
+            type="search"
+            value={filterName}
+            onChange={(e) => setFilterName(e.target.value)}
+            placeholder="Search file or ID"
+          />
+        </label>
+        <label>
+          Type
+          <select value={filterType} onChange={(e) => setFilterType(e.target.value as DatasetType | '')}>
+            <option value="">All types</option>
+            {ALL_DATASET_TYPES.map((type) => (
+              <option key={type} value={type}>{type}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Date
+          <input type="date" value={filterDate} onChange={(e) => setFilterDate(e.target.value)} />
+        </label>
+        <label>
+          Time
+          <input type="time" value={filterTime} onChange={(e) => setFilterTime(e.target.value)} />
+        </label>
+        <div className="dsp-filters__actions">
+          <button
+            type="button"
+            className="dsp-action dsp-action--secondary"
+            onClick={onClearFilters}
+            disabled={!hasActiveFilters}
+          >
+            Clear Filters
+          </button>
+          <button
+            type="button"
+            className="dsp-action dsp-action--danger"
+            onClick={() => void onDeleteSelectedRows()}
+            disabled={!projectId || bulkDeleting || selectedRowIds.size === 0}
+          >
+            {bulkDeleting ? 'Deleting...' : `Delete Selected (${selectedRowIds.size})`}
+          </button>
+          <button
+            type="button"
+            className="dsp-action dsp-action--danger"
+            onClick={() => void onDeleteByType()}
+            disabled={!projectId || bulkDeleting || !filterType}
+            title={filterType ? `Delete all visible ${filterType} datasets` : 'Select a type filter first'}
+          >
+            Delete by Type
+          </button>
+        </div>
+        <p className="dsp-filters__meta">
+          Showing {filteredDatasets.length} of {datasets.length} datasets
+        </p>
+      </div>
+
       <div className="dsp-table-wrap">
         <table className="dsp-table">
           <thead>
             <tr>
+              <th className="dsp-table__select">
+                <input
+                  type="checkbox"
+                  aria-label="Select all filtered datasets"
+                  checked={allFilteredSelected}
+                  onChange={(e) => onToggleSelectAllFiltered(e.target.checked)}
+                  disabled={deletableFilteredRows.length === 0}
+                />
+              </th>
               <th>File Name</th>
               <th>Type</th>
               <th>Size</th>
@@ -1487,11 +1755,25 @@ export function DatasetsPanel({ projectId }: DatasetsPanelProps) {
           <tbody>
             {loadingRows && datasets.length === 0 ? (
               <tr>
-                <td colSpan={6}>Loading datasets...</td>
+                <td colSpan={7}>Loading datasets...</td>
               </tr>
             ) : null}
-            {datasets.map((row) => (
-              <tr key={row.id}>
+            {!loadingRows && filteredDatasets.length === 0 && datasets.length > 0 ? (
+              <tr>
+                <td colSpan={7}>No datasets match the current filters.</td>
+              </tr>
+            ) : null}
+            {filteredDatasets.map((row) => (
+              <tr key={row.id} className={selectedRowIds.has(row.id) ? 'dsp-table__row--selected' : undefined}>
+                <td className="dsp-table__select">
+                  <input
+                    type="checkbox"
+                    aria-label={`Select ${row.fileName}`}
+                    checked={selectedRowIds.has(row.id)}
+                    onChange={(e) => onToggleRowSelection(row.id, e.target.checked)}
+                    disabled={!row.datasetId && !row.relPath}
+                  />
+                </td>
                 <td>{row.fileName}</td>
                 <td>
                   <span>{row.type}</span>

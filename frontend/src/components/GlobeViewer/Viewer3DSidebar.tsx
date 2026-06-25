@@ -66,6 +66,11 @@ export default function Viewer3DSidebar({
       </header>
 
       <div className="viewer-3d-sidebar__list">
+        {sections.length === 0 ? (
+          <p className="viewer-3d-sidebar__empty">
+            No 3D assets loaded yet. Open a point cloud or 3D model from Data Catalog, or wait for processing to finish.
+          </p>
+        ) : null}
         {sections.map((section) => (
           <section key={section.id} className="viewer-3d-sidebar__section">
             <p className="viewer-3d-sidebar__section-title">{section.label}</p>

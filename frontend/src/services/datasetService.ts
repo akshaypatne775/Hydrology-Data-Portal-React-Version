@@ -263,6 +263,35 @@ export async function deleteCatalogAsset(projectId: string, assetId: string): Pr
   notifyCatalogChanged(projectId)
 }
 
+export type BulkDeleteDatasetItem = {
+  dataset_id?: string
+  file_name?: string
+  rel_path?: string
+}
+
+export async function bulkDeleteCatalogDatasets(
+  projectId: string,
+  items: BulkDeleteDatasetItem[],
+): Promise<{ deleted: string[]; errors: Array<{ key: string; error: string }>; deleted_count: number }> {
+  const res = await apiRequest(`/api/projects/${encodeURIComponent(projectId)}/bulk-delete-datasets`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items }),
+  })
+  if (!res.ok) {
+    let detail = ''
+    try {
+      const data = (await res.json()) as { detail?: string }
+      detail = data.detail ? `: ${data.detail}` : ''
+    } catch {
+      detail = ''
+    }
+    throw new Error(`Bulk delete failed (${res.status})${detail}`)
+  }
+  notifyCatalogChanged(projectId)
+  return res.json() as Promise<{ deleted: string[]; errors: Array<{ key: string; error: string }>; deleted_count: number }>
+}
+
 export async function deleteProjectFile(projectId: string, relPath: string): Promise<void> {
   const res = await apiRequest(`/api/projects/${encodeURIComponent(projectId)}/files`, {
     method: 'DELETE',

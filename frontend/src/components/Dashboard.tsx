@@ -265,7 +265,7 @@ function set3DAssetOnce(assets: Map<string, Project3DAsset>, asset: Project3DAss
 function project3DAssetsFromFiles(files: ProjectFile[], projectId: string): Project3DAsset[] {
   const assets = new Map<string, Project3DAsset>()
   for (const file of files) {
-    const rawUrl = String(file.viewer_url || file.layer_url || file.file_url || '').trim()
+    const rawUrl = String(file.viewer_url || file.layer_url || file.copc_url || file.file_url || '').trim()
     let url = toSameOriginBackendUrl(rawUrl) || rawUrl
     const normalizedType = String(file.type || file.dataset_type || file.layer_type || '').toLowerCase()
     const signature = [
@@ -296,7 +296,7 @@ function project3DAssetsFromFiles(files: ProjectFile[], projectId: string): Proj
         : null
     if (!viewer) continue
     if (!url && viewer === 'potree') {
-      const copcCandidate = String(file.cog_rel_path || file.rel_path || file.raw_rel_path || '').trim()
+      const copcCandidate = String(file.copc_url || file.cog_rel_path || file.rel_path || file.raw_rel_path || '').trim()
       if (copcCandidate.toLowerCase().endsWith('.copc.laz')) {
         const copcApi = copcCandidate.startsWith('/api/')
           ? copcCandidate
@@ -504,7 +504,7 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
         const signature = [file.kind, file.type, file.layer_type, file.dataset_type, file.name]
           .map((value) => String(value || '').toLowerCase())
           .join(' ')
-        const rawUrl = String(file.layer_url || file.file_url || '').trim()
+        const rawUrl = String(file.viewer_url || file.layer_url || file.copc_url || '').trim()
         const hasViewerUrl = rawUrl && !isRawPointCloudAssetUrl(rawUrl)
         return (
           !hasViewerUrl &&
@@ -512,7 +512,8 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
             signature.includes('pointcloud') ||
             signature.includes('point cloud') ||
             String(file.name || '').toLowerCase().endsWith('.las') ||
-            String(file.name || '').toLowerCase().endsWith('.laz')
+            String(file.name || '').toLowerCase().endsWith('.laz') ||
+            String(file.copc_url || '').toLowerCase().includes('.copc.laz')
           )
         )
       })
@@ -550,15 +551,25 @@ export function Dashboard({ user, onLogout }: DashboardProps) {
         }
       }))
       const nextAssets = Array.from(combined.values())
-      setProject3DAssets(nextAssets)
-      if (options?.preserveSelection) {
-        setSelected3DAsset((current) => {
-          if (!current) return current
-          return nextAssets.find((asset) => assetsReferSame3DItem(asset, current)) ?? current
-        })
-      }
+      setProject3DAssets((current) => {
+        const merged = new Map<string, Project3DAsset>()
+        if (options?.preserveSelection) {
+          for (const asset of current) set3DAssetOnce(merged, asset)
+        }
+        for (const asset of nextAssets) set3DAssetOnce(merged, asset)
+        const result = Array.from(merged.values())
+        if (options?.preserveSelection) {
+          setSelected3DAsset((selected) => {
+            if (!selected) return selected
+            return result.find((asset) => assetsReferSame3DItem(asset, selected)) ?? selected
+          })
+        }
+        return result
+      })
     } catch {
-      setProject3DAssets([])
+      if (!options?.preserveSelection) {
+        setProject3DAssets([])
+      }
     }
   }, [selectedProject?.id])
 

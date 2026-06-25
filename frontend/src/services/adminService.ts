@@ -206,3 +206,11 @@ export async function adminLocateFolder(
     }),
   })
 }
+
+export async function reconcileProjectCatalog(
+  projectId: string,
+): Promise<{ status: string; revision?: number; [key: string]: unknown }> {
+  return apiRequestJson(`/api/admin/catalog/${encodeURIComponent(projectId)}/reconcile`, {
+    method: 'POST',
+  })
+}

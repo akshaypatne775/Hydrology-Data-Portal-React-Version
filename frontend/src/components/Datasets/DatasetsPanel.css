@@ -188,6 +188,64 @@
   padding: 0.45rem 0.6rem;
 }
 
+.dsp-filters {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.4fr) minmax(120px, 0.9fr) minmax(120px, 0.8fr) minmax(110px, 0.7fr) auto;
+  gap: 0.65rem;
+  align-items: end;
+  border: 1px solid #dbe4ee;
+  border-radius: 8px;
+  background: #f8fafb;
+  padding: 0.75rem;
+}
+
+.dsp-filters label {
+  display: grid;
+  gap: 0.28rem;
+  font-size: 0.72rem;
+  color: #0e3e49;
+  font-weight: 700;
+}
+
+.dsp-filters input,
+.dsp-filters select {
+  min-height: 2rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 0.35rem 0.55rem;
+  font-size: 0.78rem;
+  background: #fff;
+}
+
+.dsp-filters__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.dsp-filters__meta {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.72rem;
+  color: #64748b;
+}
+
+.dsp-table__select {
+  width: 2.4rem;
+  text-align: center;
+}
+
+.dsp-table__select input[type="checkbox"] {
+  width: 0.95rem;
+  height: 0.95rem;
+  cursor: pointer;
+}
+
+.dsp-table__row--selected td {
+  background: rgba(14, 62, 73, 0.06);
+}
+
 .dsp-table-wrap {
   position: relative;
   border: 1px solid #dbe4ee;

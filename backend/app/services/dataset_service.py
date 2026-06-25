@@ -22,6 +22,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 from app.core.config import *
+from app.core.utils import *
+from app.core.paths import *
+from app.services.raster import *
 from app.models.auth import *
 from app.models.projects import *
 from app.models.datasets import *
@@ -310,45 +313,4 @@ def _delete_dataset_artifacts(project_id: str, dataset_id: str, st: dict[str, st
     _invalidate_project_files_cache(project_id)
     return removed
 
-@app.delete("/api/admin/projects/{project_id}/datasets/{dataset_name:path}")
-def admin_delete_dataset_by_name(
-    project_id: str,
-    dataset_name: str,
-    request: Request,
-    admin_user: dict[str, str | int] = Depends(verify_admin),
-) -> dict[str, str | int]:
-    safe_project_id = _safe_project_id(project_id)
-    safe_dataset_name = os.path.basename(dataset_name.replace("\\", "/").strip().strip("/"))
-    result = _purge_catalog_dataset(safe_project_id, safe_dataset_name)
-    if int(result.get("removed_paths", 0)) <= 0:
-        local_root = Path(LOCAL_DATA_PATH).resolve()
-        removed = 0
-        processed_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "processed"
-        raw_root = Path(LOCAL_DATA_PATH) / "projects" / safe_project_id / "raw"
-        candidate_paths = [
-            processed_root / safe_dataset_name,
-            processed_root / "pointclouds" / safe_dataset_name,
-            processed_root / "3dmodel" / safe_dataset_name,
-            raw_root / safe_dataset_name,
-            raw_root / f"{safe_project_id}__{safe_dataset_name}",
-            Path(LOCAL_DATA_PATH) / "pointclouds" / safe_project_id / safe_dataset_name,
-        ]
-        normalized_target = _safe_export_stem(safe_dataset_name).lower()
-        for root in (processed_root, processed_root / "pointclouds", processed_root / "3dmodel", raw_root):
-            if not root.is_dir():
-                continue
-            for child in root.iterdir():
-                if _safe_export_stem(child.name).lower() == normalized_target:
-                    candidate_paths.append(child)
-        for candidate in candidate_paths:
-            resolved = candidate.resolve()
-            if resolved.exists() and local_root in resolved.parents:
-                removed += _safe_remove_dataset_path(resolved)
-        if removed == 0 and not catalog_service.catalog_db_enabled():
-            raise HTTPException(status_code=404, detail="Dataset not found")
-        result["removed_paths"] = int(result.get("removed_paths", 0)) + removed
-    return {
-        "status": "success",
-        "dataset_id": safe_dataset_name,
-        "removed_paths": int(result.get("removed_paths", 0)),
-    }
+
